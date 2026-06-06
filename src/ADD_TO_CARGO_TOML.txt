@@ -1,0 +1,4 @@
+Add this line to your Cargo.toml under [dependencies]:
+
+    rpassword = "7"
+

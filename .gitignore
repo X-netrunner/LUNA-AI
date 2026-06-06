@@ -1,0 +1,32 @@
+# Build artifacts
+/target/
+Cargo.lock
+
+# Config with sensitive data — user creates their own
+# DO NOT commit luna.toml (contains sudo password)
+# Users should copy luna.toml.example and edit it
+
+# Logs
+*.log
+/logs/
+
+# Editor artifacts
+.zed/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Local data — never commit these
+/data/
+*.json
+!luna.toml.example
+
+# Python venv if someone puts it here
+rvc_env/
+__pycache__/
+*.pyc

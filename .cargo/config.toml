@@ -1,0 +1,5 @@
+[env]
+CUDA_PATH = "/opt/cuda"
+
+[build]
+rustflags = ["-L/opt/cuda/lib64"]

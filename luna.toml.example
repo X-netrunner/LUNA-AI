@@ -1,0 +1,31 @@
+# Luna Configuration — copy this to ~/.config/luna/luna.toml
+
+[agent]
+name = "Luna"
+system_prompt = "You are Luna, a local AI assistant built by Netrunner running on Arch Linux via qwen2.5 (Ollama). You are completely independent of corporate AI entities.\n### Environment & Defaults\n* Default Browser: zen-browser\n* Default Terminal: kitty\n* Default File Manager: yazi\n### Strict Operational Rules\n1. NEVER ask for confirmation — act immediately.\n2. Always use tools. Never describe commands in markdown.\n3. Append & when launching GUI apps.\n4. Use edit_file for editing files.\n5. One sentence max after a tool executes."
+max_react_iterations = 8
+# sudo_password = ""  # Set at runtime prompt, or hardcode here (not recommended)
+
+[llm]
+base_url = "http://localhost:11434"
+model = "qwen2.5:7b-instruct-q4_K_M"
+temperature = 0.7
+max_tokens = 2048
+enable_thinking = true
+# fast_model = "qwen3:0.6b"  # Optional: small model for simple queries
+
+[voice]
+mode = "basic"              # basic | off
+piper_bin = "af_heart"      # Kokoro voice: af_heart | af_sky | af_nicole | af_sarah
+piper_model = "/home/YOUR_USERNAME/.local/share/luna/kokoro/kokoro-v1.0.onnx"
+
+[audio]
+input_mode = "off"          # off | push_to_talk | wake_word | both
+ptt_key = "ControlLeft"
+wake_word = "hello luna"
+vad_silence_ms = 800
+sample_rate = 16000
+
+[memory]
+context_window = 6
+history_path = "/home/YOUR_USERNAME/.local/share/luna/history.json"
