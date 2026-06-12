@@ -13,6 +13,7 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 - **Model escalation** — fast model for simple queries, full model for complex tasks
 - **Desktop integration** — opens apps, reads/writes files, sends notifications, controls clipboard
 - **Web fetch** — fetches and reads web pages for current information
+- **Documentation** — Handled by claude or gemini , so that anyone can understand the flow
 
 ## Tools
 
