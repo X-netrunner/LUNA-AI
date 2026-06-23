@@ -3,10 +3,12 @@
 //! Trimmed to 11 tools — enough for a 7B model to use reliably.
 //! Redundant tools (find_file, list_dir, find_binary, open) removed;
 //! run_shell handles all of those.
-
 pub mod desktop;
 pub mod filesystem;
+pub mod learn;
+pub mod proactive;
 pub mod shell;
+pub mod todoist;
 pub mod web;
 
 use crate::llm::ollama::{ToolCall, ToolDef, ToolFunction};
@@ -235,6 +237,65 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 }),
             },
         },
+
+       ToolDef {
+           r#type: "function".into(),
+           function: ToolFunction {
+               name: "todoist_list".into(),
+               description: "List active tasks from the user's Todoist app. Use when asked \
+                             about tasks, todos, or what's on their schedule.".into(),
+               parameters: json!({
+                   "type": "object",
+                   "properties": {
+                       "filter": {
+                           "type": "string",
+                           "description": "Optional Todoist filter query, e.g. 'today', 'overdue', \
+                                          'p1' for priority 1. Leave empty for all active tasks."
+                       }
+                   },
+                   "required": []
+               }),
+           },
+       },
+       ToolDef {
+           r#type: "function".into(),
+           function: ToolFunction {
+               name: "todoist_add".into(),
+               description: "Add a new task to the user's Todoist app.".into(),
+               parameters: json!({
+                   "type": "object",
+                   "properties": {
+                       "content": {
+                           "type": "string",
+                           "description": "The task text"
+                       },
+                       "due": {
+                           "type": "string",
+                           "description": "Optional due date in natural language, e.g. 'tomorrow', 'next monday', 'jun 25'"
+                       }
+                   },
+                   "required": ["content"]
+               }),
+           },
+       },
+       ToolDef {
+           r#type: "function".into(),
+           function: ToolFunction {
+               name: "todoist_complete".into(),
+               description: "Mark a Todoist task as complete by matching its text.".into(),
+               parameters: json!({
+                   "type": "object",
+                   "properties": {
+                       "task": {
+                           "type": "string",
+                           "description": "Text to match against task content, e.g. 'buy milk'"
+                       }
+                   },
+                   "required": ["task"]
+               }),
+           },
+       },
+
         ToolDef {
             r#type: "function".into(),
             function: ToolFunction {
@@ -250,6 +311,24 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                         }
                     },
                     "required": ["scope"]
+                }),
+            },
+        },
+
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "learn_topic".into(),
+                description: "Search the web AND fetch the most relevant page in one step.                               Use this instead of calling web_search and fetch_page separately —                               it's more reliable. After it returns, call `remember` to save                               anything worth keeping permanently.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "What to learn about, e.g. 'Nothing Phone 3 specs'"
+                        }
+                    },
+                    "required": ["topic"]
                 }),
             },
         },
@@ -404,6 +483,37 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             pm.forget(keyword)
         }
 
+        "todoist_list" => {
+            let token = config.todoist.api_token.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Todoist not configured — add api_token to luna.toml under [todoist]"
+                )
+            })?;
+            let filter = args["filter"].as_str().filter(|s| !s.is_empty());
+            crate::tools::todoist::list_tasks(token, filter).await
+        }
+
+        "todoist_add" => {
+            let token = config
+                .todoist
+                .api_token
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Todoist not configured"))?;
+            let content = args["content"].as_str().unwrap_or("");
+            let due = args["due"].as_str().filter(|s| !s.is_empty());
+            crate::tools::todoist::add_task(token, content, due).await
+        }
+
+        "todoist_complete" => {
+            let token = config
+                .todoist
+                .api_token
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Todoist not configured"))?;
+            let task = args["task"].as_str().unwrap_or("");
+            crate::tools::todoist::complete_task(token, task).await
+        }
+
         "list_memories" => {
             let pm = crate::memory::permanent::PermanentMemory::load()?;
             Ok(pm.list())
@@ -439,7 +549,13 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             Ok(format!("Indexed: {}", summary.join(", ")))
         }
 
-        unknown => {
+        "learn_topic" => {
+            let topic = args["topic"].as_str().unwrap_or("");
+            if topic.is_empty() { anyhow::bail!("No topic provided"); }
+            learn::learn(topic, sudo_pass).await
+        }
+
+                unknown => {
             tracing::warn!("Unknown tool: {}", unknown);
             Ok(format!("Error: unknown tool '{}'", unknown))
         }

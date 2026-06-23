@@ -36,7 +36,7 @@ pub async fn synthesize_to_file(text: &str, config: &crate::config::LunaConfig) 
 
     let python = dirs::home_dir()
         .unwrap_or_default()
-        .join(".local/share/luna/rvc_env/bin/python3")
+        .join(".local/share/luna/tts_env/bin/python3")
         .to_string_lossy()
         .into_owned();
 

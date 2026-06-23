@@ -141,95 +141,126 @@ enum ControlFlow {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub async fn run(config: &LunaConfig) -> Result<()> {
-    run_text(config).await
-    //run_hybrid(config).await
+    crate::tools::proactive::spawn(config);
+
+    match config.audio.input_mode {
+        crate::config::InputMode::WakeWord | crate::config::InputMode::Both => {
+            run_hybrid(config).await
+        }
+        _ => run_text(config).await,
+    }
 }
 
-/// Process a single voice interaction (listen -> transcribe -> react -> speak).
-/// Returns ControlFlow for the next step.
-async fn process_voice_interaction(
+/// Run an extended voice session. After the wake word fires once, Luna keeps
+/// listening for follow-up commands WITHOUT requiring the wake word again.
+/// Session ends on goodbye/stop phrase or ~30s silence timeout.
+async fn run_voice_session(
     config: &LunaConfig,
     stt: &crate::stt::whisper::WhisperStt,
     memory: &mut Memory,
     react: &ReactLoop<'_>,
     system_prompt: &str,
+    inline_command: Option<String>,
 ) -> Result<ControlFlow> {
-    // ── Phase 2: wake word heard — prompt and record command ──────────────
-    println!("  [Wake word detected — listening for command]");
-    tts::speak("Yes?", &config.voice.mode).await.ok();
+    let mut pending = inline_command;
+    let mut turn: u32 = 0;
 
-    let wav_path = match crate::audio::capture::record_until_silence(
-        config.audio.sample_rate,
-        config.audio.vad_silence_ms,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::debug!("No command audio: {}", e);
-            return Ok(ControlFlow::Continue);
-        }
-    };
-
-    let input = match stt.transcribe(&wav_path).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Transcription failed: {}", e);
-            tokio::fs::remove_file(&wav_path).await.ok();
-            return Ok(ControlFlow::Continue);
-        }
-    };
-    tokio::fs::remove_file(&wav_path).await.ok();
-
-    if input.is_empty() || looks_like_artifact(&input) {
-        return Ok(ControlFlow::Continue);
-    }
-
-    println!("  You: {}", input);
-
-    let input_lower = input.to_lowercase();
-    let input_trim = input_lower.trim();
-
-    match input_trim {
-        "exit" | "quit" | "goodbye" | "goodbye luna" => {
-            tts::speak("Shutting down.", &config.voice.mode).await.ok();
-            return Ok(ControlFlow::Exit);
-        }
-        "clear" | "clear memory" => {
-            memory.clear()?;
-            tts::speak("Memory cleared.", &config.voice.mode).await.ok();
-            return Ok(ControlFlow::Continue);
-        }
-        "use text" | "text mode" | "use text mode" | "switch to text" => {
-            tts::speak("Switching to text mode.", &config.voice.mode)
-                .await
-                .ok();
-            return Ok(ControlFlow::SwitchToText);
-        }
-        "use voice" | "voice mode" | "use voice mode" | "switch to voice" => {
-            tts::speak("Switching to voice mode.", &config.voice.mode)
-                .await
-                .ok();
-            return Ok(ControlFlow::SwitchToVoice);
-        }
-        _ => {}
-    }
-
-    // ── Phase 3: respond ──────────────────────────────────────────────────
-    print!("  Luna: ");
-    io::stdout().flush().ok();
-
-    match react.run(&input, memory, system_prompt).await {
-        Ok(response) => {
-            println!("{}", response);
-            if config.voice.mode != VoiceMode::Off {
-                tts::speak(&response, &config.voice.mode).await.ok();
+    loop {
+        let input = if let Some(cmd) = pending.take() {
+            if turn == 0 {
+                println!("  [Inline command detected]");
+                tts::speak("Mmm?", &config.voice.mode).await.ok();
             }
+            cmd
+        } else {
+            if turn == 0 {
+                println!("  [Wake word detected — listening for command]");
+                tts::speak("Yes?", &config.voice.mode).await.ok();
+            } else {
+                println!("  [Session active — say \"that's all\" to end]");
+            }
+
+            let wav_path = match crate::audio::capture::record_until_silence(
+                config.audio.sample_rate,
+                config.audio.vad_silence_ms,
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::debug!("Voice session listen ended: {}", e);
+                    if turn > 0 {
+                        println!(
+                            "  [Session ended — say \"{}\" to wake me again]",
+                            config.audio.wake_word
+                        );
+                    }
+                    return Ok(ControlFlow::Continue);
+                }
+            };
+
+            match stt.transcribe(&wav_path).await {
+                Ok(t) => { tokio::fs::remove_file(&wav_path).await.ok(); t }
+                Err(e) => {
+                    tracing::error!("Transcription failed: {}", e);
+                    tokio::fs::remove_file(&wav_path).await.ok();
+                    if turn == 0 { return Ok(ControlFlow::Continue); }
+                    continue;
+                }
+            }
+        };
+
+        if input.is_empty() || looks_like_artifact(&input) {
+            if turn == 0 { return Ok(ControlFlow::Continue); }
+            continue;
         }
-        Err(e) => eprintln!("\n  Error: {}", e),
+
+        turn += 1;
+        println!("  You: {}", input);
+
+        let input_lower = input.to_lowercase();
+        let input_trim = input_lower.trim();
+
+        match input_trim {
+            "exit" | "quit" | "goodbye" | "goodbye luna" => {
+                tts::speak("Shutting down.", &config.voice.mode).await.ok();
+                return Ok(ControlFlow::Exit);
+            }
+            "clear" | "clear memory" => {
+                memory.clear()?;
+                tts::speak("Memory cleared.", &config.voice.mode).await.ok();
+                continue;
+            }
+            "use text" | "text mode" | "switch to text" => {
+                tts::speak("Switching to text mode.", &config.voice.mode).await.ok();
+                return Ok(ControlFlow::SwitchToText);
+            }
+            "use voice" | "voice mode" | "switch to voice" => {
+                tts::speak("Already in voice mode.", &config.voice.mode).await.ok();
+                continue;
+            }
+            "that's all" | "thats all" | "stop listening" | "end session" | "never mind" => {
+                tts::speak("Okay.", &config.voice.mode).await.ok();
+                return Ok(ControlFlow::Continue);
+            }
+            _ => {}
+        }
+
+        print!("  Luna: ");
+        io::stdout().flush().ok();
+
+        match react.run(&input, memory, system_prompt).await {
+            Ok(response) => {
+                println!("{}", response);
+                if config.voice.mode != VoiceMode::Off {
+                    tts::speak(&response, &config.voice.mode).await.ok();
+                }
+            }
+            Err(e) => eprintln!("\n  Error: {}", e),
+        }
+        println!();
+        // loop — session stays open for follow-up
     }
-    println!();
-    Ok(ControlFlow::Continue)
 }
 
 // ── Text loop ─────────────────────────────────────────────────────────────────
@@ -460,8 +491,8 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
             // The background task detected the wake word and sent () here.
             // We only act on it when not in pure text mode.
             _ = wake_rx.recv(), if mode != RunMode::Text => {
-                match process_voice_interaction(
-                    config, &stt, &mut memory, &react, &system_prompt,
+                match run_voice_session(
+                    config, &stt, &mut memory, &react, &system_prompt, None,
                 ).await? {
                     ControlFlow::Exit => return Ok(()),
                     ControlFlow::SwitchToText => {
