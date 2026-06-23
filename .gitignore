@@ -30,3 +30,7 @@ Thumbs.db
 rvc_env/
 __pycache__/
 *.pyc
+
+# Scratch/upload artifacts
+*.zip
+ADD_TO_CARGO_TOML.txt
