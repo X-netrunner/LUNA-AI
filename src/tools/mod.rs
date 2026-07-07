@@ -7,6 +7,7 @@ pub mod desktop;
 pub mod filesystem;
 pub mod learn;
 pub mod proactive;
+pub mod security;
 pub mod shell;
 pub mod todoist;
 pub mod web;
@@ -69,6 +70,110 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                         }
                     },
                     "required": ["query"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "nmap_scan".into(),
+                description: "Run an nmap scan against a target (IP, hostname, or CIDR range). \
+                              Use for network reconnaissance, CTF challenges, or auditing your \
+                              own network. Only scan targets you own or have permission to test.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "description": "IP, hostname, or CIDR range, e.g. '192.168.1.1' or '10.0.0.0/24'"
+                        },
+                        "scan_type": {
+                            "type": "string",
+                            "enum": ["quick", "full", "ports", "os", "udp"],
+                            "description": "quick=fast top ports, full=version+script detection, \
+                                           ports=all 65535 ports, os=OS detection (needs sudo), \
+                                           udp=top 20 UDP ports"
+                        }
+                    },
+                    "required": ["target", "scan_type"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "analyze_pcap".into(),
+                description: "Analyze a packet capture (.pcap/.pcapng) file using tshark. \
+                              Use for CTF forensics challenges or investigating captured traffic.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path to the pcap file" },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["summary", "talkers", "protocols", "http", "dns", "creds"],
+                            "description": "summary=file info, talkers=top IP conversations, \
+                                           protocols=protocol breakdown, http=HTTP requests, \
+                                           dns=DNS queries, creds=look for plaintext credentials"
+                        }
+                    },
+                    "required": ["path", "mode"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "decode_payload".into(),
+                description: "Decode an encoded string — common in CTF challenges. \
+                              Supports base64, hex, URL encoding, ROT13, and raw binary.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "data": { "type": "string", "description": "The encoded string to decode" },
+                        "encoding": {
+                            "type": "string",
+                            "enum": ["auto", "base64", "hex", "url", "rot13", "binary"],
+                            "description": "auto tries base64 then hex; specify if known"
+                        }
+                    },
+                    "required": ["data", "encoding"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "hash_file".into(),
+                description: "Compute a cryptographic hash of a file (md5, sha1, sha256, sha512, or all).".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "algo": {
+                            "type": "string",
+                            "enum": ["md5", "sha1", "sha256", "sha512", "all"]
+                        }
+                    },
+                    "required": ["path", "algo"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "dns_lookup".into(),
+                description: "Look up DNS records, do a reverse lookup, or query whois for a domain/IP.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "target": { "type": "string", "description": "Domain or IP" },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["dns", "reverse", "whois", "mx"]
+                        }
+                    },
+                    "required": ["target", "mode"]
                 }),
             },
         },
@@ -378,6 +483,39 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             }
         }
 
+        "nmap_scan" => {
+            let target = args["target"].as_str().unwrap_or("");
+            let scan_type = args["scan_type"].as_str().unwrap_or("quick");
+            if target.is_empty() {
+                anyhow::bail!("No target provided");
+            }
+            security::nmap_scan(target, scan_type, sudo_pass).await
+        }
+
+        "analyze_pcap" => {
+            let path = args["path"].as_str().unwrap_or("");
+            let mode = args["mode"].as_str().unwrap_or("summary");
+            security::analyze_pcap(path, mode, sudo_pass).await
+        }
+
+        "decode_payload" => {
+            let data = args["data"].as_str().unwrap_or("");
+            let encoding = args["encoding"].as_str().unwrap_or("auto");
+            security::decode_payload(data, encoding, sudo_pass).await
+        }
+
+        "hash_file" => {
+            let path = args["path"].as_str().unwrap_or("");
+            let algo = args["algo"].as_str().unwrap_or("sha256");
+            security::hash_file(path, algo, sudo_pass).await
+        }
+
+        "dns_lookup" => {
+            let target = args["target"].as_str().unwrap_or("");
+            let mode = args["mode"].as_str().unwrap_or("dns");
+            security::dns_lookup(target, mode, sudo_pass).await
+        }
+
         "edit_file" => {
             let path = args["path"].as_str().unwrap_or("");
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
@@ -551,11 +689,13 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
 
         "learn_topic" => {
             let topic = args["topic"].as_str().unwrap_or("");
-            if topic.is_empty() { anyhow::bail!("No topic provided"); }
+            if topic.is_empty() {
+                anyhow::bail!("No topic provided");
+            }
             learn::learn(topic, sudo_pass).await
         }
 
-                unknown => {
+        unknown => {
             tracing::warn!("Unknown tool: {}", unknown);
             Ok(format!("Error: unknown tool '{}'", unknown))
         }
