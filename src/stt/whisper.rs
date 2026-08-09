@@ -66,6 +66,8 @@ impl WhisperStt {
             "--output-txt",
             "--language",
             "en",
+            "--no-speech-thr",
+            "0.6",
             // Best of N beam search — improves accuracy at small cost
             "--best-of",
             "5",

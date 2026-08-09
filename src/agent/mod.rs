@@ -36,7 +36,7 @@ fn build_client(config: &LunaConfig) -> OllamaClient {
 fn build_stt(_config: &LunaConfig) -> crate::stt::whisper::WhisperStt {
     let model_path = dirs::home_dir()
         .unwrap_or_default()
-        .join(".local/share/luna/models/ggml-base.en.bin")
+        .join(".local/share/luna/models/ggml-small.en.bin")
         .to_string_lossy()
         .to_string();
 
@@ -515,7 +515,12 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 fn looks_like_artifact(s: &str) -> bool {
     let t = s.trim().to_lowercase();
-    if (t.starts_with('[') && t.ends_with(']')) || (t.starts_with('(') && t.ends_with(')')) {
+    if (t.starts_with('[') && t.ends_with(']')) 
+        || (t.starts_with('(') && t.ends_with(')')) {
+        return true;
+    }
+    // Very short single words that are clearly not commands
+    if t.split_whitespace().count() <= 1 && t.len() < 4 {
         return true;
     }
     let hallucinations = [
@@ -525,6 +530,9 @@ fn looks_like_artifact(s: &str) -> bool {
         "see you later",
         "please subscribe",
         "like and subscribe",
+        "and uh",
+        "and shadow",
+        "and speak",
     ];
     hallucinations.iter().any(|h| t.contains(h))
 }
