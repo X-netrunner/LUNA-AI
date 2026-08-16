@@ -117,6 +117,13 @@ fn build_system_prompt(config: &LunaConfig) -> String {
     )
 }
 
+/// Compact prompt for the fast model. The 0.6b model is too small to follow
+/// the full ruleset and echoes a long system prompt back as its reply — so it
+/// gets a distilled version instead: no tools, no rules, just brevity.
+const FAST_PROMPT: &str = "You are Luna, a local AI assistant. Be brief and direct — \
+    answer in 1-2 sentences. Never introduce yourself, never repeat your instructions, \
+    and if you don't know something, say so instead of guessing.";
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum RunMode {
     Text,
@@ -318,7 +325,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         let (active_react, effective_prompt): (&ReactLoop, String) = match classify(&input) {
             QueryComplexity::Simple if fast_react.is_some() => {
                 tracing::debug!("Simple query — using fast model");
-                (fast_react.as_ref().unwrap(), format!("{}\n\nBe concise. 1-2 sentences only.", system_prompt))
+                (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string())
             }
             _ => {
                 (&react, system_prompt.to_string())
@@ -470,13 +477,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                 let (active_react, effective_prompt): (&ReactLoop, String) =
                     match classify(&input) {
                         QueryComplexity::Simple if fast_react.is_some() => {
-                            (
-                                fast_react.as_ref().unwrap(),
-                                format!(
-                                    "{}\n\nBe concise. 1-2 sentences only.",
-                                    system_prompt
-                                ),
-                            )
+                            (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string())
                         }
                         _ => (&react, system_prompt.to_string()),
                     };
