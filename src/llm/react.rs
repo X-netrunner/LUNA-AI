@@ -71,14 +71,16 @@ impl<'a> ReactLoop<'a> {
 
                     // ── Freeform tool call intercept ──────────────────────
                     if let Some(tool_call) = parse_freeform_tool_call(&text) {
-                        tracing::info!("Intercepted freeform tool: {}", tool_call.function.name);
-                        print!("\n[Luna → {}] ", tool_call.function.name);
+                        let tool_name = tool_call.function.name.clone();
+                        tracing::info!("Intercepted freeform tool: {}", tool_name);
+                        print!("\n[Luna → {}] ", tool_name);
                         use std::io::Write;
                         std::io::stdout().flush().ok();
 
                         let tool_result = match tools::execute(&tool_call, &get_config()).await {
                             Ok(o) => {
                                 println!("✓");
+                                print_sources(&tool_name, &o);
                                 o
                             }
                             Err(e) => {
@@ -89,7 +91,7 @@ impl<'a> ReactLoop<'a> {
 
                         turn_messages.push(Message::assistant(&format!(
                             "<|tool_call|>{}<|/tool_call|>",
-                            tool_call.function.name
+                            tool_name
                         )));
                         turn_messages.push(Message::tool(tool_result));
                         continue;
@@ -115,6 +117,7 @@ impl<'a> ReactLoop<'a> {
                         let tool_result = match tools::execute(tool_call, &get_config()).await {
                             Ok(o) => {
                                 println!("✓");
+                                print_sources(&tool_name, &o);
                                 o
                             }
                             Err(e) => {
@@ -144,6 +147,18 @@ impl<'a> ReactLoop<'a> {
 /// Load config inline — needed for tool execution
 fn get_config() -> crate::config::LunaConfig {
     crate::config::LunaConfig::load().unwrap_or_default()
+}
+
+/// Print the URLs a research tool referenced, so the user can click through.
+fn print_sources(tool_name: &str, result: &str) {
+    let sources = crate::tools::extract_sources(tool_name, result);
+    if sources.is_empty() {
+        return;
+    }
+    println!("  Sources:");
+    for src in &sources {
+        println!("    ↳ {}", src);
+    }
 }
 
 fn parse_freeform_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> {

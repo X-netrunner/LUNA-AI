@@ -701,3 +701,44 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
         }
     }
 }
+
+/// Pull the URLs a research tool surfaced out of its plain-text result,
+/// so the assistant can show the user the exact sources it referenced.
+pub fn extract_sources(tool_name: &str, result: &str) -> Vec<String> {
+    let mut sources: Vec<String> = Vec::new();
+    let mut push = |s: &str| {
+        let t = s.trim();
+        if !t.is_empty() && !sources.iter().any(|x| x == t) {
+            sources.push(t.to_string());
+        }
+    };
+
+    match tool_name {
+        "web_search" | "learn_topic" => {
+            for line in result.lines() {
+                let line = line.trim();
+                if let Some(url) = line.strip_prefix("Source:").map(str::trim) {
+                    push(url);
+                } else if let Some(rest) = line.strip_prefix("=== Fetched page:") {
+                    let url = rest.trim_end_matches("===").trim();
+                    if !url.is_empty() {
+                        push(url);
+                    }
+                } else if let Some(rest) = line.strip_prefix("- ") {
+                    if rest.contains("http") {
+                        if let Some(open) = rest.rfind('(') {
+                            if let Some(close) = rest.rfind(')') {
+                                if close > open {
+                                    push(&rest[open + 1..close]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    sources
+}

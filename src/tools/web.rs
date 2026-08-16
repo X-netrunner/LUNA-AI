@@ -73,10 +73,19 @@ fn parse_ddg_response(body: &str, query: &str) -> Result<String> {
     if let Some(topics) = v["RelatedTopics"].as_array() {
         let related: Vec<String> = topics
             .iter()
-            .filter_map(|t| t["Text"].as_str())
-            .filter(|t| !t.is_empty())
+            .filter_map(|t| {
+                let text = t["Text"].as_str()?;
+                if text.is_empty() {
+                    return None;
+                }
+                let url = t["FirstURL"].as_str().unwrap_or("");
+                if url.is_empty() {
+                    Some(format!("- {}", text))
+                } else {
+                    Some(format!("- {} ({})", text, url))
+                }
+            })
             .take(5)
-            .map(|t| format!("- {}", t))
             .collect();
         if !related.is_empty() {
             parts.push(format!("Related:\n{}", related.join("\n")));
