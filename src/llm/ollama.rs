@@ -125,7 +125,9 @@ struct FullMessage {
 
 #[derive(Debug)]
 pub enum OllamaResponse {
-    Text(String),
+    /// Plain-text reply. `streamed` is true when tokens were already printed
+    /// live to stdout, so the caller must not print the text again.
+    Text { text: String, streamed: bool },
     ToolUse(Vec<ToolCall>),
 }
 
@@ -214,10 +216,13 @@ impl OllamaClient {
                     .with_context(|| format!("Failed to parse chunk: {}", line))?;
 
                 if let Some(token) = chunk.message.content {
-                    print!("{}", token);
+                    // Strip emojis as tokens arrive — they'd otherwise be
+                    // echoed live to the terminal.
+                    let clean = crate::util::strip_emojis(&token);
+                    print!("{}", clean);
                     use std::io::Write;
                     std::io::stdout().flush().ok();
-                    full_text.push_str(&token);
+                    full_text.push_str(&clean);
                 }
 
                 if chunk.done {
@@ -227,7 +232,10 @@ impl OllamaClient {
             }
         }
 
-        Ok(OllamaResponse::Text(full_text))
+        Ok(OllamaResponse::Text {
+            text: full_text,
+            streamed: true,
+        })
     }
 
     // ── Non-streaming chat with tools ─────────────────────────────────────────
@@ -294,7 +302,10 @@ impl OllamaClient {
 
         // Text response — return it WITHOUT printing.
         // The caller (agent/mod.rs) owns all printing so there's one print site.
-        let text = parsed.message.content.unwrap_or_default();
-        Ok(OllamaResponse::Text(text))
+        let text = crate::util::strip_emojis(&parsed.message.content.unwrap_or_default());
+        Ok(OllamaResponse::Text {
+            text,
+            streamed: false,
+        })
     }
 }

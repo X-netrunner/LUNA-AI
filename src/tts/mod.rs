@@ -92,29 +92,8 @@ pub fn clean_for_speech(text: &str) -> String {
 
     out = out.replace('\n', " ").trim().to_string();
 
-    // Strip emojis so TTS doesn't read them out as names/descriptions
-    // (e.g. 😊 spoken as "smiling face with smiling eyes").
-    strip_emojis(&out)
-}
-
-fn is_emoji(c: char) -> bool {
-    let cp = c as u32;
-    matches!(cp,
-        // Emoticons, symbols & pictographs, regional indicators (flags),
-        // supplemental symbols, transports
-        0x1F000..=0x1FAFF |
-        // Misc symbols & dingbats (⚠ ☀ ☕ ⭐ ❤ ✈ etc.)
-        0x2600..=0x27BF |
-        // Variation selectors (emoji presentation)
-        0xFE00..=0xFE0F |
-        // Zero-width joiner — glues multi-codepoint emoji together
-        0x200D |
-        // Combining enclosing keycap (1️⃣)
-        0x20E3)
-}
-
-fn strip_emojis(text: &str) -> String {
-    text.chars().filter(|c| !is_emoji(*c)).collect()
+    // Strip emojis so TTS doesn't read them out as names/descriptions.
+    crate::util::strip_emojis(&out)
 }
 
 #[cfg(test)]

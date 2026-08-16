@@ -66,7 +66,8 @@ impl Default for AgentConfig {
                             IMPORTANT: Never guess or hallucinate real-time data. \
                             For the current time or date, always call run_shell with \
                             date +%H:%M on %A %d %B. \
-                            For system state, always query with run_shell — never assume."
+                            For system state, always query with run_shell — never assume. \
+                            Never use emojis or emoticons in your responses."
                 .into(),
             max_react_iterations: 8,
             sudo_password: None,

@@ -25,7 +25,7 @@ impl<'a> ReactLoop<'a> {
         user_input: &str,
         memory: &mut Memory,
         system_prompt: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, bool)> {
         memory.push(Message::user(user_input));
 
         let tool_defs = tools::tool_definitions();
@@ -40,7 +40,7 @@ impl<'a> ReactLoop<'a> {
                 tracing::warn!("ReAct max iterations ({}) reached", self.max_iterations);
                 let fallback = "I hit my iteration limit.".to_string();
                 memory.push(Message::assistant(&fallback));
-                return Ok(fallback);
+                return Ok((fallback, false));
             }
 
             let mut context = memory.build_context(system_prompt);
@@ -51,7 +51,7 @@ impl<'a> ReactLoop<'a> {
             let response = self.client.chat(&context, tools_arg).await?;
 
             match response {
-                OllamaResponse::Text(text) => {
+                OllamaResponse::Text { text, streamed } => {
                     // ── Empty response — retry with nudge ─────────────────
                     if text.trim().is_empty() {
                         empty_retries += 1;
@@ -59,7 +59,7 @@ impl<'a> ReactLoop<'a> {
                             // Give up after 2 empty retries
                             let fallback = "I couldn't generate a response.".to_string();
                             memory.push(Message::assistant(&fallback));
-                            return Ok(fallback);
+                            return Ok((fallback, false));
                         }
                         tracing::warn!("Empty response, retrying ({}/2)...", empty_retries);
                         turn_messages.push(Message::user(
@@ -102,7 +102,7 @@ impl<'a> ReactLoop<'a> {
                     if let Err(e) = memory.save() {
                         tracing::warn!("Failed to save memory: {}", e);
                     }
-                    return Ok(text);
+                    return Ok((text, streamed));
                 }
 
                 OllamaResponse::ToolUse(tool_calls) => {

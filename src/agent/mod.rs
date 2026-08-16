@@ -244,8 +244,10 @@ async fn run_voice_session(
         io::stdout().flush().ok();
 
         match react.run(&input, memory, system_prompt).await {
-            Ok(response) => {
-                println!("{}", response);
+            Ok((response, streamed)) => {
+                if !streamed {
+                    println!("{}", response);
+                }
                 if config.voice.mode != VoiceMode::Off {
                     tts::speak(&response, &config.voice.mode).await.ok();
                 }
@@ -324,8 +326,10 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         };
 
         match active_react.run(&input, &mut memory, &effective_prompt).await {
-            Ok(response) => {
-                println!("{}", response);
+            Ok((response, streamed)) => {
+                if !streamed {
+                    println!("{}", response);
+                }
                 if config.voice.mode != VoiceMode::Off {
                     if let Err(e) = tts::speak(&response, &config.voice.mode).await {
                         tracing::warn!("TTS failed: {} — continuing without audio", e);
@@ -478,8 +482,10 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                     };
 
                 match active_react.run(&input, &mut memory, &effective_prompt).await {
-                    Ok(response) => {
-                        println!("{}", response);
+                    Ok((response, streamed)) => {
+                        if !streamed {
+                            println!("{}", response);
+                        }
                         if config.voice.mode != VoiceMode::Off {
                             tts::speak(&response, &config.voice.mode).await.ok();
                         }
