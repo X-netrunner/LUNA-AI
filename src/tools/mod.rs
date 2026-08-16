@@ -1,7 +1,7 @@
 //! tools/mod.rs — Tool registry
 //!
-//! Trimmed to 11 tools — enough for a 7B model to use reliably.
-//! Redundant tools (find_file, list_dir, find_binary, open) removed;
+//! One tool per capability, sized for a 7B model to use reliably.
+//! Redundant tools (list_dir, find_binary, open) removed;
 //! run_shell handles all of those.
 pub mod desktop;
 pub mod filesystem;

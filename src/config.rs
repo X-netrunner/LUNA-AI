@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 // ── Top-level config struct ───────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct LunaConfig {
     #[serde(default)]
     pub agent: AgentConfig,
@@ -100,18 +100,13 @@ impl Default for LlmConfig {
 }
 
 // ── Voice output settings ─────────────────────────────────────────────────────
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceMode {
+    #[default]
     Basic,
     Jinx,
     Off,
-}
-
-impl Default for VoiceMode {
-    fn default() -> Self {
-        VoiceMode::Basic
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -146,18 +141,13 @@ impl Default for VoiceConfig {
 }
 
 // ── Audio input settings ──────────────────────────────────────────────────────
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum InputMode {
     PushToTalk,
     WakeWord,
+    #[default]
     Both,
-}
-
-impl Default for InputMode {
-    fn default() -> Self {
-        InputMode::Both
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -289,20 +279,6 @@ impl LunaConfig {
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("luna")
             .join("luna.toml")
-    }
-}
-
-impl Default for LunaConfig {
-    fn default() -> Self {
-        Self {
-            agent: AgentConfig::default(),
-            llm: LlmConfig::default(),
-            voice: VoiceConfig::default(),
-            audio: AudioConfig::default(),
-            memory: MemoryConfig::default(),
-            todoist: TodoistConfig::default(),
-            proactive: ProactiveConfig::default(),
-        }
     }
 }
 

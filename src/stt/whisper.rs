@@ -30,20 +30,6 @@ pub struct WhisperStt {
 }
 
 impl WhisperStt {
-    pub fn new(model_path: &str) -> Self {
-        Self {
-            model_path: model_path.to_string(),
-            // Default prompt: casual English conversation style.
-            // This nudges Whisper toward common phrasing and helps it not
-            // over-correct non-native speakers toward "standard" accents.
-            initial_prompt: Some(
-                "This is a conversation with an AI assistant named Luna. \
-                 The user may have an accent. Transcribe exactly what is said."
-                    .into(),
-            ),
-        }
-    }
-
     /// Create with a custom initial prompt (or None to disable)
     pub fn with_prompt(model_path: &str, prompt: Option<String>) -> Self {
         Self {
@@ -61,6 +47,10 @@ impl WhisperStt {
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("ggml-silero-v6.2.0.bin");
 
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get().to_string())
+            .unwrap_or_else(|_| "4".to_string());
+
         let mut cmd = tokio::process::Command::new("whisper-cli");
         cmd.args([
             "--model",
@@ -75,9 +65,9 @@ impl WhisperStt {
             "5",
             "--beam-size",
             "5",
-            // Use most of the CPU — faster transcription, less clipping
+            // Use all CPU cores — faster transcription, less clipping
             "--threads",
-            "8",
+            &threads,
             // Silero VAD trims silence so Whisper doesn't hallucinate
             // on quiet frames before/after actual speech.
             "--vad",
@@ -120,7 +110,6 @@ impl WhisperStt {
             tracing::debug!("Transcription empty (silence or hallucination filtered)");
         } else {
             tracing::info!("Transcribed: \"{}\"", text);
-            tracing::debug!("Transcribed: \"{}\"", text);
         }
 
         Ok(text)

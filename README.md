@@ -12,6 +12,7 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 - **System indexer** — scans and maps your projects, scripts, and configs into permanent memory
 - **Voice I/O** — Whisper STT + Kokoro TTS (high quality, runs on CPU)
 - **Voice session mode** — say the wake word once, keep talking without repeating it until you say goodbye or go quiet
+- **Inline wake-word commands** — say "luna what's the time" in one breath; Luna strips the wake word and runs the rest as a command
 - **Proactive monitoring** — background checks for low battery, low disk space, and pending package updates, with real desktop notifications (no LLM call, zero hallucination risk)
 - **Desktop integration** — opens apps, edits files, reads/writes the clipboard, sends notifications
 - **Web learning** — one tool call searches the web AND fetches the most relevant page, so Luna can learn about a topic and `remember` it permanently
@@ -28,8 +29,10 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 | `notify` | Desktop notification |
 | `system_info` | Battery, CPU, RAM, temp, disk, uptime |
 | `clipboard` | Read/write the Wayland clipboard |
+| `web_search` | DuckDuckGo search, returns a text summary of top results |
 | `fetch_page` | Fetch a single webpage's text |
 | `learn_topic` | Search + fetch the best result in one call — use this over `fetch_page` for open-ended research |
+| `nmap_scan` / `analyze_pcap` / `decode_payload` / `hash_file` / `dns_lookup` | CTF/network toolkit: scanning, pcap analysis, decoding, hashing, DNS/whois |
 | `remember` / `forget` / `list_memories` | Manage permanent memory |
 | `index_system` | Scan the home directory and save a structured map to permanent memory |
 | `todoist_list` / `todoist_add` / `todoist_complete` | Manage Todoist tasks (requires an API token) |
@@ -38,7 +41,7 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 
 - Rust 1.75+
 - [Ollama](https://ollama.com) with a model pulled (default: `qwen2.5:7b-instruct-q4_K_M`)
-- `whisper-cli` (from the `whisper.cpp` AUR package) for voice input
+- `whisper-cli` (from the `whisper.cpp` AUR package) + `ggml-small.en.bin` and `ggml-silero-v6.2.0.bin` models for voice input
 - Python 3 + Kokoro ONNX for voice output (see Voice Setup below — no Piper needed)
 - `wl-copy` / `wl-paste` for clipboard (Wayland)
 - `curl` for web fetch and learning
@@ -47,8 +50,8 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 ## Installation
 
 ```bash
-git clone https://github.com/X-netrunner/LUNA.git
-cd LUNA
+git clone https://github.com/X-netrunner/LUNA-AI.git
+cd LUNA-AI
 cargo build --release
 ./target/release/luna
 ```
@@ -72,11 +75,12 @@ fast_model = "qwen3:0.6b"   # optional, used for simple/conversational queries
 mode = "basic"               # basic | off
 piper_model = "/home/YOU/.local/share/luna/kokoro/kokoro-v1.0.onnx"
 piper_bin = "af_heart"       # Kokoro voice name: af_heart | af_sky | af_nicole | af_sarah
+whisper_model = "/home/YOU/.local/share/luna/models/ggml-small.en.bin"
 
 [audio]
-input_mode = "both"          # off | push_to_talk | wake_word | both
+input_mode = "both"          # off | wake_word | both
 wake_word = "hey luna"
-wake_aliases = ["hey luna", "hello luna", "hay luna"]
+wake_aliases = ["luna", "hey luna", "hello luna", "hay luna"]
 vad_silence_ms = 800
 
 [memory]
@@ -112,10 +116,12 @@ sudo pacman -S python-numpy python-onnxruntime-cpu python-soundfile
 python3 -m venv --system-site-packages ~/.local/share/luna/tts_env
 ~/.local/share/luna/tts_env/bin/pip install kokoro-onnx soundfile
 
-# Download the Whisper model for voice input
+# Download the Whisper model + Silero VAD model for voice input
 mkdir -p ~/.local/share/luna/models
-wget https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin \
-  -O ~/.local/share/luna/models/ggml-base.en.bin
+wget https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin \
+  -O ~/.local/share/luna/models/ggml-small.en.bin
+wget https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-silero-v6.2.0.bin \
+  -O ~/.local/share/luna/models/ggml-silero-v6.2.0.bin
 ```
 
 Test Kokoro directly before relying on Luna to call it:
@@ -153,19 +159,18 @@ main.rs
 │   ├── mod.rs         — tool registry + executor
 │   ├── shell.rs       — bash command runner with sudo injection (never hangs on a prompt)
 │   ├── filesystem.rs  — file read/write
-│   ├── desktop.rs     — notifications, xdg-open
+│   ├── desktop.rs     — notifications
 │   ├── web.rs         — DuckDuckGo search
-│   ├── learn.rs        — combined search + fetch for one-shot research
-│   ├── todoist.rs      — Todoist Unified API v1 client
-│   ├── proactive.rs     — background battery/disk/update monitor
-│   ├── todo.rs          — local task list
-│   └── remind.rs        — in-process reminders
+│   ├── learn.rs       — combined search + fetch for one-shot research
+│   ├── security.rs    — nmap / tshark / encoding / hashing / DNS for CTF work
+│   ├── todoist.rs     — Todoist Unified API v1 client
+│   └── proactive.rs   — background battery/disk/update monitor
 ├── tts/
-│   └── piper.rs        — Kokoro TTS via Python subprocess
+│   └── piper.rs       — Kokoro TTS via Python subprocess
 ├── stt/
-│   └── whisper.rs      — Whisper STT via whisper-cli subprocess
+│   └── whisper.rs     — Whisper STT via whisper-cli subprocess
 └── audio/
-    └── capture.rs      — mic capture with adaptive, calibrated VAD
+    └── capture.rs     — mic capture with adaptive, calibrated VAD
 ```
 
 ## Luna Versions

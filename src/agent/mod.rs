@@ -129,7 +129,6 @@ enum ControlFlow {
     Continue,
     Exit,
     SwitchToText,
-    SwitchToVoice,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -462,17 +461,23 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                 print!("Luna: ");
                 io::stdout().flush().ok();
 
-                // Pick model based on complexity
-                let effective_prompt = match classify(&input) {
-                    QueryComplexity::Simple => {
-                        tracing::debug!("Simple query — using fast path");
-                        // For simple queries, add a brevity instruction
-                        format!("{}\n\nThis is a simple conversational query. Respond in 1-2 sentences max, no tools needed.", system_prompt)
-                    }
-                    QueryComplexity::Complex => system_prompt.to_string(),
-                };
+                // Pick model based on complexity — simple queries go to the
+                // fast model, everything else to the full one.
+                let (active_react, effective_prompt): (&ReactLoop, String) =
+                    match classify(&input) {
+                        QueryComplexity::Simple if fast_react.is_some() => {
+                            (
+                                fast_react.as_ref().unwrap(),
+                                format!(
+                                    "{}\n\nBe concise. 1-2 sentences only.",
+                                    system_prompt
+                                ),
+                            )
+                        }
+                        _ => (&react, system_prompt.to_string()),
+                    };
 
-                match react.run(&input, &mut memory, &effective_prompt).await {
+                match active_react.run(&input, &mut memory, &effective_prompt).await {
                     Ok(response) => {
                         println!("{}", response);
                         if config.voice.mode != VoiceMode::Off {
@@ -504,10 +509,6 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                         mode = RunMode::Text;
                         println!("  [Switched to text mode]");
                     }
-                    ControlFlow::SwitchToVoice => {
-                        mode = RunMode::Voice;
-                        println!("  [Switched to voice mode]");
-                    }
                     ControlFlow::Continue => {}
                 }
             }
@@ -520,10 +521,6 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 fn looks_like_artifact(s: &str) -> bool {
     let t = s.trim().to_lowercase();
-    if (t.starts_with('[') && t.ends_with(']')) 
-        || (t.starts_with('(') && t.ends_with(')')) {
-        return true;
-    }
     // Very short single words that are clearly not commands
     if t.split_whitespace().count() <= 1 && t.len() < 4 {
         return true;

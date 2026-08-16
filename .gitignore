@@ -1,6 +1,5 @@
 # Build artifacts
 /target/
-Cargo.lock
 
 # Config with sensitive data — user creates their own
 # DO NOT commit luna.toml (contains sudo password)

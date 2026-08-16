@@ -16,7 +16,6 @@ voice-jinx  = []
 
 # Async runtime — every concurrent thing in Luna runs through tokio
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
 futures = "0.3"
 
 # HTTP client — streams Ollama responses chunk by chunk
@@ -33,10 +32,7 @@ toml = "0.8"
 clap = { version = "=4.4.18", features = ["derive"] }
 
 # Error handling
-# anyhow   = propagate errors easily up the call stack
-# thiserror = define your own typed errors per module
-anyhow    = "1"
-thiserror = "1"
+anyhow = "1"
 
 # Logging — tracing is async-aware unlike log/env_logger
 tracing            = "0.1"
@@ -49,17 +45,11 @@ cpal = "0.15"
 rodio = { version = "0.19", features = ["wav"] }
 hound = "3.5"   # wav file writing for STT input
 
-# Keyboard listener — push-to-talk key detection without blocking
-rdev = "0.5"
-
 # Utility
 dirs   = "5"         # finds ~/.config/luna, ~/.local/share/luna, etc.
 uuid   = { version = "1", features = ["v4"] }
 rpassword = "7"             # sudo password prompt via /dev/tty
 chrono = { version = "0.4", features = ["serde"] }
-
-# VAD — detect silence between words
-webrtc-vad = "0.4"
 
 
 # ── Build profiles ────────────────────────────────────────────────────────────
@@ -71,7 +61,3 @@ opt-level = 3
 lto = true           # link-time optimization — meaningful speed gains
 codegen-units = 1    # slower compile, better binary
 strip = true         # strip debug symbols from release binary
-
-#--- Env -----------------------------------------------------------------------
-#[env]
-#CUDA_PATH = "/opt/cuda"

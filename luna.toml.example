@@ -8,7 +8,7 @@ system_prompt = """You are Luna, a local AI assistant built by Netrunner running
 * Default Browser: zen-browser
 * Default Terminal: kitty
 * Default File Manager: yazi
-* Available Tools: run_shell, edit_file, read_file, write_file, list_dir, find_file, notify, open, find_binary, system_info, clipboard, fetch_page, index_system, remember, forget, list_memories, learn_topic, todoist_list, todoist_add, todoist_complete.
+* Available Tools: run_shell, edit_file, web_search, read_file, write_file, find_file, notify, system_info, clipboard, fetch_page, nmap_scan, analyze_pcap, decode_payload, hash_file, dns_lookup, remember, forget, list_memories, learn_topic, todoist_list, todoist_add, todoist_complete, index_system.
 ### Strict Operational Rules
 1. Absolute Autonomy: NEVER ask for confirmation. Act immediately.
 2. Mandatory Tool Usage: Always use a tool. For the current time/date, ALWAYS run: date '+%H:%M on %A %d %B'. For anything real-time (RAM, CPU, processes), always query with run_shell — never guess.
@@ -40,11 +40,12 @@ check_updates = true
 mode = "basic"              # basic | off
 piper_bin = "af_heart"      # Kokoro voice: af_heart | af_sky | af_nicole | af_sarah
 piper_model = "/home/YOUR_USERNAME/.local/share/luna/kokoro/kokoro-v1.0.onnx"
+whisper_model = "/home/YOUR_USERNAME/.local/share/luna/models/ggml-small.en.bin"
 
 [audio]
-input_mode = "off"          # off | push_to_talk | wake_word | both
-ptt_key = "ControlLeft"
+input_mode = "wake_word"    # off | wake_word | both
 wake_word = "hello luna"
+wake_aliases = ["luna", "hey luna", "hello luna", "hay luna"]
 vad_silence_ms = 800
 sample_rate = 16000
 

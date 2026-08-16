@@ -13,11 +13,22 @@ pub fn classify(input: &str) -> QueryComplexity {
     let lower = input.to_lowercase();
     let words: Vec<&str> = input.split_whitespace().collect();
 
-    // Pure greetings / acknowledgements — always simple
-    let greetings = ["hi", "hey", "hello", "thanks", "thank you", "ok", "okay",
-                     "bye", "goodbye", "yep", "nope", "sure", "cool", "nice",
-                     "lol", "haha", "hmm", "wow", "great"];
-    if words.len() <= 4 && greetings.iter().any(|g| lower.contains(g)) {
+    // Pure greetings / acknowledgements — always simple.
+    // Single-word greetings match whole words only, so "this"/"which"/"look"
+    // never trip the short "hi"/"ok" entries.
+    const GREETINGS: &[&str] = &[
+        "hi", "hey", "hello", "thanks", "thank you", "ok", "okay", "bye", "goodbye",
+        "yep", "nope", "sure", "cool", "nice", "lol", "haha", "hmm", "wow", "great",
+    ];
+    if words.len() <= 4
+        && GREETINGS.iter().any(|g| {
+            if g.contains(' ') {
+                lower.contains(g)
+            } else {
+                words.iter().any(|w| w.to_lowercase() == *g)
+            }
+        })
+    {
         return QueryComplexity::Simple;
     }
 
