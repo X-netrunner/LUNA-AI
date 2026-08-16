@@ -4,7 +4,6 @@
 //! Avoids all CUDA compilation issues with whisper-rs bindings.
 
 use anyhow::{Context, Result};
-use std::process::Stdio;
 
 // Whisper hallucinates these tokens on silence/noise — filter them out.
 // Keep this list growing if you see new ones in logs.
@@ -57,6 +56,11 @@ impl WhisperStt {
     pub async fn transcribe(&self, wav_path: &str) -> Result<String> {
         tracing::debug!("Transcribing: {}", wav_path);
 
+        let vad_model = std::path::Path::new(&self.model_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("ggml-silero-v6.2.0.bin");
+
         let mut cmd = tokio::process::Command::new("whisper-cli");
         cmd.args([
             "--model",
@@ -66,27 +70,40 @@ impl WhisperStt {
             "--output-txt",
             "--language",
             "en",
-            "--no-speech-thr",
-            "0.6",
             // Best of N beam search — improves accuracy at small cost
             "--best-of",
             "5",
             "--beam-size",
             "5",
+            // Use most of the CPU — faster transcription, less clipping
+            "--threads",
+            "8",
+            // Silero VAD trims silence so Whisper doesn't hallucinate
+            // on quiet frames before/after actual speech.
+            "--vad",
+            "--vad-model",
+            vad_model.to_str().unwrap_or_default(),
             // No timestamps — cleaner output for assistant use
             "--no-timestamps",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        ]);
 
         // Add initial prompt if set — this is the #1 knob for accent adaptation
         if let Some(ref prompt) = self.initial_prompt {
             cmd.args(["--prompt", prompt]);
         }
 
-        cmd.output()
+        let output = cmd
+            .output()
             .await
             .context("Failed to spawn whisper-cli — is whisper.cpp installed?")?;
+
+        if !output.status.success() {
+            tracing::warn!(
+                "whisper-cli exited with {:?}: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
 
         // whisper-cli writes output to <wav_path>.txt
         let txt_path = format!("{}.txt", wav_path);

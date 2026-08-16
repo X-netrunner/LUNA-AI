@@ -33,15 +33,9 @@ fn build_client(config: &LunaConfig) -> OllamaClient {
     )
 }
 
-fn build_stt(_config: &LunaConfig) -> crate::stt::whisper::WhisperStt {
-    let model_path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".local/share/luna/models/ggml-small.en.bin")
-        .to_string_lossy()
-        .to_string();
-
+fn build_stt(config: &LunaConfig) -> crate::stt::whisper::WhisperStt {
     crate::stt::whisper::WhisperStt::with_prompt(
-        &model_path,
+        &config.voice.whisper_model.to_string_lossy(),
         // Keep this SHORT and non-conversational — Whisper can hallucinate
         // prompt text back into the transcription on near-silence frames.
         // Just seed it with domain vocabulary and the assistant's name.
@@ -167,9 +161,10 @@ async fn run_voice_session(
 
     loop {
         let input = if let Some(cmd) = pending.take() {
+            // Inline command captured together with the wake word
+            // ("luna what's the time") — process it directly.
             if turn == 0 {
-                println!("  [Inline command detected]");
-                tts::speak("Mmm?", &config.voice.mode).await.ok();
+                println!("  [Inline command captured with wake word]");
             }
             cmd
         } else {
@@ -389,9 +384,11 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 
     // ── Wake word listener task → channel ────────────────────────────────────
     // Runs as a persistent background task — never cancelled, never restarted.
-    // Sends a () through the channel each time the wake word is detected.
+    // Sends the transcribed utterance each time the wake word is detected,
+    // so the session can use anything after the wake word as an inline command
+    // (e.g. "luna what's the time" works in one breath).
     // The main loop just selects on this channel alongside stdin.
-    let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel::<String>(4);
     let wake_aliases = config.audio.wake_aliases.clone();
     let sample_rate = config.audio.sample_rate;
     let silence_ms = config.audio.vad_silence_ms;
@@ -407,8 +404,8 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
             )
             .await
             {
-                Ok(()) => {
-                    if wake_tx.send(()).await.is_err() {
+                Ok(text) => {
+                    if wake_tx.send(text).await.is_err() {
                         break; // main loop exited
                     }
                 }
@@ -488,11 +485,19 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
             }
 
             // ── Wake word fired ──────────────────────────────────────────────
-            // The background task detected the wake word and sent () here.
+            // The background task detected the wake word and sent the full
+            // utterance here. Anything after the wake word becomes an inline
+            // command; a bare wake word falls back to the "Yes?" prompt.
             // We only act on it when not in pure text mode.
-            _ = wake_rx.recv(), if mode != RunMode::Text => {
+            Some(wake_text) = wake_rx.recv(), if mode != RunMode::Text => {
+                let inline = crate::audio::capture::strip_wake_word(
+                    &wake_text,
+                    &config.audio.wake_aliases,
+                )
+                .filter(|cmd| !cmd.trim().is_empty());
+
                 match run_voice_session(
-                    config, &stt, &mut memory, &react, &system_prompt, None,
+                    config, &stt, &mut memory, &react, &system_prompt, inline,
                 ).await? {
                     ControlFlow::Exit => return Ok(()),
                     ControlFlow::SwitchToText => {

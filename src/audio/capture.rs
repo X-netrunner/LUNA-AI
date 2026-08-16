@@ -23,7 +23,9 @@ enum VadState {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Continuously listen and run Whisper on each utterance until the wake word
-/// is detected. Returns once the wake word is heard.
+/// is detected. Returns the full transcribed utterance — the caller can strip
+/// the wake word off the front to use it as an inline command (so
+/// "luna what's the time" works in one breath).
 ///
 /// `stt` is called on each captured chunk. If the returned text contains
 /// the wake word, we return. Otherwise we discard and keep listening.
@@ -32,7 +34,7 @@ pub async fn listen_for_wake_word(
     silence_ms: u64,
     wake_aliases: &[String],
     stt: &crate::stt::whisper::WhisperStt,
-) -> Result<()> {
+) -> Result<String> {
     loop {
         // Record one utterance (blocks until speech + silence)
         let wav_path = match record_until_silence(sample_rate, silence_ms).await {
@@ -56,12 +58,59 @@ pub async fn listen_for_wake_word(
         let lower = text.to_lowercase();
         tracing::debug!("Wake word check: {:?}", lower);
 
-        if wake_aliases.iter().any(|a| lower.contains(&a.to_lowercase())) {
+        if contains_wake_alias(&lower, wake_aliases) {
             tracing::info!("Wake word detected in: {:?}", text);
-            return Ok(());
+            return Ok(text);
         }
         // Not the wake word — discard and keep listening silently
     }
+}
+
+/// True if the (lowercased) text contains any wake alias. Single-word
+/// aliases like "luna" require a whole-word match so "lunatic"/"deluna"
+/// never trigger; multi-word aliases just need a substring match.
+pub fn contains_wake_alias(lower: &str, wake_aliases: &[String]) -> bool {
+    wake_aliases.iter().any(|alias| {
+        let alias_lower = alias.to_lowercase();
+        if alias_lower.split_whitespace().count() == 1 {
+            let word = alias_lower.trim();
+            lower
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|w| w == word)
+        } else {
+            lower.contains(&alias_lower)
+        }
+    })
+}
+
+/// Strip the wake alias out of a transcribed utterance and return whatever
+/// came after it. Returns `None` if no alias was found, or `Some("")` if the
+/// utterance was just the wake word on its own.
+pub fn strip_wake_word(text: &str, wake_aliases: &[String]) -> Option<String> {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
+
+    for (i, word) in words.iter().enumerate() {
+        let clean = word.trim_matches(|c: char| !c.is_alphanumeric());
+        for alias in wake_aliases {
+            let alias_lower = alias.to_lowercase();
+            let alias_words: Vec<&str> = alias_lower.split_whitespace().collect();
+
+            if alias_words.len() == 1 {
+                if clean == alias_words[0] {
+                    return Some(words[i + 1..].join(" "));
+                }
+            } else if i + alias_words.len() <= words.len()
+                && alias_words.iter().enumerate().all(|(j, aw)| {
+                    words[i + j].trim_matches(|c: char| !c.is_alphanumeric()) == *aw
+                })
+            {
+                return Some(words[i + alias_words.len()..].join(" "));
+            }
+        }
+    }
+
+    None
 }
 
 /// Record one complete utterance (speech then silence) to a temp wav.
@@ -237,4 +286,45 @@ fn record_blocking(wav_path: &str, sample_rate: u32, silence_ms: u64) -> Result<
 
     writer.finalize()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn aliases() -> Vec<String> {
+        vec![
+            "luna".into(),
+            "hey luna".into(),
+            "hello luna".into(),
+            "hay luna".into(),
+        ]
+    }
+
+    #[test]
+    fn single_word_alias_needs_whole_word() {
+        let a = aliases();
+        assert!(contains_wake_alias("luna what's the time", &a));
+        assert!(contains_wake_alias("hey luna", &a));
+        assert!(!contains_wake_alias("lunatic moon", &a));
+        assert!(!contains_wake_alias("deluna", &a));
+    }
+
+    #[test]
+    fn strips_wake_word_for_inline_command() {
+        let a = aliases();
+        assert_eq!(
+            strip_wake_word("luna what's the time", &a),
+            Some("what's the time".to_string())
+        );
+        assert_eq!(
+            strip_wake_word("hey luna what time is it", &a),
+            Some("what time is it".to_string())
+        );
+        assert_eq!(strip_wake_word("luna", &a), Some(String::new()));
+        assert_eq!(
+            strip_wake_word("no wake word here", &a),
+            None
+        );
+    }
 }

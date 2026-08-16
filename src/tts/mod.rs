@@ -3,12 +3,26 @@ pub mod rvc;
 
 use crate::config::{LunaConfig, VoiceMode};
 use anyhow::Result;
+use std::process::Command;
 
 /// Speak text in the configured voice mode.
 /// Config is loaded once here and passed down — piper/rvc never reload it.
+/// The microphone is muted for the duration of playback so Luna's own
+/// voice never loops back and gets transcribed as a command (echo).
 pub async fn speak(text: &str, mode: &VoiceMode) -> Result<()> {
+    if *mode == VoiceMode::Off {
+        return Ok(());
+    }
+
     let cleaned = clean_for_speech(text);
-    match mode {
+    if cleaned.is_empty() {
+        return Ok(());
+    }
+
+    set_mic_muted(true);
+    let _guard = MicUnmuteGuard;
+
+    let result = match mode {
         VoiceMode::Off => Ok(()),
         VoiceMode::Basic => {
             let config = LunaConfig::load()?;
@@ -19,6 +33,29 @@ pub async fn speak(text: &str, mode: &VoiceMode) -> Result<()> {
             let wav_path = piper::synthesize_to_file(&cleaned, &config).await?;
             rvc::convert_and_play(&wav_path, &config).await
         }
+    };
+
+    result
+}
+
+/// Mutes/unmutes the default input source via PulseAudio/PipeWire.
+/// No-op if pactl is unavailable.
+fn set_mic_muted(muted: bool) {
+    let _ = Command::new("pactl")
+        .args([
+            "set-source-mute",
+            "@DEFAULT_SOURCE@",
+            if muted { "1" } else { "0" },
+        ])
+        .status();
+}
+
+/// Ensures the mic is unmuted even if playback errors or panics.
+struct MicUnmuteGuard;
+
+impl Drop for MicUnmuteGuard {
+    fn drop(&mut self) {
+        set_mic_muted(false);
     }
 }
 
@@ -52,5 +89,51 @@ pub fn clean_for_speech(text: &str) -> String {
     while out.contains("  ") {
         out = out.replace("  ", " ");
     }
-    out.replace('\n', " ").trim().to_string()
+
+    out = out.replace('\n', " ").trim().to_string();
+
+    // Strip emojis so TTS doesn't read them out as names/descriptions
+    // (e.g. 😊 spoken as "smiling face with smiling eyes").
+    strip_emojis(&out)
+}
+
+fn is_emoji(c: char) -> bool {
+    let cp = c as u32;
+    matches!(cp,
+        // Emoticons, symbols & pictographs, regional indicators (flags),
+        // supplemental symbols, transports
+        0x1F000..=0x1FAFF |
+        // Misc symbols & dingbats (⚠ ☀ ☕ ⭐ ❤ ✈ etc.)
+        0x2600..=0x27BF |
+        // Variation selectors (emoji presentation)
+        0xFE00..=0xFE0F |
+        // Zero-width joiner — glues multi-codepoint emoji together
+        0x200D |
+        // Combining enclosing keycap (1️⃣)
+        0x20E3)
+}
+
+fn strip_emojis(text: &str) -> String {
+    text.chars().filter(|c| !is_emoji(*c)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_emojis_before_speech() {
+        let cleaned = clean_for_speech("Hello! 😊 How can I assist you? 🌍🔥");
+        assert!(!cleaned.contains('😊'));
+        assert!(!cleaned.contains('🌍'));
+        assert!(!cleaned.contains('🔥'));
+        assert!(cleaned.contains("Hello!"));
+        assert!(cleaned.contains("How can I assist you?"));
+    }
+
+    #[test]
+    fn leaves_plain_text_alone() {
+        let cleaned = clean_for_speech("The temperature is 72 degrees today.");
+        assert_eq!(cleaned, "The temperature is 72 degrees today.");
+    }
 }

@@ -119,8 +119,16 @@ pub struct VoiceConfig {
     pub mode: VoiceMode,
     pub piper_bin: PathBuf,
     pub piper_model: PathBuf,
+    #[serde(default = "default_whisper_model")]
+    pub whisper_model: PathBuf,
     pub rvc_model: Option<PathBuf>,
     pub rvc_script: Option<PathBuf>,
+}
+
+fn default_whisper_model() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/root"))
+        .join(".local/share/luna/models/ggml-small.en.bin")
 }
 
 impl Default for VoiceConfig {
@@ -130,6 +138,7 @@ impl Default for VoiceConfig {
             mode: VoiceMode::Basic,
             piper_bin: PathBuf::from("/usr/bin/piper"),
             piper_model: home.join(".local/share/luna/voices/basic.onnx"),
+            whisper_model: default_whisper_model(),
             rvc_model: None,
             rvc_script: None,
         }
@@ -168,6 +177,7 @@ impl Default for AudioConfig {
             ptt_key: "ControlLeft".into(),
             wake_word: "hey luna".into(),
             wake_aliases: vec![
+                "luna".into(),
                 "hey luna".into(),
                 "hay luna".into(),
                 "hello luna".into(),
@@ -175,7 +185,6 @@ impl Default for AudioConfig {
                 "hey lana".into(),
                 "hi luna".into(),
                 "hi lana".into(),
-                "luna".into(),
             ],
             vad_silence_ms: 2000,
             sample_rate: 16000,
