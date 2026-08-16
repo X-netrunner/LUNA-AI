@@ -33,6 +33,10 @@ pub async fn run_command(command: &str, sudo_pass: Option<&str>) -> Result<Shell
 ///
 /// sudo -S reads the password from stdin pipe.
 /// sudo -p '' suppresses the "password:" prompt string from appearing in output.
+///
+/// A bash function shadows `sudo` so EVERY occurrence in the command (e.g.
+/// after `&&` or `;`) gets the piped password — otherwise the 2nd sudo would
+/// hang waiting for a TTY. `command sudo` bypasses the function for the real call.
 pub fn inject_sudo_password(cmd: &str, sudo_pass: Option<&str>) -> String {
     let cmd = cmd.trim();
 
@@ -52,9 +56,8 @@ pub fn inject_sudo_password(cmd: &str, sudo_pass: Option<&str>) -> String {
         Some(pass) => {
             let safe_pass = pass.replace('\'', "'\\''");
             format!(
-                "echo '{}' | sudo -S -p '' {}",
-                safe_pass,
-                cmd.replacen("sudo ", "", 1)
+                "sudo() {{ echo '{}' | command sudo -S -p '' \"$@\"; }}; {}",
+                safe_pass, cmd
             )
         }
         None => {
@@ -67,9 +70,10 @@ pub fn inject_sudo_password(cmd: &str, sudo_pass: Option<&str>) -> String {
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
-        s.to_string()
+    let t = crate::util::truncate(s, max_chars);
+    if t.len() == s.len() {
+        t.to_string()
     } else {
-        format!("{}... [truncated {} chars]", &s[..max_chars], s.len() - max_chars)
+        format!("{}... [truncated {} chars]", t, s.chars().count() - max_chars)
     }
 }

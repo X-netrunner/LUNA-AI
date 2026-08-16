@@ -75,10 +75,13 @@ impl PermanentMemory {
             anyhow::bail!("Cannot remember empty fact");
         }
 
-        // Check for near-duplicate (same first 30 chars)
-        let prefix = &content[..content.len().min(30)];
-        if self.facts.iter().any(|f| f.content.starts_with(prefix)) {
-            return Ok(format!("Already know something similar: updating it"));
+        // Near-duplicate (same first 30 chars) — update it in place
+        let prefix = crate::util::truncate(&content, 30);
+        if let Some(existing) = self.facts.iter_mut().find(|f| f.content.starts_with(prefix)) {
+            existing.content = content.clone();
+            existing.added = Local::now().format("%Y-%m-%d").to_string();
+            self.save()?;
+            return Ok(format!("Updated memory: {}", content));
         }
 
         // Cap at 100 facts — drop oldest if over limit
@@ -143,12 +146,7 @@ impl PermanentMemory {
         format!("[What Luna knows about the user]\n{}\n", facts_text)
     }
 
-    pub fn fact_count(&self) -> usize {
-        self.facts.len()
-    }
-
-    fn save(&self) -> Result<()> {
-        let json = serde_json::to_string_pretty(&self.facts)
+    fn save(&self) -> Result<()> {        let json = serde_json::to_string_pretty(&self.facts)
             .context("Failed to serialize permanent memory")?;
         std::fs::write(&self.path, json).context("Failed to write permanent memory")?;
         Ok(())

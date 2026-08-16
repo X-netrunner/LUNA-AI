@@ -267,7 +267,7 @@ impl OllamaClient {
                     "Ollama 500 with tools — falling back to plain chat. \
                      Set native_tools=false in luna.toml to disable tool calls entirely. \
                      Error: {}",
-                    &body[..body.len().min(200)]
+                    crate::util::truncate(&body, 200)
                 );
                 return self.chat_streaming(messages).await;
             }
@@ -280,16 +280,10 @@ impl OllamaClient {
             .await
             .context("Failed to read response body")?;
 
-        // TEMP DEBUG — remove after diagnosis
-        /*eprintln!(
-            "\n[DEBUG RAW RESPONSE]\n{}\n[END DEBUG]\n",
-            &body[..body.len().min(1000)]
-        );*/
-
         let parsed: FullResponse = serde_json::from_str(&body).with_context(|| {
             format!(
                 "Failed to parse Ollama response: {}",
-                &body[..body.len().min(300)]
+                crate::util::truncate(&body, 300)
             )
         })?;
 

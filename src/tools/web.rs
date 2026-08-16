@@ -55,11 +55,7 @@ fn parse_ddg_response(body: &str, query: &str) -> Result<String> {
     // Abstract text (Wikipedia summary)
     if let Some(text) = v["AbstractText"].as_str() {
         if !text.is_empty() {
-            let truncated = if text.len() > 800 {
-                format!("{}...", &text[..800])
-            } else {
-                text.to_string()
-            };
+            let truncated = crate::util::truncate(text, 800);
             parts.push(format!("Summary: {}", truncated));
             if let Some(src) = v["AbstractURL"].as_str() {
                 if !src.is_empty() {

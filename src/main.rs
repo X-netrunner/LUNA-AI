@@ -14,9 +14,9 @@ mod memory;
 mod stt;
 mod tools;
 mod tts;
+mod util;
 
 use anyhow::Result;
-use rpassword;
 use clap::Parser;
 use config::{LunaConfig, VoiceMode};
 use tracing_subscriber::EnvFilter;

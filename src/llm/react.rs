@@ -89,7 +89,7 @@ impl<'a> ReactLoop<'a> {
                             }
                         };
 
-                        turn_messages.push(Message::assistant(&format!(
+                        turn_messages.push(Message::assistant(format!(
                             "<|tool_call|>{}<|/tool_call|>",
                             tool_name
                         )));
@@ -129,10 +129,10 @@ impl<'a> ReactLoop<'a> {
                         tracing::debug!(
                             "Tool '{}' result: {}",
                             tool_name,
-                            &tool_result[..tool_result.len().min(200)]
+                            &crate::util::truncate(&tool_result, 200)
                         );
 
-                        turn_messages.push(Message::assistant(&format!(
+                        turn_messages.push(Message::assistant(format!(
                             "<|tool_call|>{}<|/tool_call|>",
                             tool_name
                         )));
