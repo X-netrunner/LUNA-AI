@@ -20,16 +20,21 @@ pub async fn learn(topic: &str, sudo_pass: Option<&str>) -> Result<String> {
     output.push_str("\n\n");
 
     // Step 2: if the search gave us a source URL, fetch the full page
-    if let Some(url) = extract_url(&search_result) {
+    // Try DDG's Source: URL first, then the first Brave result URL
+    let url = extract_url(&search_result)
+        .or_else(|| extract_first_link(&search_result));
+
+    if let Some(url) = url {
         output.push_str(&format!("=== Fetched page: {} ===\n", url));
         let safe_url = url.replace('\'', "'\\''");
         let cmd = format!(
-            "lynx -dump -nolist -width=120 '{}' 2>/dev/null \
-             || curl -sL --max-time 10 '{}' \
-                | sed 's/<[^>]*>//g; s/&amp;/\\&/g; s/&lt;/</g; s/&gt;/>/g' \
-                | sed '/^[[:space:]]*$/d' \
-                | head -150",
-            safe_url, safe_url
+            "curl -sL --max-time 10 \
+                --user-agent 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0' \
+                '{}' \
+             | sed 's/<[^>]*>//g; s/&amp;/\\&/g; s/&lt;/</g; s/&gt;/>/g' \
+             | sed '/^[[:space:]]*$/d' \
+             | head -150",
+            safe_url
         );
         let result = shell::run_command(&cmd, sudo_pass).await?;
         let text = result.stdout.trim();
@@ -57,4 +62,20 @@ fn extract_url(text: &str) -> Option<String> {
     text.lines()
         .find(|l| l.starts_with("Source:"))
         .map(|l| l.trim_start_matches("Source:").trim().to_string())
+}
+
+/// Extract first URL from Brave search results line like "- Title (https://...)"
+fn extract_first_link(text: &str) -> Option<String> {
+    text.lines()
+        .find(|l| l.starts_with("- "))
+        .and_then(|l| {
+            let start = l.rfind('(')?;
+            let end = l.rfind(')')?;
+            let url = &l[start + 1..end];
+            if url.starts_with("http") {
+                Some(url.to_string())
+            } else {
+                None
+            }
+        })
 }

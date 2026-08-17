@@ -624,9 +624,13 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             if url.is_empty() {
                 anyhow::bail!("No URL provided");
             }
+            let safe_url = url.replace('\'', "'\\''");
             let cmd = format!(
-                "curl -sL --max-time 10 '{}' | sed 's/<[^>]*>//g' | sed '/^[[:space:]]*$/d' | head -200",
-                url.replace('\'', "'\\''")
+                "curl -sL --max-time 10 \
+                    --user-agent 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0' \
+                    '{}' \
+                 | sed 's/<[^>]*>//g' | sed '/^[[:space:]]*$/d' | head -200",
+                safe_url
             );
             let result = shell::run_command(&cmd, sudo_pass).await?;
             if result.stdout.trim().is_empty() {
