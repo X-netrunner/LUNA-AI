@@ -560,7 +560,7 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
 
         "web_search" => {
             let query = args["query"].as_str().unwrap_or("");
-            web::search(query).await
+            web::search(query, config.search.brave_api_key.as_deref()).await
         }
 
         "read_file" => {
@@ -731,7 +731,7 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             if topic.is_empty() {
                 anyhow::bail!("No topic provided");
             }
-            learn::learn(topic, sudo_pass).await
+            learn::learn(topic, sudo_pass, config.search.brave_api_key.as_deref()).await
         }
 
         "media_info" => {
@@ -768,7 +768,7 @@ STATUS=$(gdbus call --session --dest org.mpris.MediaPlayer2.spotify \
   --object-path /org/mpris/MediaPlayer2 \
   --method org.freedesktop.DBus.Properties.Get \
   org.mpris.MediaPlayer2.Player PlaybackStatus 2>/dev/null | \
-  grep -oP ">\K[^)]+" || echo "Unknown")
+  grep -oP "'\\K[^']+" || echo "Unknown")
 
 echo "TITLE=$TITLE"
 echo "ARTIST=$ARTIST"

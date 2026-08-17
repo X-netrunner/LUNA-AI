@@ -35,6 +35,9 @@ pub struct LunaConfig {
 
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    #[serde(default)]
+    pub search: SearchConfig,
 }
 
 // ── Agent behaviour ───────────────────────────────────────────────────────────
@@ -257,6 +260,15 @@ impl Default for LoggingConfig {
             level: "info".into(),
         }
     }
+}
+
+// ── Web search ────────────────────────────────────────────────────────────────
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct SearchConfig {
+    /// Brave Search API key — free tier: 2000 queries/month
+    /// Get yours at https://api.search.brave.com/
+    /// Leave unset to fall back to DDG instant answers only.
+    pub brave_api_key: Option<String>,
 }
 
 // ── Loading logic ─────────────────────────────────────────────────────────────
