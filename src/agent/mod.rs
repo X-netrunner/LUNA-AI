@@ -16,12 +16,15 @@ use std::io::{self, BufRead, Write};
 fn build_fast_client(config: &LunaConfig) -> Option<OllamaClient> {
     // Only build if a fast_model is configured
     let model = config.llm.fast_model.as_deref()?;
-    Some(OllamaClient::new(
-        &config.llm.base_url,
-        model,
-        config.llm.temperature,
-        512, // smaller token budget — fast model is for short answers
-    ))
+    Some(
+        OllamaClient::new(
+            &config.llm.base_url,
+            model,
+            config.llm.temperature,
+            512, // smaller token budget — fast model is for short answers
+        )
+        .debug(config.logging.level == "debug"),
+    )
 }
 
 fn build_client(config: &LunaConfig) -> OllamaClient {
@@ -31,6 +34,7 @@ fn build_client(config: &LunaConfig) -> OllamaClient {
         config.llm.temperature,
         config.llm.max_tokens,
     )
+    .debug(config.logging.level == "debug")
 }
 
 fn build_stt(config: &LunaConfig) -> crate::stt::whisper::WhisperStt {
@@ -319,18 +323,21 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
             _ => {}
         }
 
-        print!("Luna: ");
-        io::stdout().flush().ok();
+        let debug = config.logging.level == "debug";
+        let (active_react, effective_prompt, is_fast): (&ReactLoop, String, bool) =
+            match classify(&input) {
+                QueryComplexity::Simple if fast_react.is_some() => {
+                    tracing::debug!("Simple query — using fast model");
+                    (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true)
+                }
+                _ => (&react, system_prompt.to_string(), false),
+            };
 
-        let (active_react, effective_prompt): (&ReactLoop, String) = match classify(&input) {
-            QueryComplexity::Simple if fast_react.is_some() => {
-                tracing::debug!("Simple query — using fast model");
-                (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string())
-            }
-            _ => {
-                (&react, system_prompt.to_string())
-            }
-        };
+        let tag = if debug {
+            if is_fast { "[fast] " } else { "[full] " }
+        } else { "" };
+        print!("Luna{}: ", tag);
+        io::stdout().flush().ok();
 
         match active_react.run(&input, &mut memory, &effective_prompt).await {
             Ok((response, streamed)) => {
@@ -469,18 +476,20 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 
                 if looks_like_artifact(&input) { continue; }
 
-                print!("Luna: ");
-                io::stdout().flush().ok();
-
-                // Pick model based on complexity — simple queries go to the
-                // fast model, everything else to the full one.
-                let (active_react, effective_prompt): (&ReactLoop, String) =
+                let debug = config.logging.level == "debug";
+                let (active_react, effective_prompt, is_fast): (&ReactLoop, String, bool) =
                     match classify(&input) {
                         QueryComplexity::Simple if fast_react.is_some() => {
-                            (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string())
+                            (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true)
                         }
-                        _ => (&react, system_prompt.to_string()),
+                        _ => (&react, system_prompt.to_string(), false),
                     };
+
+                let tag = if debug {
+                    if is_fast { "[fast] " } else { "[full] " }
+                } else { "" };
+                print!("Luna{}: ", tag);
+                io::stdout().flush().ok();
 
                 match active_react.run(&input, &mut memory, &effective_prompt).await {
                     Ok((response, streamed)) => {

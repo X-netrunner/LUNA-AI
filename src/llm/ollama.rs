@@ -106,6 +106,8 @@ struct StreamChunk {
 #[derive(Debug, Deserialize)]
 struct StreamMessage {
     content: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 // Full response (with tools, non-streaming)
@@ -117,6 +119,8 @@ struct FullResponse {
 #[derive(Debug, Deserialize)]
 struct FullMessage {
     content: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ToolCall>,
 }
@@ -139,6 +143,7 @@ pub struct OllamaClient {
     model: String,
     temperature: f32,
     max_tokens: u32,
+    debug: bool,
 }
 
 impl OllamaClient {
@@ -149,7 +154,13 @@ impl OllamaClient {
             model: model.to_string(),
             temperature,
             max_tokens,
+            debug: false,
         }
+    }
+
+    pub fn debug(mut self, on: bool) -> Self {
+        self.debug = on;
+        self
     }
 
     pub async fn chat(
@@ -214,6 +225,16 @@ impl OllamaClient {
 
                 let chunk: StreamChunk = serde_json::from_str(&line)
                     .with_context(|| format!("Failed to parse chunk: {}", line))?;
+
+                // Print thinking tokens in debug mode — they appear on stderr
+                // so they don't mix with the actual response on stdout.
+                if self.debug {
+                    if let Some(ref think) = chunk.message.thinking {
+                        eprint!("[think] {}", think);
+                        use std::io::Write;
+                        std::io::stderr().flush().ok();
+                    }
+                }
 
                 if let Some(token) = chunk.message.content {
                     // Strip emojis as tokens arrive — they'd otherwise be
@@ -297,11 +318,22 @@ impl OllamaClient {
 
         // Tool call takes priority — if present, return it immediately
         if !parsed.message.tool_calls.is_empty() {
+            // Print thinking tokens in debug mode even when there's a tool call
+            if self.debug {
+                if let Some(ref think) = parsed.message.thinking {
+                    eprintln!("[think] {}", crate::util::truncate(think, 500));
+                }
+            }
             return Ok(OllamaResponse::ToolUse(parsed.message.tool_calls));
         }
 
         // Text response — return it WITHOUT printing.
         // The caller (agent/mod.rs) owns all printing so there's one print site.
+        if self.debug {
+            if let Some(ref think) = parsed.message.thinking {
+                eprintln!("[think] {}", crate::util::truncate(think, 500));
+            }
+        }
         let text = crate::util::strip_emojis(&parsed.message.content.unwrap_or_default());
         Ok(OllamaResponse::Text {
             text,

@@ -8,6 +8,7 @@ use crate::llm::ollama::{Message, OllamaClient, OllamaResponse};
 use crate::memory::Memory;
 use crate::tools;
 use anyhow::Result;
+use serde_json::json;
 
 pub struct ReactLoop<'a> {
     client: &'a OllamaClient,
@@ -188,6 +189,23 @@ fn parse_freeform_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> 
             return Some(ToolCall {
                 function: ToolCallFunction { name, arguments },
             });
+        }
+    }
+
+    // Pattern 3: <|tool_call|>name<|/tool_call|>  (echoed from memory format)
+    // May appear multiple times or as the only content; extract the last one.
+    if let Some(start) = text.rfind("<|tool_call|>") {
+        let inner = &text[start + 13..]; // len("<|tool_call|>") = 13
+        if let Some(end) = inner.find("<|/tool_call|>") {
+            let name = inner[..end].trim().to_string();
+            if !name.is_empty() {
+                return Some(ToolCall {
+                    function: ToolCallFunction {
+                        name,
+                        arguments: json!({}),
+                    },
+                });
+            }
         }
     }
 
