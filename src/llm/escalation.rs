@@ -56,6 +56,8 @@ pub fn classify(input: &str) -> QueryComplexity {
         "email", "remember", "note", "calendar", "event",
         // Debug/config toggle
         "debug mode", "turn on debug", "turn off debug", "set debug",
+        // Media playback
+        "song", "music", "spotify", "playing", "media", "track",
     ];
     if tool_signals.iter().any(|s| lower.contains(s)) {
         return QueryComplexity::Complex;

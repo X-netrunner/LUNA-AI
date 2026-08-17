@@ -208,6 +208,7 @@ impl OllamaClient {
 
         let mut stream = response.bytes_stream();
         let mut full_text = String::new();
+        let mut thinking_buf = String::new();
         let mut buffer = String::new();
 
         while let Some(chunk) = stream.next().await {
@@ -226,13 +227,10 @@ impl OllamaClient {
                 let chunk: StreamChunk = serde_json::from_str(&line)
                     .with_context(|| format!("Failed to parse chunk: {}", line))?;
 
-                // Print thinking tokens in debug mode — they appear on stderr
-                // so they don't mix with the actual response on stdout.
+                // Collect thinking tokens — printed as a block when done
                 if self.debug {
                     if let Some(ref think) = chunk.message.thinking {
-                        eprint!("[think] {}", think);
-                        use std::io::Write;
-                        std::io::stderr().flush().ok();
+                        thinking_buf.push_str(think);
                     }
                 }
 
@@ -247,6 +245,13 @@ impl OllamaClient {
                 }
 
                 if chunk.done {
+                    // Print the accumulated thinking block at the end
+                    if !thinking_buf.is_empty() {
+                        eprintln!(
+                            "\n[think] {}",
+                            crate::util::truncate(&thinking_buf, 800)
+                        );
+                    }
                     println!();
                     break;
                 }

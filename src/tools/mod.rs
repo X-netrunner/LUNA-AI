@@ -457,6 +457,21 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 }),
             },
         },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "media_info".into(),
+                description: "Get what's currently playing on the system (Spotify, MPV, \
+                             browser, etc.) via D-Bus MPRIS. Returns song title, artist, \
+                             album, and playback status. Use for 'what song is playing' \
+                             or 'what am I listening to'.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+        },
     ]
 }
 
@@ -713,6 +728,52 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
                 anyhow::bail!("No topic provided");
             }
             learn::learn(topic, sudo_pass).await
+        }
+
+        "media_info" => {
+            // Query all active MPRIS players for current playback info
+            let script = r#"
+dbus-send --session --dest=org.mpris.MediaPlayer2.spotify \
+  --object-path=/org/mpris/MediaPlayer2 \
+  --type=method_call --print-reply \
+  org.freedesktop.DBus.Properties.Get \
+  string:org.mpris.MediaPlayer2.Player \
+  string:Metadata 2>/dev/null | \
+  grep -E '"(xesam:title|xesam:artist|xesam:album|xesam:url)"' | \
+  sed 's/.*variant.*string "\(.*\)"/\1/' | head -4
+"#;
+            let result = shell::run_command(script.trim(), sudo_pass).await?;
+            let stdout = result.stdout.trim().to_string();
+            if stdout.is_empty() {
+                // Try generic MPRIS query for any active player
+                let fallback = r#"
+for bus in $(dbus-send --session --dest=org.freedesktop.DBus \
+  --type=method_call --print-reply /org/freedesktop/DBus \
+  org.freedesktop.DBus.ListNames 2>/dev/null | \
+  grep "string \"" | sed 's/.*"\(.*\)".*/\1/' | grep MediaPlayer2); do
+    dbus-send --session --dest="$bus" \
+      --object-path=/org/mpris/MediaPlayer2 \
+      --type=method_call --print-reply \
+      org.freedesktop.DBus.Properties.Get \
+      string:org.mpris.MediaPlayer2.Player \
+      string:Metadata 2>/dev/null | \
+      grep -E '"(xesam:title|xesam:artist|xesam:album)"' | \
+      sed 's/.*variant.*string "\(.*\)"/\1/' | head -3
+    break
+done
+"#;
+                let r2 = shell::run_command(fallback.trim(), sudo_pass).await?;
+                let out2 = r2.stdout.trim().to_string();
+                if out2.is_empty() {
+                    Ok("No media player found running. Start Spotify or another \
+                        MPRIS-compatible player first."
+                        .into())
+                } else {
+                    Ok(format!("Now playing:\n{}", out2))
+                }
+            } else {
+                Ok(format!("Now playing:\n{}", stdout))
+            }
         }
 
         "set_debug" => {
