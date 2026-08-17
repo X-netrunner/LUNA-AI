@@ -731,48 +731,70 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
         }
 
         "media_info" => {
-            // Query all active MPRIS players for current playback info
+            // Use gdbus (GIO) — dbus-send is broken on some Arch builds.
+            // Query Spotify first, then fall back to any active MPRIS player.
             let script = r#"
-dbus-send --session --dest=org.mpris.MediaPlayer2.spotify \
-  --object-path=/org/mpris/MediaPlayer2 \
-  --type=method_call --print-reply \
-  org.freedesktop.DBus.Properties.Get \
-  string:org.mpris.MediaPlayer2.Player \
-  string:Metadata 2>/dev/null | \
-  grep -E '"(xesam:title|xesam:artist|xesam:album|xesam:url)"' | \
-  sed 's/.*variant.*string "\(.*\)"/\1/' | head -4
+# Try Spotify first
+OUT=$(gdbus call --session --dest org.mpris.MediaPlayer2.spotify \
+  --object-path /org/mpris/MediaPlayer2 \
+  --method org.freedesktop.DBus.Properties.Get \
+  org.mpris.MediaPlayer2.Player Metadata 2>/dev/null)
+
+# If that failed, find any MediaPlayer2 bus
+if [ -z "$OUT" ]; then
+    for bus in $(gdbus call --session --dest org.freedesktop.DBus \
+      --object-path /org/freedesktop/DBus \
+      --method org.freedesktop.DBus.ListNames 2>/dev/null | \
+      tr "'" "\n" | grep MediaPlayer2); do
+        OUT=$(gdbus call --session --dest "$bus" \
+          --object-path /org/mpris/MediaPlayer2 \
+          --method org.freedesktop.DBus.Properties.Get \
+          org.mpris.MediaPlayer2.Player Metadata 2>/dev/null)
+        [ -n "$OUT" ] && break
+    done
+fi
+
+[ -z "$OUT" ] && echo "NO_PLAYER" && exit 0
+
+# Parse GVariant output — extract title, artist, album
+TITLE=$(echo "$OUT" | grep -oP "xesam:title': <'\K[^']+")
+ARTIST=$(echo "$OUT" | grep -oP "xesam:artist': <\['\K[^']+")
+ALBUM=$(echo "$OUT" | grep -oP "xesam:album': <'\K[^']+")
+STATUS=$(gdbus call --session --dest org.mpris.MediaPlayer2.spotify \
+  --object-path /org/mpris/MediaPlayer2 \
+  --method org.freedesktop.DBus.Properties.Get \
+  org.mpris.MediaPlayer2.Player PlaybackStatus 2>/dev/null | \
+  grep -oP ">\K[^)]+" || echo "Unknown")
+
+echo "TITLE=$TITLE"
+echo "ARTIST=$ARTIST"
+echo "ALBUM=$ALBUM"
+echo "STATUS=$STATUS"
 "#;
             let result = shell::run_command(script.trim(), sudo_pass).await?;
             let stdout = result.stdout.trim().to_string();
-            if stdout.is_empty() {
-                // Try generic MPRIS query for any active player
-                let fallback = r#"
-for bus in $(dbus-send --session --dest=org.freedesktop.DBus \
-  --type=method_call --print-reply /org/freedesktop/DBus \
-  org.freedesktop.DBus.ListNames 2>/dev/null | \
-  grep "string \"" | sed 's/.*"\(.*\)".*/\1/' | grep MediaPlayer2); do
-    dbus-send --session --dest="$bus" \
-      --object-path=/org/mpris/MediaPlayer2 \
-      --type=method_call --print-reply \
-      org.freedesktop.DBus.Properties.Get \
-      string:org.mpris.MediaPlayer2.Player \
-      string:Metadata 2>/dev/null | \
-      grep -E '"(xesam:title|xesam:artist|xesam:album)"' | \
-      sed 's/.*variant.*string "\(.*\)"/\1/' | head -3
-    break
-done
-"#;
-                let r2 = shell::run_command(fallback.trim(), sudo_pass).await?;
-                let out2 = r2.stdout.trim().to_string();
-                if out2.is_empty() {
-                    Ok("No media player found running. Start Spotify or another \
-                        MPRIS-compatible player first."
-                        .into())
-                } else {
-                    Ok(format!("Now playing:\n{}", out2))
-                }
+            if stdout.contains("NO_PLAYER") || stdout.is_empty() {
+                Ok("No media player found running. Start Spotify or another \
+                    MPRIS-compatible player first."
+                    .into())
             } else {
-                Ok(format!("Now playing:\n{}", stdout))
+                // Parse KEY=VALUE lines into a readable sentence
+                let mut title = String::new();
+                let mut artist = String::new();
+                let mut album = String::new();
+                let mut status = String::new();
+                for line in stdout.lines() {
+                    if let Some(v) = line.strip_prefix("TITLE=") { title = v.to_string(); }
+                    else if let Some(v) = line.strip_prefix("ARTIST=") { artist = v.to_string(); }
+                    else if let Some(v) = line.strip_prefix("ALBUM=") { album = v.to_string(); }
+                    else if let Some(v) = line.strip_prefix("STATUS=") { status = v.to_string(); }
+                }
+                let mut out = format!("Now playing: {} by {}", title, artist);
+                if !album.is_empty() {
+                    out.push_str(&format!(" (album: {})", album));
+                }
+                out.push_str(&format!(" [{}]", status));
+                Ok(out)
             }
         }
 
