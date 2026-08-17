@@ -437,6 +437,26 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 }),
             },
         },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "set_debug".into(),
+                description: "Toggle Luna's debug logging on or off. Writes to the config file — \
+                             Luna must be restarted for the change to take effect.  Accepts \
+                             'on', 'off', 'debug', or 'info'.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "level": {
+                            "type": "string",
+                            "enum": ["on", "off", "debug", "info"],
+                            "description": "'on'/'debug' enables verbose logging; 'off'/'info' disables it"
+                        }
+                    },
+                    "required": ["level"]
+                }),
+            },
+        },
     ]
 }
 
@@ -693,6 +713,27 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
                 anyhow::bail!("No topic provided");
             }
             learn::learn(topic, sudo_pass).await
+        }
+
+        "set_debug" => {
+            let level = args["level"].as_str().unwrap_or("info");
+            let new_level = match level {
+                "on" | "debug" => "debug",
+                "off" | "info" => "info",
+                other => {
+                    anyhow::bail!(
+                        "Invalid level '{}' — use 'on', 'off', 'debug', or 'info'",
+                        other
+                    );
+                }
+            };
+            let mut cfg = crate::config::LunaConfig::load()?;
+            cfg.logging.level = new_level.to_string();
+            cfg.save()?;
+            Ok(format!(
+                "Logging set to '{}'. Restart Luna for the change to take effect.",
+                new_level
+            ))
         }
 
         unknown => {

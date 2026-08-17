@@ -46,25 +46,26 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Set up logging — LUNA_LOG env var overrides verbosity flag
-    // Example: LUNA_LOG=debug luna
-    let filter = match args.verbose {
-        0 => "luna=info",
-        1 => "luna=debug",
-        _ => "luna=trace",
+    // Load config first so logging level can come from the file.
+    let mut config = LunaConfig::load()?;
+
+    // Set up logging — precedence: LUNA_LOG env > CLI -v flag > config file > default
+    let filter = if let Ok(env) = std::env::var("LUNA_LOG") {
+        env
+    } else if args.verbose >= 2 {
+        "luna=trace".into()
+    } else if args.verbose == 1 {
+        "luna=debug".into()
+    } else {
+        format!("luna={}", config.logging.level)
     };
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_env("LUNA_LOG").unwrap_or_else(|_| EnvFilter::new(filter)),
-        )
-        .with_target(false) // cleaner output — no module path prefix
-        .without_time() // skip timestamps for now, add later if needed
+        .with_env_filter(EnvFilter::new(filter))
+        .with_target(false)
+        .without_time()
         .init();
 
     tracing::info!("Luna starting up...");
-
-    // Load config — creates defaults if luna.toml doesn't exist yet
-    let mut config = LunaConfig::load()?;
 
     // Apply CLI overrides on top of file config
     if let Some(voice_str) = args.voice {

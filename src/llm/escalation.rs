@@ -54,6 +54,8 @@ pub fn classify(input: &str) -> QueryComplexity {
         // Personal tools — Todoist, credentials, memory, reminders
         "todo", "task", "reminder", "credential", "password", "account",
         "email", "remember", "note", "calendar", "event",
+        // Debug/config toggle
+        "debug mode", "turn on debug", "turn off debug", "set debug",
     ];
     if tool_signals.iter().any(|s| lower.contains(s)) {
         return QueryComplexity::Complex;

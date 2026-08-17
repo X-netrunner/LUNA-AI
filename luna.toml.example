@@ -25,7 +25,11 @@ model = "qwen2.5:7b-instruct-q4_K_M"
 temperature = 0.7
 max_tokens = 2048
 enable_thinking = true
-# fast_model = "qwen3:0.6b"  # Optional: small model for simple queries
+fast_model = "qwen3:0.6b"      # Small fast model for greetings & short factual questions
+                                 # Remove or comment out to disable the two-model split
+
+[logging]
+level = "info"                  # "info" or "debug" — toggle via "turn on debug mode"
 
 [todoist]
 api_token = "your_token_here"

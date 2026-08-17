@@ -32,6 +32,9 @@ pub struct LunaConfig {
 
     #[serde(default)]
     pub proactive: ProactiveConfig,
+
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 // ── Agent behaviour ───────────────────────────────────────────────────────────
@@ -55,6 +58,10 @@ impl Default for AgentConfig {
                             desktop, filesystem, and shell. Think before acting. \
                             When you use a tool, say so briefly. Never pretend you \
                             can't do something — figure it out. \
+                            You run on two models: a fast 0.6B model handles greetings \
+                            and short factual questions, while a full 7B model handles \
+                            everything else including tool use. When asked about your \
+                            capabilities or speed, be honest about this. \
                             FILE INSPECTION RULE: To find and read a file, always use \
                             run_shell with: cat $(find /path -name filename 2>/dev/null | head -1) \
                             Never use edit_file to inspect code — edit_file is for opening \
@@ -233,6 +240,21 @@ impl Default for ProactiveConfig {
             battery_low_threshold: 20,
             disk_full_threshold: 90,
             check_updates: true,
+        }
+    }
+}
+
+// ── Logging ───────────────────────────────────────────────────────────────────
+#[derive(Debug, Deserialize, Serialize)]
+pub struct LoggingConfig {
+    /// Log level: "info", "debug", or "trace".  Toggle via the set_debug tool.
+    pub level: String,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".into(),
         }
     }
 }
