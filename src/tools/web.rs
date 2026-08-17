@@ -1,62 +1,126 @@
-//! tools/web.rs — Web search via Gemini API or DuckDuckGo instant answers
+//! tools/web.rs — Web search via Tavily, Gemini, or DuckDuckGo
 //!
-//! Gemini free tier (15 RPM, 1M tokens/day) answers questions directly.
-//! Falls back to DDG instant answers when no API key is configured.
+//! Search priority:
+//!   1. Tavily (keyless or keyed) — clean JSON results, purpose-built for AI
+//!   2. Gemini (knowledge answers from training data, no web search needed)
+//!   3. DDG instant answers (definitions, math, Wikipedia)
 
 use anyhow::{Context, Result};
 use serde_json::json;
 
-/// Search the web and return a plain-text summary of top results.
-/// If `gemini_key` is provided, sends the question to Gemini which can
-/// answer directly from its training data + Google Search grounding.
-/// Otherwise falls back to DDG instant answers (limited).
-pub async fn search(query: &str, gemini_key: Option<&str>) -> Result<String> {
-    // Gemini API — can answer real-time questions directly
-    if let Some(key) = gemini_key {
-        return search_gemini(query, key).await;
+/// Search the web. Tries Tavily first, then Gemini, then DDG.
+pub async fn search(
+    query: &str,
+    tavily_key: Option<&str>,
+    gemini_key: Option<&str>,
+) -> Result<String> {
+    // 1. Tavily — real web search, works keyless
+    match search_tavily(query, tavily_key).await {
+        Ok(r) if !r.starts_with("No results") => return Ok(r),
+        Err(e) => tracing::warn!("Tavily search failed: {}", e),
+        _ => {}
     }
 
-    let encoded = urlencoding(query);
+    // 2. Gemini — knowledge answers (no grounding, no rate limit issues)
+    if let Some(key) = gemini_key {
+        match search_gemini(query, key).await {
+            Ok(r) => return Ok(r),
+            Err(e) => tracing::warn!("Gemini search failed: {}", e),
+        }
+    }
 
-    // DuckDuckGo Instant Answer API — free, no auth, but limited
-    let url = format!(
-        "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
-        encoded
-    );
+    // 3. DDG instant answers — limited but always free
+    search_ddg(query).await
+}
+
+// ── Tavily ────────────────────────────────────────────────────────────────────
+
+async fn search_tavily(query: &str, api_key: Option<&str>) -> Result<String> {
+    let body = json!({
+        "query": query,
+        "max_results": 5,
+        "search_depth": "basic",
+        "include_answer": true,
+    });
+    let body_str = body.to_string();
+    let auth_header = match api_key {
+        Some(key) => format!("Authorization: Bearer {}", key),
+        None => "X-Tavily-Access-Mode: keyless".to_string(),
+    };
 
     let output = tokio::task::spawn_blocking(move || {
         std::process::Command::new("curl")
             .args([
                 "-s",
-                "--max-time", "10",
-                "--user-agent", "luna-assistant/1.0",
-                &url,
+                "--max-time", "15",
+                "-H", "Content-Type: application/json",
+                "-H", &auth_header,
+                "-d", &body_str,
+                "https://api.tavily.com/search",
             ])
             .output()
-            .context("curl not found — install curl")
+            .context("curl not found")
     })
     .await
     .context("spawn_blocking panicked")??;
 
     if !output.status.success() {
-        anyhow::bail!("curl failed with exit code {:?}", output.status.code());
+        anyhow::bail!("Tavily curl failed: {:?}", output.status.code());
     }
 
-    let body = String::from_utf8_lossy(&output.stdout);
-    parse_ddg_response(&body, query)
+    let resp: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
+        .context("Failed to parse Tavily response")?;
+
+    if let Some(err) = resp.get("error") {
+        anyhow::bail!("Tavily: {}", err);
+    }
+
+    let mut out = String::new();
+
+    // Include the AI-generated answer if present
+    if let Some(answer) = resp["answer"].as_str() {
+        if !answer.is_empty() {
+            out.push_str(answer);
+            out.push_str("\n\n");
+        }
+    }
+
+    // Web results
+    if let Some(results) = resp["results"].as_array() {
+        if results.is_empty() && out.is_empty() {
+            return Ok(format!("No results found for \"{}\"", query));
+        }
+        for r in results.iter().take(5) {
+            let title = r["title"].as_str().unwrap_or("");
+            let url = r["url"].as_str().unwrap_or("");
+            let content = r["content"].as_str().unwrap_or("");
+            if !title.is_empty() {
+                out.push_str(&format!("- {} ({})\n", title, url));
+                if !content.is_empty() {
+                    let snippet: String = content.chars().take(200).collect();
+                    out.push_str(&format!("  {}\n", snippet));
+                }
+            }
+        }
+    }
+
+    if out.trim().is_empty() {
+        anyhow::bail!("Tavily returned empty results");
+    }
+
+    Ok(out)
 }
 
-/// Ask Gemini a question — free tier, answers with Google Search grounding
+// ── Gemini (knowledge only, no grounding) ─────────────────────────────────────
+
 async fn search_gemini(query: &str, api_key: &str) -> Result<String> {
     let prompt = format!(
-        "Search the web and answer this question concisely in 2-3 sentences. \
-         Give the most recent answer you can find. Question: {}",
+        "Answer this question concisely in 2-3 sentences: {}",
         query
     );
 
     let body = json!({
         "contents": [{"parts": [{"text": prompt}]}],
-        "tools": [{"googleSearch": {}}],
         "generationConfig": {
             "temperature": 0.3,
             "maxOutputTokens": 500
@@ -73,7 +137,7 @@ async fn search_gemini(query: &str, api_key: &str) -> Result<String> {
         std::process::Command::new("curl")
             .args([
                 "-s",
-                "--max-time", "20",
+                "--max-time", "15",
                 "-H", "Content-Type: application/json",
                 "-d", &body_str,
                 &url,
@@ -84,51 +148,74 @@ async fn search_gemini(query: &str, api_key: &str) -> Result<String> {
     .await
     .context("spawn_blocking panicked")??;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let resp: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
+            .context("Failed to parse Gemini response")?;
 
-    let resp: serde_json::Value = serde_json::from_str(&stdout)
-        .context("Failed to parse Gemini response")?;
-
-    // Check for API errors (404 model not found, 429 rate limit, etc.)
     if let Some(err) = resp.get("error") {
         let msg = err["message"].as_str().unwrap_or("unknown error");
-        anyhow::bail!("Gemini API error: {}", msg);
+        anyhow::bail!("Gemini: {}", msg);
     }
 
-    // Extract text from the response (skip thoughtSignature fields)
     let parts = resp["candidates"][0]["content"]["parts"]
         .as_array()
         .context("No parts in Gemini response")?;
 
-    let text = parts.iter()
+    let text = parts
+        .iter()
         .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
         .collect::<Vec<_>>()
         .join("");
 
     if text.is_empty() {
-        anyhow::bail!("Gemini returned no text content");
+        anyhow::bail!("Gemini returned no text");
     }
 
     Ok(text)
 }
 
-/// Fallback: scrape Brave Search results when DDG instant answer is empty
+// ── DDG instant answers ───────────────────────────────────────────────────────
+
+async fn search_ddg(query: &str) -> Result<String> {
+    let encoded = urlencoding(query);
+    let url = format!(
+        "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
+        encoded
+    );
+
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("curl")
+            .args([
+                "-s",
+                "--max-time", "10",
+                "--user-agent", "luna-assistant/1.0",
+                &url,
+            ])
+            .output()
+            .context("curl not found")
+    })
+    .await
+    .context("spawn_blocking panicked")??;
+
+    if !output.status.success() {
+        anyhow::bail!("DDG curl failed");
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout);
+    parse_ddg_response(&body, query)
+}
+
 fn parse_ddg_response(body: &str, query: &str) -> Result<String> {
-    // Parse just the fields we care about without pulling in serde_json
-    // (it's already a dep, use it)
-    let v: serde_json::Value = serde_json::from_str(body)
-        .context("Failed to parse DDG response")?;
+    let v: serde_json::Value = serde_json::from_str(body).context("Failed to parse DDG response")?;
 
     let mut parts: Vec<String> = Vec::new();
 
-    // Instant answer (calculator, conversions, definitions, etc.)
     if let Some(answer) = v["Answer"].as_str() {
         if !answer.is_empty() {
             parts.push(format!("Answer: {}", answer));
         }
     }
 
-    // Abstract text (Wikipedia summary)
     if let Some(text) = v["AbstractText"].as_str() {
         if !text.is_empty() {
             let truncated = crate::util::truncate(text, 800);
@@ -141,7 +228,6 @@ fn parse_ddg_response(body: &str, query: &str) -> Result<String> {
         }
     }
 
-    // Related topics (top 5)
     if let Some(topics) = v["RelatedTopics"].as_array() {
         let related: Vec<String> = topics
             .iter()
@@ -166,8 +252,7 @@ fn parse_ddg_response(body: &str, query: &str) -> Result<String> {
 
     if parts.is_empty() {
         Ok(format!(
-            "No instant answer found for \"{}\". \
-             Try a more specific query or use run_shell with `curl` to fetch a specific URL.",
+            "No instant answer for \"{}\". Try a more specific query.",
             query
         ))
     } else {

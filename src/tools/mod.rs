@@ -13,7 +13,7 @@ pub mod todoist;
 pub mod web;
 
 use crate::llm::ollama::{ToolCall, ToolDef, ToolFunction};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 
 pub fn tool_definitions() -> Vec<ToolDef> {
@@ -560,7 +560,12 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
 
         "web_search" => {
             let query = args["query"].as_str().unwrap_or("");
-            web::search(query, config.search.gemini_api_key.as_deref()).await
+            web::search(
+                query,
+                config.search.tavily_api_key.as_deref(),
+                config.search.gemini_api_key.as_deref(),
+            )
+            .await
         }
 
         "read_file" => {
@@ -624,26 +629,34 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             if url.is_empty() {
                 anyhow::bail!("No URL provided");
             }
-            let safe_url = url.replace('\'', "'\\''");
-            let cmd = format!(
-                "curl -sL --max-time 10 \
-                    --user-agent 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0' \
-                    '{}' \
-                 | sed 's/<[^>]*>//g' | sed '/^[[:space:]]*$/d' | head -200",
-                safe_url
-            );
-            let result = shell::run_command(&cmd, sudo_pass).await?;
-            if result.stdout.trim().is_empty() {
-                Ok("Could not fetch page".to_string())
-            } else {
-                let text = result.stdout.trim();
-                let truncated = text
-                    .char_indices()
-                    .take_while(|(i, _)| *i < 4000)
-                    .last()
-                    .map(|(i, c)| &text[..i + c.len_utf8()])
-                    .unwrap_or(text);
-                Ok(truncated.to_string())
+            // Try Firecrawl keyless first (handles JS-rendered pages)
+            match fetch_page_firecrawl(url).await {
+                Ok(text) => Ok(text),
+                Err(e) => {
+                    tracing::warn!("Firecrawl failed for {}: {}", url, e);
+                    // Fallback: curl + sed (no JS support)
+                    let safe_url = url.replace('\'', "'\\''");
+                    let cmd = format!(
+                        "curl -sL --max-time 10 \
+                            --user-agent 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0' \
+                            '{}' \
+                         | sed 's/<[^>]*>//g' | sed '/^[[:space:]]*$/d' | head -200",
+                        safe_url
+                    );
+                    let result = shell::run_command(&cmd, sudo_pass).await?;
+                    if result.stdout.trim().is_empty() {
+                        Ok("Could not fetch page".to_string())
+                    } else {
+                        let text = result.stdout.trim();
+                        let truncated = text
+                            .char_indices()
+                            .take_while(|(i, _)| *i < 4000)
+                            .last()
+                            .map(|(i, c)| &text[..i + c.len_utf8()])
+                            .unwrap_or(text);
+                        Ok(truncated.to_string())
+                    }
+                }
             }
         }
 
@@ -731,7 +744,13 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             if topic.is_empty() {
                 anyhow::bail!("No topic provided");
             }
-            learn::learn(topic, sudo_pass, config.search.gemini_api_key.as_deref()).await
+            learn::learn(
+                topic,
+                sudo_pass,
+                config.search.tavily_api_key.as_deref(),
+                config.search.gemini_api_key.as_deref(),
+            )
+            .await
         }
 
         "media_info" => {
@@ -869,4 +888,40 @@ pub fn extract_sources(tool_name: &str, result: &str) -> Vec<String> {
     }
 
     sources
+}
+
+/// Fetch a page via Firecrawl keyless — returns clean markdown
+async fn fetch_page_firecrawl(url: &str) -> Result<String> {
+    let body = serde_json::json!({ "url": url });
+    let body_str = body.to_string();
+
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("curl")
+            .args([
+                "-s",
+                "--max-time", "30",
+                "-H", "Content-Type: application/json",
+                "-d", &body_str,
+                "https://api.firecrawl.dev/v1/scrape",
+            ])
+            .output()
+            .context("curl not found")
+    })
+    .await
+    .context("spawn_blocking panicked")??;
+
+    let resp: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
+            .context("Failed to parse Firecrawl response")?;
+
+    if let Some(err) = resp.get("error") {
+        anyhow::bail!("Firecrawl: {}", err);
+    }
+
+    let markdown = resp["data"]["markdown"]
+        .as_str()
+        .context("No markdown in Firecrawl response")?;
+
+    let truncated: String = markdown.chars().take(4000).collect();
+    Ok(truncated)
 }

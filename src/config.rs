@@ -265,9 +265,13 @@ impl Default for LoggingConfig {
 // ── Web search ────────────────────────────────────────────────────────────────
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct SearchConfig {
-    /// Gemini API key — free tier: 15 requests/min, 1M tokens/day
-    /// When set, web questions are sent to Gemini instead of scraping search
-    /// engines (which mostly return CAPTCHAs to curl).
+    /// Tavily API key (optional) — free tier: 1000 searches/month
+    /// Without a key, Tavily keyless works automatically (rate-limited).
+    /// Get yours at https://tavily.com
+    pub tavily_api_key: Option<String>,
+
+    /// Gemini API key (optional) — used as knowledge fallback
+    /// When Tavily has no results, Gemini answers from its training data.
     /// Get yours at https://aistudio.google.com/apikey
     pub gemini_api_key: Option<String>,
 }
