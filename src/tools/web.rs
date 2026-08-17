@@ -46,27 +46,25 @@ pub async fn search(query: &str, gemini_key: Option<&str>) -> Result<String> {
     parse_ddg_response(&body, query)
 }
 
-/// Ask Gemini a question — free tier, no scraping, answers directly
+/// Ask Gemini a question — free tier, answers with Google Search grounding
 async fn search_gemini(query: &str, api_key: &str) -> Result<String> {
     let prompt = format!(
-        "Answer this question concisely in 2-3 sentences. \
-         If it's about current events, news, or real-time data (songs, weather, \
-         stocks, sports scores), give the most recent answer you know. \
-         If you're unsure about very recent data, say so. \
-         Question: {}",
+        "Search the web and answer this question concisely in 2-3 sentences. \
+         Give the most recent answer you can find. Question: {}",
         query
     );
 
     let body = json!({
         "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"googleSearch": {}}],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 300
+            "maxOutputTokens": 500
         }
     });
 
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={}",
         api_key
     );
     let body_str = body.to_string();
@@ -75,7 +73,7 @@ async fn search_gemini(query: &str, api_key: &str) -> Result<String> {
         std::process::Command::new("curl")
             .args([
                 "-s",
-                "--max-time", "15",
+                "--max-time", "20",
                 "-H", "Content-Type: application/json",
                 "-d", &body_str,
                 &url,
@@ -86,21 +84,32 @@ async fn search_gemini(query: &str, api_key: &str) -> Result<String> {
     .await
     .context("spawn_blocking panicked")??;
 
-    if !output.status.success() {
-        anyhow::bail!("Gemini API curl failed: {:?}", output.status.code());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let resp: serde_json::Value = serde_json::from_str(&stdout)
+        .context("Failed to parse Gemini response")?;
+
+    // Check for API errors (404 model not found, 429 rate limit, etc.)
+    if let Some(err) = resp.get("error") {
+        let msg = err["message"].as_str().unwrap_or("unknown error");
+        anyhow::bail!("Gemini API error: {}", msg);
     }
 
-    let resp: serde_json::Value = serde_json::from_str(
-        &String::from_utf8_lossy(&output.stdout),
-    )
-    .context("Failed to parse Gemini response")?;
+    // Extract text from the response (skip thoughtSignature fields)
+    let parts = resp["candidates"][0]["content"]["parts"]
+        .as_array()
+        .context("No parts in Gemini response")?;
 
-    // Extract text from the response
-    let text = resp["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .unwrap_or("(Gemini returned no text)");
+    let text = parts.iter()
+        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join("");
 
-    Ok(text.to_string())
+    if text.is_empty() {
+        anyhow::bail!("Gemini returned no text content");
+    }
+
+    Ok(text)
 }
 
 /// Fallback: scrape Brave Search results when DDG instant answer is empty
