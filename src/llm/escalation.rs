@@ -51,6 +51,9 @@ pub fn classify(input: &str) -> QueryComplexity {
         "script", "write a ", "create a ", "make a ", "edit ", "delete ",
         "search for", "look up", "find me", "show me", "play ", "pause",
         "network", "ip address", "process", "port ",
+        // Personal tools — Todoist, credentials, memory, reminders
+        "todo", "task", "reminder", "credential", "password", "account",
+        "email", "remember", "note", "calendar", "event",
     ];
     if tool_signals.iter().any(|s| lower.contains(s)) {
         return QueryComplexity::Complex;
