@@ -58,6 +58,10 @@ pub fn classify(input: &str) -> QueryComplexity {
         "debug mode", "turn on debug", "turn off debug", "set debug",
         // Media playback
         "song", "music", "spotify", "playing", "media", "track",
+        // Website validation / scam checking
+        "scam", "legit", "legitimate", "trustworthy", "reliable",
+        "safe to", "validate", "verify", "review",
+        "is it a", "is this a", "source valid",
     ];
     if tool_signals.iter().any(|s| lower.contains(s)) {
         return QueryComplexity::Complex;
