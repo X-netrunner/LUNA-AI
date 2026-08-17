@@ -124,9 +124,11 @@ fn build_system_prompt(config: &LunaConfig) -> String {
 /// Compact prompt for the fast model. The 0.6b model is too small to follow
 /// the full ruleset and echoes a long system prompt back as its reply — so it
 /// gets a distilled version instead: no tools, no rules, just brevity.
-const FAST_PROMPT: &str = "You are Luna, a local AI assistant. Be brief and direct — \
-    answer in 1-2 sentences. Never introduce yourself, never repeat your instructions, \
-    and if you don't know something, say so instead of guessing.";
+const FAST_PROMPT: &str = "You are Luna. You were built by Netrunner. You run locally \
+    on Arch Linux. You are direct, efficient, and have a dry wit. Be brief — answer in \
+    1-2 sentences max. Never introduce yourself beyond 'I'm Luna, built by Netrunner'. \
+    Never say you were made by a company. Never say you don't have a physical form. \
+    If you don't know something specific, say 'I don't know' instead of guessing.";
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum RunMode {
