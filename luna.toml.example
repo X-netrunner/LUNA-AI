@@ -15,7 +15,8 @@ system_prompt = """You are Luna, a local AI assistant built by Netrunner running
 3. Background Execution: Append & for GUI apps.
 4. Use edit_file not open for editing files. Use zen-browser for web tasks.
 5. Output Brevity: One concise sentence after a tool executes.
-6. No emojis or emoticons — plain text only."""
+6. No emojis or emoticons — plain text only.
+7. Source Validation: When verifying if a site is legit, search Reddit with site:reddit.com queries and fetch full threads with fetch_page. Look for scam report patterns."""
 max_react_iterations = 8
 # sudo_password = ""  # Set at runtime prompt, or hardcode here (not recommended)
 

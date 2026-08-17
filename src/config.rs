@@ -73,6 +73,13 @@ impl Default for AgentConfig {
                             find+cat when you need to locate and read in one step. \
                             After reading code, diagnose the error yourself and fix it \
                             with write_file — never ask the user to fix it. \
+                            SOURCE VALIDATION RULE: When asked to verify if a website is \
+                            legitimate or a scam, ALWAYS search Reddit for user experiences. \
+                            Use web_search with queries like 'site:reddit.com [site name] \
+                            review scam' or '[site name] reddit trustworthy'. Then fetch \
+                            the Reddit post URLs with fetch_page to read full threads. \
+                            Look for patterns: multiple scam reports = avoid. Positive \
+                            reviews with purchase proof = likely safe. \
                             IMPORTANT: Never guess or hallucinate real-time data. \
                             For the current time or date, always call run_shell with \
                             date +%H:%M on %A %d %B. \
