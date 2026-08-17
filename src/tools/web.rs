@@ -1,22 +1,24 @@
-//! tools/web.rs — Internet search via DuckDuckGo Instant Answer API
+//! tools/web.rs — Web search via Gemini API or DuckDuckGo instant answers
 //!
-//! Uses DDG's free JSON API — no key required.
-//! For richer results it also scrapes the first few web hits via curl.
+//! Gemini free tier (15 RPM, 1M tokens/day) answers questions directly.
+//! Falls back to DDG instant answers when no API key is configured.
 
 use anyhow::{Context, Result};
+use serde_json::json;
 
 /// Search the web and return a plain-text summary of top results.
-/// If `brave_key` is provided, uses the Brave Search API (reliable, JSON).
-/// Otherwise falls back to DDG instant answers + HTML scraping.
-pub async fn search(query: &str, brave_key: Option<&str>) -> Result<String> {
-    // Brave Search API — clean JSON, no CAPTCHAs, 2000 free queries/month
-    if let Some(key) = brave_key {
-        return search_brave_api(query, key).await;
+/// If `gemini_key` is provided, sends the question to Gemini which can
+/// answer directly from its training data + Google Search grounding.
+/// Otherwise falls back to DDG instant answers (limited).
+pub async fn search(query: &str, gemini_key: Option<&str>) -> Result<String> {
+    // Gemini API — can answer real-time questions directly
+    if let Some(key) = gemini_key {
+        return search_gemini(query, key).await;
     }
 
     let encoded = urlencoding(query);
 
-    // DuckDuckGo Instant Answer API — completely free, no auth
+    // DuckDuckGo Instant Answer API — free, no auth, but limited
     let url = format!(
         "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
         encoded
@@ -41,32 +43,41 @@ pub async fn search(query: &str, brave_key: Option<&str>) -> Result<String> {
     }
 
     let body = String::from_utf8_lossy(&output.stdout);
-    let result = parse_ddg_response(&body, query)?;
-
-    // If instant answer was empty, no HTML fallback — Brave API is the fix
-    if result.starts_with("No instant answer") {
-        return Ok(result);
-    }
-
-    Ok(result)
+    parse_ddg_response(&body, query)
 }
 
-/// Brave Search API — returns clean JSON with titles, URLs, and snippets
-async fn search_brave_api(query: &str, api_key: &str) -> Result<String> {
-    let encoded = urlencoding(query);
-    let url = format!(
-        "https://api.search.brave.com/res/v1/web/search?q={}&count=5",
-        encoded
+/// Ask Gemini a question — free tier, no scraping, answers directly
+async fn search_gemini(query: &str, api_key: &str) -> Result<String> {
+    let prompt = format!(
+        "Answer this question concisely in 2-3 sentences. \
+         If it's about current events, news, or real-time data (songs, weather, \
+         stocks, sports scores), give the most recent answer you know. \
+         If you're unsure about very recent data, say so. \
+         Question: {}",
+        query
     );
-    let key = api_key.to_string();
+
+    let body = json!({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 300
+        }
+    });
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+        api_key
+    );
+    let body_str = body.to_string();
 
     let output = tokio::task::spawn_blocking(move || {
         std::process::Command::new("curl")
             .args([
                 "-s",
-                "--max-time", "10",
-                "-H", "Accept: application/json",
-                "-H", &format!("X-Subscription-Token: {}", key),
+                "--max-time", "15",
+                "-H", "Content-Type: application/json",
+                "-d", &body_str,
                 &url,
             ])
             .output()
@@ -76,35 +87,20 @@ async fn search_brave_api(query: &str, api_key: &str) -> Result<String> {
     .context("spawn_blocking panicked")??;
 
     if !output.status.success() {
-        anyhow::bail!("Brave API curl failed: {:?}", output.status.code());
+        anyhow::bail!("Gemini API curl failed: {:?}", output.status.code());
     }
 
-    let body = String::from_utf8_lossy(&output.stdout);
-    let v: serde_json::Value = serde_json::from_str(&body)
-        .context("Failed to parse Brave API response")?;
+    let resp: serde_json::Value = serde_json::from_str(
+        &String::from_utf8_lossy(&output.stdout),
+    )
+    .context("Failed to parse Gemini response")?;
 
-    let results = v["web"]["results"]
-        .as_array()
-        .context("No results array in Brave response")?;
+    // Extract text from the response
+    let text = resp["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or("(Gemini returned no text)");
 
-    if results.is_empty() {
-        return Ok(format!("No results found for \"{}\"", query));
-    }
-
-    let mut out = format!("Search results for \"{}\":\n", query);
-    for r in results.iter().take(5) {
-        let title = r["title"].as_str().unwrap_or("");
-        let url = r["url"].as_str().unwrap_or("");
-        let snippet = r["description"].as_str().unwrap_or("");
-        if !title.is_empty() && !url.is_empty() {
-            out.push_str(&format!("- {} ({})\n", title, url));
-            if !snippet.is_empty() {
-                let snip: String = snippet.chars().take(200).collect();
-                out.push_str(&format!("  {}\n", snip));
-            }
-        }
-    }
-    Ok(out)
+    Ok(text.to_string())
 }
 
 /// Fallback: scrape Brave Search results when DDG instant answer is empty

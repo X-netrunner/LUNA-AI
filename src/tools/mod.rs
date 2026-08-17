@@ -560,7 +560,7 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
 
         "web_search" => {
             let query = args["query"].as_str().unwrap_or("");
-            web::search(query, config.search.brave_api_key.as_deref()).await
+            web::search(query, config.search.gemini_api_key.as_deref()).await
         }
 
         "read_file" => {
@@ -731,7 +731,7 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             if topic.is_empty() {
                 anyhow::bail!("No topic provided");
             }
-            learn::learn(topic, sudo_pass, config.search.brave_api_key.as_deref()).await
+            learn::learn(topic, sudo_pass, config.search.gemini_api_key.as_deref()).await
         }
 
         "media_info" => {

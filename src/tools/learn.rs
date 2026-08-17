@@ -8,11 +8,11 @@
 use super::{shell, web};
 use anyhow::Result;
 
-pub async fn learn(topic: &str, sudo_pass: Option<&str>, brave_key: Option<&str>) -> Result<String> {
+pub async fn learn(topic: &str, sudo_pass: Option<&str>, gemini_key: Option<&str>) -> Result<String> {
     let mut output = String::new();
 
     // Step 1: search
-    let search_result = web::search(topic, brave_key)
+    let search_result = web::search(topic, gemini_key)
         .await
         .unwrap_or_else(|e| format!("Search failed: {}", e));
     output.push_str("=== Search results ===\n");

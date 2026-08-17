@@ -265,10 +265,11 @@ impl Default for LoggingConfig {
 // ── Web search ────────────────────────────────────────────────────────────────
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct SearchConfig {
-    /// Brave Search API key — free tier: 2000 queries/month
-    /// Get yours at https://api.search.brave.com/
-    /// Leave unset to fall back to DDG instant answers only.
-    pub brave_api_key: Option<String>,
+    /// Gemini API key — free tier: 15 requests/min, 1M tokens/day
+    /// When set, web questions are sent to Gemini instead of scraping search
+    /// engines (which mostly return CAPTCHAs to curl).
+    /// Get yours at https://aistudio.google.com/apikey
+    pub gemini_api_key: Option<String>,
 }
 
 // ── Loading logic ─────────────────────────────────────────────────────────────
