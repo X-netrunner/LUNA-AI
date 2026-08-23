@@ -223,7 +223,7 @@ async fn run_voice_session(
         } else {
             if turn == 0 {
                 println!("  [Wake word detected — listening for command]");
-                tts::speak("Yes?", &config.voice.mode).await.ok();
+                tts::speak("Yes?", &config.voice.mode, config).await.ok();
             } else {
                 println!("  [Session active — say \"that's all\" to end]");
             }
@@ -271,24 +271,24 @@ async fn run_voice_session(
 
         match input_trim {
             "exit" | "quit" | "goodbye" | "goodbye luna" => {
-                tts::speak("Shutting down.", &config.voice.mode).await.ok();
+                tts::speak("Shutting down.", &config.voice.mode, config).await.ok();
                 return Ok(ControlFlow::Exit);
             }
             "clear" | "clear memory" => {
                 memory.clear()?;
-                tts::speak("Memory cleared.", &config.voice.mode).await.ok();
+                tts::speak("Memory cleared.", &config.voice.mode, config).await.ok();
                 continue;
             }
             "use text" | "text mode" | "switch to text" => {
-                tts::speak("Switching to text mode.", &config.voice.mode).await.ok();
+                tts::speak("Switching to text mode.", &config.voice.mode, config).await.ok();
                 return Ok(ControlFlow::SwitchToText);
             }
             "use voice" | "voice mode" | "switch to voice" => {
-                tts::speak("Already in voice mode.", &config.voice.mode).await.ok();
+                tts::speak("Already in voice mode.", &config.voice.mode, config).await.ok();
                 continue;
             }
             "that's all" | "thats all" | "stop listening" | "end session" | "never mind" => {
-                tts::speak("Okay.", &config.voice.mode).await.ok();
+                tts::speak("Okay.", &config.voice.mode, config).await.ok();
                 return Ok(ControlFlow::Continue);
             }
             _ => {}
@@ -303,7 +303,7 @@ async fn run_voice_session(
                     println!("{}", response);
                 }
                 if config.voice.mode != VoiceMode::Off {
-                    tts::speak(&response, &config.voice.mode).await.ok();
+                    tts::speak(&response, &config.voice.mode, config).await.ok();
                 }
             }
             Err(e) => eprintln!("\n  Error: {}", e),
@@ -321,8 +321,8 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
     let client = build_client(config);
     let fast_client = build_fast_client(config);
     let mut memory = Memory::new(config.memory.context_window, &config.memory.history_path)?;
-    let react = ReactLoop::new(&client, config.agent.max_react_iterations, config.agent.native_tools);
-    let fast_react = fast_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false));
+    let react = ReactLoop::new(&client, config.agent.max_react_iterations, config.agent.native_tools, config);
+    let fast_react = fast_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
     let system_prompt = build_system_prompt(config);
 
     println!("  Luna — text mode");
@@ -412,7 +412,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                         println!("{}", response);
                     }
                     if config.voice.mode != VoiceMode::Off {
-                        if let Err(e) = tts::speak(&response, &config.voice.mode).await {
+                        if let Err(e) = tts::speak(&response, &config.voice.mode, config).await {
                             tracing::warn!("TTS failed: {} — continuing without audio", e);
                         }
                     }
@@ -440,8 +440,8 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
     let client = build_client(config);
     let fast_client = build_fast_client(config);
     let mut memory = Memory::new(config.memory.context_window, &config.memory.history_path)?;
-    let react = ReactLoop::new(&client, config.agent.max_react_iterations, config.agent.native_tools);
-    let fast_react = fast_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false));
+    let react = ReactLoop::new(&client, config.agent.max_react_iterations, config.agent.native_tools, config);
+    let fast_react = fast_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
     let stt = build_stt(config);
     let system_prompt = build_system_prompt(config);
 
@@ -523,7 +523,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                 match input_lower.as_str() {
                     "exit" | "quit" | "bye" => {
                         println!("Luna: Goodbye.");
-                        tts::speak("Goodbye.", &config.voice.mode).await.ok();
+                        tts::speak("Goodbye.", &config.voice.mode, config).await.ok();
                         return Ok(());
                     }
                     "clear" => {
@@ -591,7 +591,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                                 println!("{}", response);
                             }
                             if config.voice.mode != VoiceMode::Off {
-                                tts::speak(&response, &config.voice.mode).await.ok();
+                                tts::speak(&response, &config.voice.mode, config).await.ok();
                             }
                             break;
                         }

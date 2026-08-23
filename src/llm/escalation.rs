@@ -68,6 +68,9 @@ pub fn classify(input: &str) -> QueryComplexity {
         // Reminders / scheduled actions
         "remind me", "remind ", "in minutes", "memory report",
         "what do you know about me",
+        // Learning summaries (memory_report territory)
+        "what did you learn", "did you learn", "learn about me",
+        "you know about me", "what have you learned about me",
     ];
     if tool_signals.iter().any(|s| lower.contains(s)) {
         return QueryComplexity::Complex;

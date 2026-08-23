@@ -6,10 +6,10 @@ use anyhow::Result;
 use std::process::Command;
 
 /// Speak text in the configured voice mode.
-/// Config is loaded once here and passed down — piper/rvc never reload it.
+/// Config is passed in (loaded once at startup) — piper/rvc never reload it.
 /// The microphone is muted for the duration of playback so Luna's own
 /// voice never loops back and gets transcribed as a command (echo).
-pub async fn speak(text: &str, mode: &VoiceMode) -> Result<()> {
+pub async fn speak(text: &str, mode: &VoiceMode, config: &LunaConfig) -> Result<()> {
     if *mode == VoiceMode::Off {
         return Ok(());
     }
@@ -24,14 +24,10 @@ pub async fn speak(text: &str, mode: &VoiceMode) -> Result<()> {
 
     let result = match mode {
         VoiceMode::Off => Ok(()),
-        VoiceMode::Basic => {
-            let config = LunaConfig::load()?;
-            piper::speak(&cleaned, &config).await
-        }
+        VoiceMode::Basic => piper::speak(&cleaned, config).await,
         VoiceMode::Jinx => {
-            let config = LunaConfig::load()?;
-            let wav_path = piper::synthesize_to_file(&cleaned, &config).await?;
-            rvc::convert_and_play(&wav_path, &config).await
+            let wav_path = piper::synthesize_to_file(&cleaned, config).await?;
+            rvc::convert_and_play(&wav_path, config).await
         }
     };
 

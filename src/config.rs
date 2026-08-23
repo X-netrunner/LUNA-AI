@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 // ── Top-level config struct ───────────────────────────────────────────────────
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct LunaConfig {
     #[serde(default)]
     pub agent: AgentConfig,
@@ -44,7 +44,7 @@ pub struct LunaConfig {
 }
 
 // ── Agent behaviour ───────────────────────────────────────────────────────────
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentConfig {
     pub name: String,
     pub system_prompt: String,
@@ -97,7 +97,7 @@ impl Default for AgentConfig {
 }
 
 // ── LLM settings ─────────────────────────────────────────────────────────────
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LlmConfig {
     pub base_url: String,
@@ -135,7 +135,7 @@ pub enum VoiceMode {
     Off,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VoiceConfig {
     pub mode: VoiceMode,
     pub piper_bin: PathBuf,
@@ -176,7 +176,7 @@ pub enum InputMode {
     Both,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AudioConfig {
     pub input_mode: InputMode,
     pub ptt_key: String,
@@ -209,7 +209,7 @@ impl Default for AudioConfig {
 }
 
 // ── Memory settings ───────────────────────────────────────────────────────────
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MemoryConfig {
     pub context_window: usize,
     pub history_path: PathBuf,
@@ -228,7 +228,7 @@ impl Default for MemoryConfig {
 }
 
 // ── Todoist integration ───────────────────────────────────────────────────────
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct TodoistConfig {
     /// Todoist API token — get yours at todoist.com/app/settings/integrations
     /// Leave unset to disable Todoist tools.
@@ -236,7 +236,7 @@ pub struct TodoistConfig {
 }
 
 // ── Proactive background monitoring ───────────────────────────────────────────
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProactiveConfig {
     /// Master switch — set false to disable all background checks
     pub enabled: bool,
@@ -263,7 +263,7 @@ impl Default for ProactiveConfig {
 }
 
 // ── Logging ───────────────────────────────────────────────────────────────────
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LoggingConfig {
     /// Log level: "info", "debug", or "trace".  Toggle via the set_debug tool.
     pub level: String,
@@ -278,7 +278,7 @@ impl Default for LoggingConfig {
 }
 
 // ── Web search ────────────────────────────────────────────────────────────────
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SearchConfig {
     /// Tavily API key (optional) — free tier: 1000 searches/month
     /// Without a key, Tavily keyless works automatically (rate-limited).
@@ -294,7 +294,7 @@ pub struct SearchConfig {
 // ── Background daemon (`luna --daemon`) ───────────────────────────────────────
 // Container-level serde default: configs written by older Luna versions
 // (missing newer keys) still parse, falling back to these defaults.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DaemonConfig {
     /// Master switch — `luna --daemon` exits immediately when false

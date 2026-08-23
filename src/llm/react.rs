@@ -14,11 +14,19 @@ pub struct ReactLoop<'a> {
     client: &'a OllamaClient,
     max_iterations: u8,
     native_tools: bool,
+    /// Loaded once at startup — tools must NOT reload config per call
+    /// (that would redo keyring lookups and log noise every turn).
+    config: crate::config::LunaConfig,
 }
 
 impl<'a> ReactLoop<'a> {
-    pub fn new(client: &'a OllamaClient, max_iterations: u8, native_tools: bool) -> Self {
-        Self { client, max_iterations, native_tools }
+    pub fn new(
+        client: &'a OllamaClient,
+        max_iterations: u8,
+        native_tools: bool,
+        config: &crate::config::LunaConfig,
+    ) -> Self {
+        Self { client, max_iterations, native_tools, config: config.clone() }
     }
 
     pub async fn run(
@@ -78,7 +86,7 @@ impl<'a> ReactLoop<'a> {
                         use std::io::Write;
                         std::io::stdout().flush().ok();
 
-                        let tool_result = match tools::execute(&tool_call, &get_config()).await {
+                        let tool_result = match tools::execute(&tool_call, &self.config).await {
                             Ok(o) => {
                                 println!("✓");
                                 print_sources(&tool_name, &o);
@@ -115,7 +123,7 @@ impl<'a> ReactLoop<'a> {
                         use std::io::Write;
                         std::io::stdout().flush().ok();
 
-                        let tool_result = match tools::execute(tool_call, &get_config()).await {
+                        let tool_result = match tools::execute(tool_call, &self.config).await {
                             Ok(o) => {
                                 println!("✓");
                                 print_sources(&tool_name, &o);
@@ -143,11 +151,6 @@ impl<'a> ReactLoop<'a> {
             }
         }
     }
-}
-
-/// Load config inline — needed for tool execution
-fn get_config() -> crate::config::LunaConfig {
-    crate::config::LunaConfig::load().unwrap_or_default()
 }
 
 /// Print the URLs a research tool referenced, so the user can click through.

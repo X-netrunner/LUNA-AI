@@ -9,6 +9,15 @@ pub fn truncate(s: &str, max: usize) -> &str {
     }
 }
 
+/// Like `truncate`, but appends a visible marker when content was cut,
+/// so a clipped debug dump never looks like a crash mid-sentence.
+pub fn truncate_marked(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) if i < s.len() => format!("{}\n… [thinking truncated for display]", &s[..i]),
+        _ => s.to_string(),
+    }
+}
+
 /// Strip emoji so they're never printed or read aloud by TTS
 /// (e.g. 😊 spoken as "smiling face with smiling eyes").
 pub fn strip_emojis(text: &str) -> String {

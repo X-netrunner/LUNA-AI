@@ -249,7 +249,7 @@ impl OllamaClient {
                     if !thinking_buf.is_empty() {
                         eprintln!(
                             "\n[think] {}",
-                            crate::util::truncate(&thinking_buf, 800)
+                            crate::util::truncate_marked(&thinking_buf, 800)
                         );
                     }
                     println!();
@@ -326,7 +326,7 @@ impl OllamaClient {
             // Print thinking tokens in debug mode even when there's a tool call
             if self.debug {
                 if let Some(ref think) = parsed.message.thinking {
-                    eprintln!("[think] {}", crate::util::truncate(think, 500));
+                    eprintln!("[think] {}", crate::util::truncate_marked(think, 500));
                 }
             }
             return Ok(OllamaResponse::ToolUse(parsed.message.tool_calls));
@@ -336,7 +336,7 @@ impl OllamaClient {
         // The caller (agent/mod.rs) owns all printing so there's one print site.
         if self.debug {
             if let Some(ref think) = parsed.message.thinking {
-                eprintln!("[think] {}", crate::util::truncate(think, 500));
+                eprintln!("[think] {}", crate::util::truncate_marked(think, 500));
             }
         }
         let text = crate::util::strip_emojis(&parsed.message.content.unwrap_or_default());
