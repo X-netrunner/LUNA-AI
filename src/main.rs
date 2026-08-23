@@ -17,7 +17,7 @@ mod tools;
 mod tts;
 mod util;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use config::{LunaConfig, VoiceMode};
 use tracing_subscriber::EnvFilter;
@@ -45,6 +45,16 @@ struct Args {
     /// the interactive agent. Intended for `systemctl --user start luna-daemon`.
     #[arg(long)]
     daemon: bool,
+
+    /// Store a secret in the OS keyring as luna/<NAME>, then reference it
+    /// from luna.toml with `keyring:<NAME>` (e.g. gemini_api_key).
+    /// The secret is read from the terminal without echoing.
+    #[arg(long, value_name = "NAME")]
+    set_key: Option<String>,
+
+    /// Print a stored keyring secret to stdout (for verification).
+    #[arg(long, value_name = "NAME")]
+    get_key: Option<String>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -72,6 +82,34 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("Luna starting up...");
+
+    // ── Keyring management (exits immediately) ───────────────────────────────
+    if let Some(name) = args.set_key {
+        let prompt = format!("Secret for luna/{}: ", name);
+        let secret = rpassword::prompt_password(prompt)
+            .context("Failed to read secret from terminal")?;
+        if secret.is_empty() {
+            anyhow::bail!("Empty secret — nothing stored");
+        }
+        crate::config::keyring_set(&name, &secret)?;
+        println!(
+            "Stored luna/{}. Reference it in luna.toml as: keyring:{}",
+            name, name
+        );
+        return Ok(());
+    }
+    if let Some(name) = args.get_key {
+        match crate::config::keyring_get(&name) {
+            Ok(secret) => {
+                println!("{}", secret);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("No keyring entry 'luna/{}': {}", name, e);
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Apply CLI overrides on top of file config
     if let Some(voice_str) = args.voice {

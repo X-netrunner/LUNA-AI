@@ -62,6 +62,9 @@ pub fn classify(input: &str) -> QueryComplexity {
         "scam", "legit", "legitimate", "trustworthy", "reliable",
         "safe to", "validate", "verify", "review",
         "is it a", "is this a", "source valid",
+        // Daemon process learning / auto-kill management
+        "process stats", "autokill", "auto-kill", "auto kill",
+        "usage profile", "what have you learned", "stop killing",
     ];
     if tool_signals.iter().any(|s| lower.contains(s)) {
         return QueryComplexity::Complex;

@@ -40,6 +40,14 @@ level = "info"                  # "info" or "debug" — toggle via "turn on debu
 #
 #tavily_api_key = ""        # optional: free at tavily.com (1000/month)
 #gemini_api_key = ""        # optional: free at aistudio.google.com
+#
+# Secrets can live in your OS keyring instead of this file:
+#   gemini_api_key = "keyring:gemini"
+#   tavily_api_key = "keyring:tavily"
+#   todoist api_token = "keyring:todoist"
+# Store them securely (prompts without echo):
+#   luna --set-key gemini
+# Luna also chmods this file to 600 on save.
 
 [todoist]
 api_token = "your_token_here"
@@ -64,6 +72,27 @@ ram_threshold_mb = 1500        # single process using more than this (MiB)
 cpu_threshold_percent = 80.0   # sustained CPU% since last scan
 ignore_processes = ["ollama", "luna", "plasmashell", "kwin_wayland",
                     "gnome-shell", "Xwayland", "pipewire", "wireplumber"]
+
+# Usage learning: the daemon tracks which processes run on which days.
+# Apps seen on >= daily_use_days_per_week of the last 7 days are treated
+# as daily drivers — they stop triggering resource notifications, and are
+# never auto-killed. State persists in ~/.local/share/luna/process_stats.json.
+learning_enabled = true
+daily_use_days_per_week = 5
+
+# Idle processes: allowlisted ones get SIGTERM after idle_kill_minutes,
+# then SIGKILL next scan if still alive. Everything else only earns an
+# opt-in suggestion after suggest_autokill_after_mins (once per day).
+# Manage via chat: 'process stats', 'allow auto-kill steam',
+#                  'deny auto-kill steam'
+idle_kill_minutes = 30
+suggest_autokill_after_mins = 45
+
+# Stateful apps that must NEVER be auto-killed, even when allowlisted
+protected_processes = ["firefox", "zen-browser", "chromium", "code", "zed",
+                       "kitty", "alacritty", "konsole", "foot", "obs",
+                       "gimp", "krita", "blender", "libreoffice", "soffice",
+                       "thunderbird", "discord", "telegram-desktop", "slack"]
 
 # Disk hygiene: pacman cache, ~/.cache, trash, journals.
 # cleanup_mode:

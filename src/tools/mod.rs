@@ -227,6 +227,52 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         ToolDef {
             r#type: "function".into(),
             function: ToolFunction {
+                name: "process_stats".into(),
+                description: "Show what Luna has learned about process usage on this machine. \
+                              Lists each tracked process with how many of the last 14 days it ran, \
+                              its idle status, and whether auto-kill is allowed for it.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "allow_autokill".into(),
+                description: "Allow the daemon to automatically end a named process after it \
+                              has been idle ~30 minutes. Only use when the user explicitly asks \
+                              (e.g. 'allow auto-kill steam').".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Process name from /proc, e.g. 'steam'" }
+                    },
+                    "required": ["name"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "deny_autokill".into(),
+                description: "Revoke auto-kill permission for a named process (removes it from \
+                              the allowlist). Use when the user says something like 'never kill \
+                              steam' or 'deny auto-kill steam'.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
                 name: "find_file".into(),
                 description: "Find a file by name anywhere on the system. Returns full path.".into(),
                 parameters: json!({
@@ -752,6 +798,83 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             )
             .await
         }
+
+        "process_stats" => {
+            let tracker = crate::daemon::tracker::Tracker::load();
+            let stats = tracker.stats_snapshot();
+            if stats.is_empty() {
+                return Ok("No process learning data yet — the daemon hasn't completed a scan cycle."
+                    .into());
+            }
+            let allowlist: std::collections::HashSet<String> =
+                crate::daemon::tracker::load_allowlist().into_iter().collect();
+            let protected = config.daemon.protected_processes.clone();
+
+            let mut rows: Vec<String> = stats
+                .iter()
+                .map(|(name, s)| {
+                    let days_14 = {
+                        let cutoff =
+                            (chrono::Local::now() - chrono::Duration::days(14))
+                                .format("%Y-%m-%d")
+                                .to_string();
+                        s.days_seen.iter().filter(|d| d.as_str() > cutoff.as_str()).count()
+                    };
+                    let status = if protected.iter().any(|p| p == name) {
+                        "protected"
+                    } else if allowlist.contains(name) {
+                        "auto-kill allowed"
+                    } else {
+                        "-"
+                    };
+                    format!(
+                        "{:<24} {}/14d  idle {} cyc  {:>6} jiffies  {}",
+                        name,
+                        days_14,
+                        s.idle_cycles,
+                        s.total_jiffies,
+                        status
+                    )
+                })
+                .collect();
+            rows.sort();
+
+            Ok(format!(
+                "Process usage ({} tracked, daemon scans every {} min):\n{}",
+                stats.len(),
+                config.daemon.check_interval_mins,
+                rows.join("\n")
+            ))
+        }
+
+        "allow_autokill" => {
+            let name = args["name"].as_str().unwrap_or("");
+            if name.is_empty() {
+                anyhow::bail!("No process name provided");
+            }
+            crate::daemon::tracker::allowlist_add(name)?;
+            tracing::info!("Auto-kill allowed for '{}'", name);
+            Ok(format!(
+                "Allowed. The daemon will end '{}' after ~{} min idle (unless it's a \
+                 daily-use or protected app). Say 'deny auto-kill {}' to revoke.",
+                name, config.daemon.idle_kill_minutes, name
+            ))
+        }
+
+        "deny_autokill" => {
+            let name = args["name"].as_str().unwrap_or("");
+            if name.is_empty() {
+                anyhow::bail!("No process name provided");
+            }
+            match crate::daemon::tracker::allowlist_remove(name)? {
+                true => Ok(format!("Revoked — '{}' will never be auto-killed again.", name)),
+                false => Ok(format!(
+                    "'{}' wasn't on the auto-kill list — it was already safe.",
+                    name
+                )),
+            }
+        }
+
 
         "media_info" => {
             // Use gdbus (GIO) — dbus-send is broken on some Arch builds.

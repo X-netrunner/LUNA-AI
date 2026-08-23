@@ -51,6 +51,10 @@ uuid   = { version = "1", features = ["v4"] }
 rpassword = "7"             # sudo password prompt via /dev/tty
 chrono = { version = "0.4", features = ["serde"] }
 
+# OS keyring (freedesktop Secret Service) — stores API keys encrypted
+# instead of plaintext in luna.toml
+keyring = { version = "3", features = ["sync-secret-service"] }
+
 
 # ── Build profiles ────────────────────────────────────────────────────────────
 [profile.dev]

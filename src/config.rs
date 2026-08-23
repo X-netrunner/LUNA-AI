@@ -287,7 +287,10 @@ pub struct SearchConfig {
 }
 
 // ── Background daemon (`luna --daemon`) ───────────────────────────────────────
+// Container-level serde default: configs written by older Luna versions
+// (missing newer keys) still parse, falling back to these defaults.
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct DaemonConfig {
     /// Master switch — `luna --daemon` exits immediately when false
     pub enabled: bool,
@@ -318,6 +321,20 @@ pub struct DaemonConfig {
     pub pacman_cache_keep: u32,
     /// Only notify about cleanups worth at least this much (MB)
     pub min_notify_mb: u64,
+    // ── Process usage learning ──
+    /// Track per-process usage to ~/.local/share/luna/process_stats.json.
+    /// Learned daily-use processes are dynamically excluded from watchdog
+    /// notifications; idle non-daily processes become auto-kill candidates.
+    pub learning_enabled: bool,
+    /// A process seen on this many of the trailing 14 days counts as daily use
+    pub daily_use_days_per_week: u32,
+    /// Allowlisted processes get SIGTERM after being idle this many minutes
+    pub idle_kill_minutes: u32,
+    /// Non-allowlisted processes idle longer than this trigger an opt-in suggestion
+    pub suggest_autokill_after_mins: u32,
+    /// Stateful apps never auto-killed even when allowlisted
+    #[serde(default)]
+    pub protected_processes: Vec<String>,
 }
 
 impl Default for DaemonConfig {
@@ -342,6 +359,20 @@ impl Default for DaemonConfig {
             journal_vacuum_days: 30,
             pacman_cache_keep: 2,
             min_notify_mb: 500,
+            learning_enabled: true,
+            daily_use_days_per_week: 5,
+            idle_kill_minutes: 30,
+            suggest_autokill_after_mins: 45,
+            protected_processes: [
+                // GUI apps that hold unsaved user state — NEVER auto-killed
+                "firefox", "zen-browser", "chromium", "code", "zed", "kitty",
+                "alacritty", "konsole", "foot", "obs", "gimp", "krita",
+                "blender", "libreoffice", "soffice", "thunderbird",
+                "discord", "telegram-desktop", "slack",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         }
     }
 }
@@ -361,11 +392,21 @@ impl LunaConfig {
         let raw = std::fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read config at {:?}", config_path))?;
 
-        let config: LunaConfig =
+        let mut config: LunaConfig =
             toml::from_str(&raw).context("Failed to parse luna.toml — check for syntax errors")?;
+
+        config.resolve_secrets();
 
         tracing::info!("Config loaded from {:?}", config_path);
         Ok(config)
+    }
+
+    /// Replace "keyring:name" references with secrets fetched from the
+    /// OS keyring. Plain values pass through untouched.
+    fn resolve_secrets(&mut self) {
+        self.search.tavily_api_key = resolve_secret_ref(self.search.tavily_api_key.take());
+        self.search.gemini_api_key = resolve_secret_ref(self.search.gemini_api_key.take());
+        self.todoist.api_token = resolve_secret_ref(self.todoist.api_token.take());
     }
 
     pub fn save(&self) -> Result<()> {
@@ -381,6 +422,15 @@ impl LunaConfig {
         std::fs::write(&path, toml_str)
             .with_context(|| format!("Failed to write config to {:?}", path))?;
 
+        // Config can contain secrets — only the owner may read it
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&path, perms)
+                .context("Failed to restrict config file permissions")?;
+        }
+
         Ok(())
     }
 
@@ -390,6 +440,53 @@ impl LunaConfig {
             .join("luna")
             .join("luna.toml")
     }
+}
+
+/// Resolve a single secret value: "keyring:name" fetches from the OS
+/// keyring (service "luna", user "name"); anything else passes through.
+fn resolve_secret_ref(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let Some(name) = value.strip_prefix("keyring:") else {
+        return Some(value);
+    };
+    match keyring::Entry::new("luna", name) {
+        Ok(entry) => match entry.get_password() {
+            Ok(secret) => Some(secret),
+            Err(e) => {
+                tracing::warn!(
+                    "Keyring entry 'luna/{}' unavailable ({}). \
+                     Store it with: luna --set-key {}",
+                    name,
+                    e,
+                    name
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!("Keyring unavailable for 'luna/{}': {}", name, e);
+            None
+        }
+    }
+}
+
+/// Store a secret in the OS keyring under service "luna".
+pub fn keyring_set(name: &str, secret: &str) -> Result<()> {
+    let entry = keyring::Entry::new("luna", name)
+        .with_context(|| format!("Cannot access keyring for 'luna/{}'", name))?;
+    entry
+        .set_password(secret)
+        .with_context(|| format!("Failed to store 'luna/{}' in keyring", name))?;
+    Ok(())
+}
+
+/// Read a secret from the OS keyring (for --get-key verification).
+pub fn keyring_get(name: &str) -> Result<String> {
+    let entry = keyring::Entry::new("luna", name)
+        .with_context(|| format!("Cannot access keyring for 'luna/{}'", name))?;
+    entry
+        .get_password()
+        .with_context(|| format!("No keyring entry 'luna/{}'", name))
 }
 
 fn default_true() -> bool {
