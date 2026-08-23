@@ -32,6 +32,13 @@ pub fn spawn(config: &LunaConfig) {
             tokio::time::sleep(Duration::from_secs(interval_secs)).await;
             tracing::debug!("Running proactive check cycle");
 
+            // ── Reminders (fallback when the daemon isn't running) ───────
+            if let Ok(due) = crate::tools::reminders::fire_due() {
+                for r in due {
+                    notify("Luna — Reminder", &r.text).await;
+                }
+            }
+
             // ── Battery ──────────────────────────────────────────────────
             if let Ok(cap) = run("cat /sys/class/power_supply/BAT0/capacity 2>/dev/null").await {
                 if let Ok(pct) = cap.trim().parse::<u32>() {

@@ -98,6 +98,7 @@ impl Default for AgentConfig {
 
 // ── LLM settings ─────────────────────────────────────────────────────────────
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct LlmConfig {
     pub base_url: String,
     pub model: String,
@@ -105,6 +106,9 @@ pub struct LlmConfig {
     pub max_tokens: u32,
     pub enable_thinking: bool,
     pub fast_model: Option<String>,
+    /// Local embedding model used for semantic memory recall (RAG-lite).
+    /// Pull once with: ollama pull nomic-embed-text
+    pub embedding_model: String,
 }
 
 impl Default for LlmConfig {
@@ -116,6 +120,7 @@ impl Default for LlmConfig {
             max_tokens: 2048,
             enable_thinking: true,
             fast_model: None,
+            embedding_model: "nomic-embed-text".into(),
         }
     }
 }
@@ -337,6 +342,8 @@ pub struct DaemonConfig {
     pub protected_processes: Vec<String>,
     /// How often (days) Luna re-analyzes fish history into permanent memory
     pub history_learn_days: u32,
+    /// How often (days) Luna re-indexes projects/scripts/configs (0 = off)
+    pub index_learn_days: u32,
 }
 
 impl Default for DaemonConfig {
@@ -376,6 +383,7 @@ impl Default for DaemonConfig {
             .map(|s| s.to_string())
             .collect(),
             history_learn_days: 30,
+            index_learn_days: 30,
         }
     }
 }
@@ -419,10 +427,16 @@ impl LunaConfig {
             std::fs::create_dir_all(parent).context("Failed to create config directory")?;
         }
 
-        let toml_str =
-            toml::to_string_pretty(self).context("Failed to serialize config to TOML")?;
+        // Rewrite via toml_edit so user comments and formatting survive
+        // (e.g. "turn on debug mode" only flips one leaf value).
+        let mut doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default();
+        let as_value = toml::Value::try_from(self).context("Failed to convert config")?;
+        merge_toml_value(doc.as_table_mut(), &as_value);
 
-        std::fs::write(&path, toml_str)
+        std::fs::write(&path, doc.to_string())
             .with_context(|| format!("Failed to write config to {:?}", path))?;
 
         // Config can contain secrets — only the owner may read it
@@ -443,6 +457,53 @@ impl LunaConfig {
             .join("luna")
             .join("luna.toml")
     }
+}
+
+/// Recursively write `value` into an existing toml_edit table, updating
+/// leaves in place and inserting keys that don't exist yet. Comments and
+/// formatting of untouched lines are preserved.
+fn merge_toml_value(dest: &mut toml_edit::Table, value: &toml::Value) {
+    let toml::Value::Table(map) = value else {
+        return;
+    };
+    for (k, v) in map {
+        if let toml::Value::Table(child_map) = v {
+            if !dest.contains_key(k) {
+                dest.insert(k, toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            if let Some(child) = dest[k].as_table_mut() {
+                merge_toml_value(child, &toml::Value::Table(child_map.clone()));
+            }
+        } else {
+            dest[k] = leaf_item(v);
+        }
+    }
+}
+
+/// Convert a non-table toml::Value into a toml_edit item.
+fn leaf_item(v: &toml::Value) -> toml_edit::Item {
+    let val: toml_edit::Value = match v {
+        toml::Value::String(s) => s.as_str().into(),
+        toml::Value::Integer(i) => (*i).into(),
+        toml::Value::Float(f) => (*f).into(),
+        toml::Value::Boolean(b) => (*b).into(),
+        toml::Value::Datetime(d) => d.to_string().as_str().into(),
+        toml::Value::Array(arr) => {
+            let mut out = toml_edit::Array::new();
+            for el in arr {
+                match el {
+                    toml::Value::String(s) => out.push(s.as_str()),
+                    toml::Value::Integer(i) => out.push(*i),
+                    toml::Value::Float(f) => out.push(*f),
+                    toml::Value::Boolean(b) => out.push(*b),
+                    _ => {}
+                }
+            }
+            toml_edit::Value::from(out)
+        }
+        toml::Value::Table(_) => unreachable!("tables handled by merge_toml_value"),
+    };
+    toml_edit::Item::Value(val)
 }
 
 /// Resolve a single secret value: "keyring:name" fetches from the OS
@@ -494,4 +555,26 @@ pub fn keyring_get(name: &str) -> Result<String> {
 
 fn default_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_merge_preserves_comments_and_updates_values() {
+        let existing = "# top comment\n[logging]\n# keep me\nlevel = \"info\"\n\n[llm]\nmodel = \"old\"\n";
+        let mut doc: toml_edit::DocumentMut = existing.parse().unwrap();
+
+        let new_val: toml::Value =
+            toml::from_str("[logging]\nlevel = \"debug\"\n\n[llm]\nmodel = \"new\"\nfast_model = \"f\"\n")
+                .unwrap();
+        merge_toml_value(doc.as_table_mut(), &new_val);
+
+        let out = doc.to_string();
+        assert!(out.contains("# keep me"), "comment lost:\n{}", out);
+        assert!(out.contains("level = \"debug\""));
+        assert!(out.contains("model = \"new\""));
+        assert!(out.contains("fast_model = \"f\""));
+    }
 }

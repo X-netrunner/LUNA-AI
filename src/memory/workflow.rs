@@ -138,3 +138,68 @@ fn learn_once() -> Result<Option<String>> {
         extra
     )))
 }
+
+// ── Monthly system indexing ───────────────────────────────────────────────────
+
+fn index_marker_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("luna")
+        .join("last_index_learn")
+}
+
+/// Re-map projects/scripts/configs into permanent memory.
+/// Used by the index_system tool and by the daemon's monthly job.
+pub async fn run_index_system(sudo_pass: Option<&str>) -> Result<Vec<String>> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let commands = vec![
+        ("projects", format!("find {} -name '.git' -maxdepth 4 -type d 2>/dev/null | grep -v '.cache' | sed 's/\\/.git//' | head -20", home)),
+        ("scripts",  format!("find {} -name '*.sh' -maxdepth 4 2>/dev/null | grep -v '.cache' | head -20", home)),
+        ("configs",  "ls ~/.config/ 2>/dev/null | head -30".to_string()),
+        ("rust",     format!("find {} -name 'Cargo.toml' -maxdepth 5 2>/dev/null | grep -v '.cache' | sed 's/\\/Cargo.toml//' | head -10", home)),
+        ("python",   format!("find {} -name 'pyproject.toml' -maxdepth 5 2>/dev/null | grep -v '.cache' | head -10", home)),
+    ];
+
+    let mut pm = PermanentMemory::load()?;
+    let mut summary = Vec::new();
+
+    for (key, cmd) in &commands {
+        let result = crate::tools::shell::run_command(cmd, sudo_pass).await?;
+        let items = result.stdout.trim();
+        if !items.is_empty() {
+            let fact = format!(
+                "System index - {}: {}",
+                key,
+                items.lines().collect::<Vec<_>>().join(", ")
+            );
+            pm.remember(&fact, "system").ok();
+            summary.push(format!("{}: {} items", key, items.lines().count()));
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Monthly wrapper used by the daemon — no-op until the interval elapses.
+pub async fn index_if_due(days: u32, sudo_pass: Option<&str>) -> Result<Option<String>> {
+    if days == 0 {
+        return Ok(None);
+    }
+    let marker = index_marker_path();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(ts) = std::fs::read_to_string(&marker) {
+        let last: u64 = ts.trim().parse().unwrap_or(0);
+        if now.saturating_sub(last) < days as u64 * 86400 {
+            return Ok(None);
+        }
+    }
+    let summary = run_index_system(sudo_pass).await?;
+    std::fs::write(&marker, now.to_string())?;
+    if summary.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!("Re-indexed system: {}", summary.join(", "))))
+}

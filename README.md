@@ -7,9 +7,12 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 - **Local-first** — runs via Ollama, everything stays on your machine
 - **ReAct agent loop** — reasons and executes tools in a chain, with automatic retry on empty responses
 - **Model escalation** — small/fast model for simple chat, full model for tool-heavy or complex tasks
-- **Dual memory** — rolling conversation context + permanent memory that survives restarts and `clear`
-- **Shell history context** — learns your workflow and app names from fish shell history
-- **System indexer** — scans and maps your projects, scripts, and configs into permanent memory
+- **Dual memory with semantic recall** — permanent facts are embedded locally (nomic-embed-text via Ollama) and only the ones relevant to your current question get injected; if the embedding model is missing, Luna falls back to the full dump
+- **Self-correcting model escalation** — the fast model says "ESCALATE" when a query needs tools, and the full model transparently takes over
+- **Real reminders** — "remind me in 20 minutes" fires as a desktop notification even with chat closed (daemon polls `reminders.json` and wakes early for them)
+- **Self-learning** — the daemon periodically distills your fish history into workflow facts and re-indexes your projects/scripts/configs into permanent memory, monthly by default
+- **Shell history context** — recent fish commands are injected into every session prompt
+- **Background daemon** — `luna --daemon` watches for RAM/CPU hogs, learns which apps you use daily, reclaims disk space safely, and can auto-end idle processes you approve by chat
 - **Voice I/O** — Whisper STT + Kokoro TTS (high quality, runs on CPU)
 - **Voice session mode** — say the wake word once, keep talking without repeating it until you say goodbye or go quiet
 - **Inline wake-word commands** — say "luna what's the time" in one breath; Luna strips the wake word and runs the rest as a command
@@ -40,7 +43,9 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 | `allow_autokill` / `deny_autokill` | Grant/revoke idle auto-kill for a process (daemon-managed) |
 | `nmap_scan` / `analyze_pcap` / `decode_payload` / `hash_file` / `dns_lookup` | CTF/network toolkit: scanning, pcap analysis, decoding, hashing, DNS/whois |
 | `remember` / `forget` / `list_memories` | Manage permanent memory |
-| `index_system` | Scan the home directory and save a structured map to permanent memory |
+| `memory_report` | What Luna has permanently learned (workflow, system index, stats) |
+| `set_reminder` / `list_reminders` / `cancel_reminder` | Scheduled reminders that fire even when chat is closed |
+| `index_system` | Scan the home directory and save a structured map to permanent memory (also runs monthly via daemon) |
 | `todoist_list` / `todoist_add` / `todoist_complete` | Manage Todoist tasks (requires an API token) |
 
 ## Requirements

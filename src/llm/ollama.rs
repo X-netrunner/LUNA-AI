@@ -346,3 +346,34 @@ impl OllamaClient {
         })
     }
 }
+
+impl OllamaClient {
+    /// Embed one or more inputs via Ollama's /api/embed endpoint.
+    /// Used by semantic memory recall (RAG-lite).
+    pub async fn embed(&self, model: &str, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+        #[derive(serde::Deserialize)]
+        struct EmbedResp {
+            embeddings: Vec<Vec<f32>>,
+        }
+
+        let url = format!("{}/api/embed", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(20))
+            .json(&serde_json::json!({ "model": model, "input": inputs }))
+            .send()
+            .await
+            .context("Failed to connect to Ollama for embeddings")?;
+
+        anyhow::ensure!(
+            resp.status().is_success(),
+            "Ollama embed failed ({}): is '{}' pulled?",
+            resp.status(),
+            model
+        );
+
+        let parsed: EmbedResp = resp.json().await.context("Bad embed response")?;
+        Ok(parsed.embeddings)
+    }
+}

@@ -50,6 +50,20 @@ pub async fn run(config: LunaConfig) -> Result<()> {
     let mut tracker = Tracker::load();
 
     loop {
+        // ── 0. Due reminders — checked FIRST every cycle so heavyweight
+        // jobs below (disk du, system re-index) never delay a firing
+        // reminder past its time ─────────────────────────────────────────
+        match crate::tools::reminders::fire_due() {
+            Ok(due) if !due.is_empty() => {
+                for r in due {
+                    tracing::info!("Reminder fired: {}", r.text);
+                    notify("Luna — Reminder", &r.text).await;
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Reminder check failed: {}", e),
+        }
+
         // ── 1. Scan processes ────────────────────────────────────────────
         let procs = match watchdog::scan_processes(&config, &mut prev_jiffies).await {
             Ok(p) => p,
@@ -169,10 +183,32 @@ pub async fn run(config: LunaConfig) -> Result<()> {
             }
         }
 
+        // ── 8. Monthly system re-index (detached — find over home can
+        // take minutes on first run; don't stall the watchdog) ────────────
+        if config.daemon.index_learn_days > 0 {
+            let days = config.daemon.index_learn_days;
+            let sudo = config.agent.sudo_password.clone();
+            tokio::spawn(async move {
+                match crate::memory::workflow::index_if_due(days, sudo.as_deref()).await {
+                    Ok(Some(summary)) => {
+                        tracing::info!("{}", summary);
+                        notify("Luna daemon", &summary).await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("System indexing failed: {}", e),
+                }
+            });
+        }
+
         tracker.save_if_dirty();
         prev_jiffies.retain(|pid, _| procs.iter().any(|p| p.pid == *pid));
 
-        tokio::time::sleep(interval).await;
+        // Sleep until the next scan OR the next reminder, whichever first —
+        // so a "remind me in 2 minutes" doesn't wait out the whole interval.
+        let next_reminder = crate::tools::reminders::next_in()
+            .map(|d| d.min(interval))
+            .unwrap_or(interval);
+        tokio::time::sleep(next_reminder.max(Duration::from_secs(5))).await;
     }
 }
 

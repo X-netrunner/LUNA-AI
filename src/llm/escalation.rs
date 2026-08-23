@@ -65,6 +65,9 @@ pub fn classify(input: &str) -> QueryComplexity {
         // Daemon process learning / auto-kill management
         "process stats", "autokill", "auto-kill", "auto kill",
         "usage profile", "what have you learned", "stop killing",
+        // Reminders / scheduled actions
+        "remind me", "remind ", "in minutes", "memory report",
+        "what do you know about me",
     ];
     if tool_signals.iter().any(|s| lower.contains(s)) {
         return QueryComplexity::Complex;

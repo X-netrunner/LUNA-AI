@@ -118,8 +118,12 @@ impl PermanentMemory {
     }
 
     /// List all facts as a formatted string
-    pub fn list(&self) -> String {
-        if self.facts.is_empty() {
+    /// Direct access to all facts (for semantic recall)
+    pub fn all_facts(&self) -> &[Fact] {
+        &self.facts
+    }
+
+    pub fn list(&self) -> String {        if self.facts.is_empty() {
             return "No permanent memories stored.".to_string();
         }
         self.facts

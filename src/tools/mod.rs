@@ -7,6 +7,7 @@ pub mod desktop;
 pub mod filesystem;
 pub mod learn;
 pub mod proactive;
+pub mod reminders;
 pub mod security;
 pub mod shell;
 pub mod todoist;
@@ -268,6 +269,57 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                     },
                     "required": ["name"]
                 }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "set_reminder".into(),
+                description: "Schedule a reminder that fires as a desktop notification even if \
+                              Luna chat is closed. Give EITHER minutes-from-now OR a time of day."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "minutes": { "type": "integer", "description": "Fire this many minutes from now (use this for 'in X minutes')" },
+                        "at_time": { "type": "string", "description": "Fire at HH:MM local time, 24h — e.g. '18:30'. Next occurrence." },
+                        "text": { "type": "string", "description": "What to remind about" }
+                    },
+                    "required": ["text"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "list_reminders".into(),
+                description: "Show all pending reminders.".into(),
+                parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "cancel_reminder".into(),
+                description: "Cancel a pending reminder by its numeric id (from list_reminders)."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "integer" }
+                    },
+                    "required": ["id"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "memory_report".into(),
+                description: "Summarize what Luna has permanently learned about the user: shell \
+                              workflow facts, system index, and memory stats. Use for 'what do \
+                              you know about me / what have you learned'.".into(),
+                parameters: json!({ "type": "object", "properties": {}, "required": [] }),
             },
         },
         ToolDef {
@@ -756,33 +808,12 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
         }
 
         "index_system" => {
-            let home = std::env::var("HOME").unwrap_or("/home/netrunner".to_string());
-            let commands = vec![
-                ("projects", format!("find {} -name '.git' -maxdepth 4 -type d 2>/dev/null | grep -v '.cache' | sed 's/\\/.git//' | head -20", home)),
-                ("scripts",  format!("find {} -name '*.sh' -maxdepth 4 2>/dev/null | grep -v '.cache' | head -20", home)),
-                ("configs",  "ls ~/.config/ 2>/dev/null | head -30".to_string()),
-                ("rust",     format!("find {} -name 'Cargo.toml' -maxdepth 5 2>/dev/null | grep -v '.cache' | sed 's/\\/Cargo.toml//' | head -10", home)),
-                ("python",   format!("find {} -name 'pyproject.toml' -maxdepth 5 2>/dev/null | grep -v '.cache' | head -10", home)),
-            ];
-
-            let mut pm = crate::memory::permanent::PermanentMemory::load()?;
-            let mut summary = Vec::new();
-
-            for (key, cmd) in &commands {
-                let result = shell::run_command(cmd, sudo_pass).await?;
-                let items = result.stdout.trim();
-                if !items.is_empty() {
-                    let fact = format!(
-                        "System index - {}: {}",
-                        key,
-                        items.lines().collect::<Vec<_>>().join(", ")
-                    );
-                    pm.remember(&fact, "system").ok();
-                    summary.push(format!("**{}**: {} items", key, items.lines().count()));
-                }
+            let summary = crate::memory::workflow::run_index_system(sudo_pass).await?;
+            if summary.is_empty() {
+                Ok("Nothing found to index".to_string())
+            } else {
+                Ok(format!("Indexed: {}", summary.join(", ")))
             }
-
-            Ok(format!("Indexed: {}", summary.join(", ")))
         }
 
         "learn_topic" => {
@@ -873,6 +904,67 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
                     name
                 )),
             }
+        }
+
+        "set_reminder" => {
+            let text = args["text"].as_str().unwrap_or("");
+            let minutes = args["minutes"].as_u64();
+            let at_time = args["at_time"].as_str();
+            let r = if let Some(mins) = minutes {
+                crate::tools::reminders::add_in(mins.min(u32::MAX as u64) as u32, text)?
+            } else if let Some(t) = at_time {
+                crate::tools::reminders::add_at(t, text)?
+            } else {
+                anyhow::bail!("Need either 'minutes' or 'at_time'");
+            };
+            let when = local_fmt(r.fire_at, "%a %H:%M");
+            Ok(format!(
+                "Reminder set (id {}): '{}' fires {}",
+                r.id, r.text, when
+            ))
+        }
+
+        "list_reminders" => {
+            let all = crate::tools::reminders::list();
+            if all.is_empty() {
+                return Ok("No pending reminders.".into());
+            }
+            let rows: Vec<String> = all
+                .iter()
+                .map(|r| format!("#{}  {}  {}", r.id, local_fmt(r.fire_at, "%a %d %b %H:%M"), r.text))
+                .collect();
+            Ok(rows.join("\n"))
+        }
+
+        "cancel_reminder" => {
+            let id = args["id"].as_u64().unwrap_or(0);
+            match crate::tools::reminders::cancel(id)? {
+                true => Ok(format!("Cancelled reminder #{}.", id)),
+                false => Ok(format!("No reminder with id {}.", id)),
+            }
+        }
+
+        "memory_report" => {
+            use std::collections::BTreeMap;
+            let pm = crate::memory::permanent::PermanentMemory::load()?;
+            let facts = pm.all_facts();
+
+            let mut by_cat: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+            for f in facts {
+                by_cat.entry(f.category.as_str()).or_default().push(&f.content);
+            }
+
+            let mut out = String::from("What Luna has permanently learned:\n");
+            for (cat, items) in &by_cat {
+                out.push_str(&format!("\n[{}] {}\n", cat, items.len()));
+                for c in items.iter().take(15) {
+                    out.push_str(&format!("  - {}\n", c));
+                }
+                if items.len() > 15 {
+                    out.push_str(&format!("  ... and {} more\n", items.len() - 15));
+                }
+            }
+            Ok(out)
         }
 
 
@@ -974,8 +1066,17 @@ echo "STATUS=$STATUS"
 
 /// Pull the URLs a research tool surfaced out of its plain-text result,
 /// so the assistant can show the user the exact sources it referenced.
-pub fn extract_sources(tool_name: &str, result: &str) -> Vec<String> {
-    let mut sources: Vec<String> = Vec::new();
+/// Format a unix timestamp for reminder display in local time.
+fn local_fmt(epoch: u64, fmt: &str) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(epoch as i64, 0)
+        .single()
+        .map(|d| d.format(fmt).to_string())
+        .unwrap_or_default()
+}
+
+pub fn extract_sources(tool_name: &str, result: &str) -> Vec<String> {    let mut sources: Vec<String> = Vec::new();
     let mut push = |s: &str| {
         let t = s.trim();
         if !t.is_empty() && !sources.iter().any(|x| x == t) {

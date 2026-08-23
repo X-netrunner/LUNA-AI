@@ -28,6 +28,8 @@ max_tokens = 2048
 enable_thinking = true
 fast_model = "qwen3:0.6b"      # Small fast model for greetings & short factual questions
                                  # Remove or comment out to disable the two-model split
+embedding_model = "nomic-embed-text"  # Semantic memory recall (RAG-lite).
+                                      # One-time: ollama pull nomic-embed-text
 
 [logging]
 level = "info"                  # "info" or "debug" — toggle via "turn on debug mode"
@@ -94,9 +96,10 @@ protected_processes = ["firefox", "zen-browser", "chromium", "code", "zed",
                        "gimp", "krita", "blender", "libreoffice", "soffice",
                        "thunderbird", "discord", "telegram-desktop", "slack"]
 
-# Monthly self-learning: re-read fish shell history and store workflow
-# facts in permanent memory (top commands, frequently managed packages).
-history_learn_days = 30        # set 0 to disable
+# How often (days) Luna re-analyzes fish history into permanent memory
+history_learn_days = 30
+# How often (days) Luna re-indexes projects/scripts/configs (0 = off)
+index_learn_days = 30
 
 # Disk hygiene: pacman cache, ~/.cache, trash, journals.
 # cleanup_mode:

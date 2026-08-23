@@ -113,10 +113,9 @@ fn cli_flag_reply(input: &str) -> Option<String> {
 }
 
 /// Build an enriched system prompt that includes shell history context.
+/// Permanent-memory facts are NOT baked in here — they are recalled
+/// per-query by `memory_block_for` so only relevant facts get injected.
 fn build_system_prompt(config: &LunaConfig) -> String {
-    let pm = crate::memory::permanent::PermanentMemory::load().unwrap_or_default();
-    let pm_block = pm.as_prompt_block();
-
     let history = load_shell_history();
     let history_block = if !history.is_empty() {
         format!(
@@ -132,10 +131,33 @@ fn build_system_prompt(config: &LunaConfig) -> String {
         String::new()
     };
 
-    format!(
-        "{}\n\n{}{}",
-        config.agent.system_prompt, pm_block, history_block
+    format!("{}{}", config.agent.system_prompt, history_block)
+}
+
+/// Per-turn memory injection: top-k facts semantically similar to the
+/// query (RAG-lite), falling back to the full dump when embeddings are
+/// unavailable. Covers BOTH models — even simple fast-path queries now
+/// see relevant personal facts.
+async fn memory_block_for(input: &str, config: &LunaConfig, k: usize) -> String {
+    let Ok(pm) = crate::memory::permanent::PermanentMemory::load() else {
+        return String::new();
+    };
+    let facts = pm.all_facts();
+    if facts.is_empty() {
+        return String::new();
+    }
+    match crate::memory::recall::relevant_facts(
+        &config.llm.base_url,
+        &config.llm.embedding_model,
+        input,
+        facts,
+        k,
     )
+    .await
+    {
+        Some(recalled) => crate::memory::recall::format_block(&recalled),
+        None => pm.as_prompt_block(),
+    }
 }
 
 /// Compact prompt for the fast model. The 0.6b model is too small to follow
@@ -145,7 +167,9 @@ const FAST_PROMPT: &str = "You are Luna. You were built by Netrunner. You run lo
     on Arch Linux. You are direct, efficient, and have a dry wit. Be brief — answer in \
     1-2 sentences max. Never introduce yourself beyond 'I'm Luna, built by Netrunner'. \
     Never say you were made by a company. Never say you don't have a physical form. \
-    If you don't know something specific, say 'I don't know' instead of guessing.";
+    If you don't know something specific, say 'I don't know' instead of guessing. \
+    If the request needs tools, files, commands, web data, or actions on this machine, \
+    reply with exactly: ESCALATE";
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum RunMode {
@@ -350,7 +374,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         }
 
         let debug = config.logging.level == "debug";
-        let (active_react, effective_prompt, is_fast): (&ReactLoop, String, bool) =
+        let (mut active_react, mut effective_prompt, mut is_fast): (&ReactLoop, String, bool) =
             match classify(&input) {
                 QueryComplexity::Simple if fast_react.is_some() => {
                     tracing::debug!("Simple query — using fast model");
@@ -358,27 +382,47 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                 }
                 _ => (&react, system_prompt.to_string(), false),
             };
+        effective_prompt
+            .push_str(&memory_block_for(&input, config, if is_fast { 3 } else { 6 }).await);
 
-        let tag = if debug {
-            if is_fast { "[fast] " } else { "[full] " }
-        } else { "" };
-        print!("Luna{}: ", tag);
-        io::stdout().flush().ok();
+        // Up to two attempts: a fast-model reply of "ESCALATE" rolls back
+        // the exchange and retries once on the full model with tools.
+        for attempt in 1..=2 {
+            let mem_snapshot = memory.len();
+            let tag = if debug {
+                if is_fast { "[fast] " } else { "[full] " }
+            } else {
+                ""
+            };
+            print!("Luna{}: ", tag);
+            io::stdout().flush().ok();
 
-        match active_react.run(&input, &mut memory, &effective_prompt).await {
-            Ok((response, streamed)) => {
-                if !streamed {
-                    println!("{}", response);
-                }
-                if config.voice.mode != VoiceMode::Off {
-                    if let Err(e) = tts::speak(&response, &config.voice.mode).await {
-                        tracing::warn!("TTS failed: {} — continuing without audio", e);
+            match active_react.run(&input, &mut memory, &effective_prompt).await {
+                Ok((response, streamed)) => {
+                    if is_fast && response.trim() == "ESCALATE" && attempt < 2 {
+                        tracing::info!("Fast model escalated — re-running on full model");
+                        memory.truncate_to(mem_snapshot);
+                        active_react = &react;
+                        is_fast = false;
+                        effective_prompt = system_prompt.to_string();
+                        effective_prompt.push_str(&memory_block_for(&input, config, 6).await);
+                        continue;
                     }
+                    if !streamed {
+                        println!("{}", response);
+                    }
+                    if config.voice.mode != VoiceMode::Off {
+                        if let Err(e) = tts::speak(&response, &config.voice.mode).await {
+                            tracing::warn!("TTS failed: {} — continuing without audio", e);
+                        }
+                    }
+                    break;
                 }
-            }
-            Err(e) => {
-                eprintln!("\nLuna error: {}", e);
-                tracing::error!("Agent error: {:?}", e);
+                Err(e) => {
+                    eprintln!("\nLuna error: {}", e);
+                    tracing::error!("Agent error: {:?}", e);
+                    break;
+                }
             }
         }
 
@@ -508,30 +552,54 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                 }
 
                 let debug = config.logging.level == "debug";
-                let (active_react, effective_prompt, is_fast): (&ReactLoop, String, bool) =
-                    match classify(&input) {
-                        QueryComplexity::Simple if fast_react.is_some() => {
-                            (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true)
-                        }
-                        _ => (&react, system_prompt.to_string(), false),
+                let (mut active_react, mut effective_prompt, mut is_fast): (
+                    &ReactLoop,
+                    String,
+                    bool,
+                ) = match classify(&input) {
+                    QueryComplexity::Simple if fast_react.is_some() => {
+                        (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true)
+                    }
+                    _ => (&react, system_prompt.to_string(), false),
+                };
+                effective_prompt
+                    .push_str(&memory_block_for(&input, config, if is_fast { 3 } else { 6 }).await);
+
+                for attempt in 1..=2 {
+                    let mem_snapshot = memory.len();
+                    let tag = if debug {
+                        if is_fast { "[fast] " } else { "[full] " }
+                    } else {
+                        ""
                     };
+                    print!("Luna{}: ", tag);
+                    io::stdout().flush().ok();
 
-                let tag = if debug {
-                    if is_fast { "[fast] " } else { "[full] " }
-                } else { "" };
-                print!("Luna{}: ", tag);
-                io::stdout().flush().ok();
-
-                match active_react.run(&input, &mut memory, &effective_prompt).await {
-                    Ok((response, streamed)) => {
-                        if !streamed {
-                            println!("{}", response);
+                    match active_react.run(&input, &mut memory, &effective_prompt).await {
+                        Ok((response, streamed)) => {
+                            if is_fast && response.trim() == "ESCALATE" && attempt < 2 {
+                                tracing::info!("Fast model escalated — re-running on full model");
+                                memory.truncate_to(mem_snapshot);
+                                active_react = &react;
+                                is_fast = false;
+                                effective_prompt = system_prompt.to_string();
+                                effective_prompt
+                                    .push_str(&memory_block_for(&input, config, 6).await);
+                                continue;
+                            }
+                            if !streamed {
+                                println!("{}", response);
+                            }
+                            if config.voice.mode != VoiceMode::Off {
+                                tts::speak(&response, &config.voice.mode).await.ok();
+                            }
+                            break;
                         }
-                        if config.voice.mode != VoiceMode::Off {
-                            tts::speak(&response, &config.voice.mode).await.ok();
+                        Err(e) => {
+                            eprintln!("\nLuna error: {}", e);
+                            break;
                         }
                     }
-                    Err(e) => eprintln!("\nLuna error: {}", e),
                 }
                 println!();
             }

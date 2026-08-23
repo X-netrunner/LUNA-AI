@@ -1,6 +1,7 @@
 //! memory/mod.rs — Conversation history and context management
 
 pub mod permanent;
+pub mod recall;
 pub mod workflow;
 
 use crate::llm::ollama::Message;
@@ -86,5 +87,16 @@ impl Memory {
         self.save()?;
         tracing::info!("Memory cleared");
         Ok(())
+    }
+
+    /// Number of messages currently held (for escalation rollbacks)
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Drop everything after the first `n` messages — used to undo a
+    /// failed fast-model attempt before re-running on the full model.
+    pub fn truncate_to(&mut self, n: usize) {
+        self.messages.truncate(n);
     }
 }
