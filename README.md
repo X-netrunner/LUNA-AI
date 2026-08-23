@@ -14,6 +14,10 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 - **Voice session mode** — say the wake word once, keep talking without repeating it until you say goodbye or go quiet
 - **Inline wake-word commands** — say "luna what's the time" in one breath; Luna strips the wake word and runs the rest as a command
 - **Proactive monitoring** — background checks for low battery, low disk space, and pending package updates, with real desktop notifications (no LLM call, zero hallucination risk)
+- **Background daemon** — `luna --daemon` watches for RAM/CPU hogs, learns which apps you use daily, reclaims disk space safely, and can auto-end idle processes you approve by chat
+- **Secrets in the OS keyring** — API keys live encrypted in the Secret Service instead of plaintext TOML (`luna --set-key gemini`)
+- **Three-tier web search** — Tavily (keyless) first, Gemini as knowledge fallback, DuckDuckGo instant answers last; pages fetched via Firecrawl (handles JavaScript)
+- **Source validation** — asks like "is X a scam?" trigger a Reddit-first search to cross-check claims before answering
 - **Desktop integration** — opens apps, edits files, reads/writes the clipboard, sends notifications
 - **Web learning** — one tool call searches the web AND fetches the most relevant page, so Luna can learn about a topic and `remember` it permanently
 - **Todoist integration** — list, add, and complete tasks in your real Todoist account
@@ -29,9 +33,11 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 | `notify` | Desktop notification |
 | `system_info` | Battery, CPU, RAM, temp, disk, uptime |
 | `clipboard` | Read/write the Wayland clipboard |
-| `web_search` | DuckDuckGo search, returns a text summary of top results |
-| `fetch_page` | Fetch a single webpage's text |
+| `web_search` | Three-tier search: Tavily → Gemini → DuckDuckGo instant answers |
+| `fetch_page` | Fetch a single webpage's text (Firecrawl keyless, JS-aware) |
 | `learn_topic` | Search + fetch the best result in one call — use this over `fetch_page` for open-ended research |
+| `process_stats` | Show what the daemon learned about your process usage |
+| `allow_autokill` / `deny_autokill` | Grant/revoke idle auto-kill for a process (daemon-managed) |
 | `nmap_scan` / `analyze_pcap` / `decode_payload` / `hash_file` / `dns_lookup` | CTF/network toolkit: scanning, pcap analysis, decoding, hashing, DNS/whois |
 | `remember` / `forget` / `list_memories` | Manage permanent memory |
 | `index_system` | Scan the home directory and save a structured map to permanent memory |
@@ -95,7 +101,62 @@ check_interval_mins = 15
 battery_low_threshold = 20
 disk_full_threshold = 90
 check_updates = true
+
+[search]
+# All optional — works keyless out of the box. Free keys boost quotas:
+tavily_api_key = ""           # tavily.com (1000 free searches/month)
+gemini_api_key = ""           # aistudio.google.com
+# Or keep them OUT of this file entirely (see Secrets below):
+# gemini_api_key = "keyring:gemini"
 ```
+
+## Secrets (OS keyring)
+
+API keys never need to touch disk in plaintext. Store a secret in the
+freedesktop Secret Service and reference it by name:
+
+```bash
+luna --set-key gemini     # prompts without echo, stores luna/gemini
+luna --set-key todoist
+luna --get-key gemini     # print for verification
+```
+
+```toml
+[search]
+gemini_api_key = "keyring:gemini"    # resolved at startup, nothing on disk
+```
+
+Luna also chmods `luna.toml` to 600 every time it saves it.
+
+## Background Daemon
+
+Run the watchdog standalone (no Ollama, no tty):
+
+```bash
+luna --daemon                                   # foreground
+cp deploy/luna-daemon.service ~/.config/systemd/user/
+systemctl --user enable --now luna-daemon       # as a service
+```
+
+Three jobs:
+
+1. **Process watchdog** — flags single processes above RAM/CPU thresholds
+   via desktop notification, with the exact pid to end. Never kills anything
+   on its own initiative.
+2. **Usage learning** — every scan is fed into a per-process profile
+   (`~/.local/share/luna/process_stats.json`). Apps seen on ≥5 of the last
+   7 days count as *daily use* and are silently ignored from then on.
+   Idle non-daily processes become auto-kill candidates: ones you approved
+   (`allow auto-kill steam`) get SIGTERMed after ~30 idle minutes;
+   everything else only earns an opt-in suggestion once per day. Stateful
+   apps (browsers, editors, terminals, chat) are protected no matter what.
+3. **Disk hygiene** — measures reclaimable space in the pacman cache,
+   `~/.cache`, trash, and journals. In `notify` mode (default) it only
+   reports; in `auto` mode it cleans those four safe locations when `/`
+   crosses your disk-full threshold.
+
+All thresholds, ignore lists, and safety rails live under `[daemon]` in
+`luna.toml` — see `luna.toml.example` for the full documented set.
 
 ## Voice Setup
 
@@ -140,7 +201,9 @@ aplay /tmp/test.wav
 ## Todoist Setup
 
 1. Get your API token at `todoist.com/app/settings/integrations`
-2. Add it to `luna.toml` under `[todoist] api_token = "..."`
+2. Add it to `luna.toml` under `[todoist] api_token = "..."` — or better,
+   store it with `luna --set-key todoist` and set
+   `api_token = "keyring:todoist"`
 3. Never commit this token — `luna.toml` should always be gitignored
 
 ## Architecture
@@ -160,11 +223,16 @@ main.rs
 │   ├── shell.rs       — bash command runner with sudo injection (never hangs on a prompt)
 │   ├── filesystem.rs  — file read/write
 │   ├── desktop.rs     — notifications
-│   ├── web.rs         — DuckDuckGo search
+│   ├── web.rs         — Tavily → Gemini → DuckDuckGo search chain
 │   ├── learn.rs       — combined search + fetch for one-shot research
 │   ├── security.rs    — nmap / tshark / encoding / hashing / DNS for CTF work
 │   ├── todoist.rs     — Todoist Unified API v1 client
 │   └── proactive.rs   — background battery/disk/update monitor
+├── daemon/
+│   ├── mod.rs         — daemon entry loop + idle-process policy
+│   ├── watchdog.rs    — /proc scanner (RAM/CPU/jiffies)
+│   ├── tracker.rs     — usage learning, daily-use classification, allowlist
+│   └── cleanup.rs     — safe disk hygiene (pacman cache, ~/.cache, trash, journals)
 ├── tts/
 │   └── piper.rs       — Kokoro TTS via Python subprocess
 ├── stt/
@@ -177,6 +245,8 @@ main.rs
 
 - **v1** — bash, simple keyword matching, ChromaDB RAG
 - **v2** — bash, intent routing, model escalation, daemon socket
-- **v3 (this one)** — Rust, ReAct agent, dual memory, voice I/O, Todoist, proactive monitoring
+- **v3 (this one)** — Rust, ReAct agent, dual memory, voice I/O, Todoist,
+  three-tier web search, keyring secrets, background daemon with usage
+  learning and idle auto-kill
 
 Built by [Netrunner](https://github.com/X-netrunner) — MIT Bengaluru
