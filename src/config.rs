@@ -38,6 +38,9 @@ pub struct LunaConfig {
 
     #[serde(default)]
     pub search: SearchConfig,
+
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 }
 
 // ── Agent behaviour ───────────────────────────────────────────────────────────
@@ -281,6 +284,66 @@ pub struct SearchConfig {
     /// When Tavily has no results, Gemini answers from its training data.
     /// Get yours at https://aistudio.google.com/apikey
     pub gemini_api_key: Option<String>,
+}
+
+// ── Background daemon (`luna --daemon`) ───────────────────────────────────────
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DaemonConfig {
+    /// Master switch — `luna --daemon` exits immediately when false
+    pub enabled: bool,
+    /// How often to scan processes and check disk, in minutes
+    pub check_interval_mins: u64,
+    // ── Process watchdog ──
+    /// Flag a single process using more RAM than this (MB)
+    pub ram_threshold_mb: u64,
+    /// Flag a single process with sustained CPU use above this (%)
+    pub cpu_threshold_percent: f32,
+    /// Processes never flagged (Luna's own stack, desktop shell, etc.)
+    #[serde(default)]
+    pub ignore_processes: Vec<String>,
+    // ── Disk cleanup ──
+    /// Enable disk hygiene checks
+    pub disk_cleanup: bool,
+    /// "notify" = report reclaimable space, touch nothing.
+    /// "auto"   = clean safe locations when / crosses the proactive
+    ///            disk_full_threshold.
+    pub cleanup_mode: String,
+    /// Delete ~/.cache files untouched for this many days
+    pub cache_max_age_days: u32,
+    /// Empty trash items older than this many days
+    pub trash_max_age_days: u32,
+    /// journalctl --vacuum-time for system logs (needs sudo)
+    pub journal_vacuum_days: u32,
+    /// Keep this many package versions in the pacman cache (needs sudo)
+    pub pacman_cache_keep: u32,
+    /// Only notify about cleanups worth at least this much (MB)
+    pub min_notify_mb: u64,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            check_interval_mins: 30,
+            ram_threshold_mb: 1500,
+            cpu_threshold_percent: 80.0,
+            ignore_processes: [
+                "ollama", "luna", "plasmashell", "kwin_wayland", "gnome-shell",
+                "Xwayland", "pipewire", "pipewire-pulse", "wireplumber",
+                "systemd", "dbus-daemon", "dbus-broker",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            disk_cleanup: true,
+            cleanup_mode: "notify".into(),
+            cache_max_age_days: 30,
+            trash_max_age_days: 14,
+            journal_vacuum_days: 30,
+            pacman_cache_keep: 2,
+            min_notify_mb: 500,
+        }
+    }
 }
 
 // ── Loading logic ─────────────────────────────────────────────────────────────

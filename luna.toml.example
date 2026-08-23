@@ -51,6 +51,32 @@ battery_low_threshold = 20
 disk_full_threshold = 90
 check_updates = true
 
+[daemon]
+# Background watchdog — run with: luna --daemon
+# Install as a service: cp deploy/luna-daemon.service ~/.config/systemd/user/
+#                       systemctl --user enable --now luna-daemon
+enabled = true
+check_interval_mins = 30
+
+# Process watchdog: flags RAM/CPU hogs via desktop notification.
+# NEVER kills anything automatically — you decide what to end.
+ram_threshold_mb = 1500        # single process using more than this (MiB)
+cpu_threshold_percent = 80.0   # sustained CPU% since last scan
+ignore_processes = ["ollama", "luna", "plasmashell", "kwin_wayland",
+                    "gnome-shell", "Xwayland", "pipewire", "wireplumber"]
+
+# Disk hygiene: pacman cache, ~/.cache, trash, journals.
+# cleanup_mode:
+#   notify = only report reclaimable space (default, safe)
+#   auto   = actually clean when / crosses disk_full_threshold above
+disk_cleanup = true
+cleanup_mode = "notify"
+cache_max_age_days = 30        # delete ~/.cache files untouched this long
+trash_max_age_days = 14        # empty trash items older than this
+journal_vacuum_days = 30       # journalctl --vacuum-time (needs sudo)
+pacman_cache_keep = 2          # paccache -rkN (needs sudo)
+min_notify_mb = 500            # only report cleanups worth this much
+
 [voice]
 mode = "basic"              # basic | off
 piper_bin = "af_heart"      # Kokoro voice: af_heart | af_sky | af_nicole | af_sarah

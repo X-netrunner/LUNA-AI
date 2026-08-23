@@ -9,6 +9,7 @@
 mod agent;
 mod audio;
 mod config;
+mod daemon;
 mod llm;
 mod memory;
 mod stt;
@@ -39,6 +40,11 @@ struct Args {
     /// Increase log verbosity (use multiple times: -v, -vv, -vvv)
     #[arg(short, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// Run the background watchdog (process/disk monitoring) instead of
+    /// the interactive agent. Intended for `systemctl --user start luna-daemon`.
+    #[arg(long)]
+    daemon: bool,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -75,6 +81,14 @@ async fn main() -> Result<()> {
             _ => VoiceMode::Basic,
         };
         tracing::info!("Voice mode overridden by CLI: {:?}", config.voice.mode);
+    }
+
+    // ── Daemon mode ──────────────────────────────────────────────────────────
+    // No tty interaction, no sudo prompt, no Ollama needed.
+    if args.daemon {
+        daemon::run(config).await?;
+        tracing::info!("Luna daemon stopped.");
+        return Ok(());
     }
 
     // Log active settings so we know exactly what we're running
