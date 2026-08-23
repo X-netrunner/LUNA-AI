@@ -138,7 +138,7 @@ impl<'a> ReactLoop<'a> {
                         tracing::debug!(
                             "Tool '{}' result: {}",
                             tool_name,
-                            &crate::util::truncate(&tool_result, 200)
+                            &crate::util::truncate(&tool_result, 400)
                         );
 
                         turn_messages.push(Message::assistant(format!(

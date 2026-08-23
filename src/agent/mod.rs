@@ -7,8 +7,48 @@ use crate::llm::react::ReactLoop;
 use crate::memory::Memory;
 use crate::tts;
 use anyhow::Result;
+use rustyline::{history::FileHistory, Config as RlConfig, Editor};
 use std::collections::HashSet;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
+use std::path::PathBuf;
+
+// ── Interactive input (readline) ──────────────────────────────────────────────
+
+/// Shared input-history file so up/down arrows work across sessions.
+fn input_history_path() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("luna").join("input_history"))
+}
+
+type RlEditor = Editor<(), FileHistory>;
+
+/// Build a readline editor with persistent history. Falls back to a plain
+/// editor without history if the history file can't be used (first run etc.)
+/// — input still works either way.
+fn make_editor() -> RlEditor {
+    let cfg = RlConfig::builder()
+        .max_history_size(500)
+        .map(|b| b.build())
+        .unwrap_or_else(|_| RlConfig::default());
+    let mut rl = match RlEditor::with_config(cfg) {
+        Ok(rl) => rl,
+        Err(_) => Editor::<(), FileHistory>::new().expect("rustyline editor"),
+    };
+    if let Some(path) = input_history_path() {
+        if path.exists() {
+            let _ = rl.load_history(&path); // ignore — empty history is fine
+        }
+    }
+    rl
+}
+
+fn save_editor_history(rl: &mut RlEditor) {
+    if let Some(path) = input_history_path() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = rl.save_history(&path);
+    }
+}
 
 // ── Shared setup ──────────────────────────────────────────────────────────────
 
@@ -331,27 +371,27 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         config.llm.model, config.voice.mode
     );
     println!("  Type 'exit' to quit, 'clear' to reset memory\n");
+    println!("  (↑/↓ cycles input history)\n");
 
-    let stdin = io::stdin();
+    let mut rl = make_editor();
 
     loop {
-        print!("You: ");
-        io::stdout().flush().ok();
-
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {}
+        let line = match rl.readline("You: ") {
+            Ok(line) => line,
+            Err(rustyline::error::ReadlineError::Interrupted) => continue, // ^C → fresh prompt
+            Err(rustyline::error::ReadlineError::Eof) => break,           // ^D exits
             Err(e) => {
                 tracing::error!("Failed to read input: {}", e);
                 break;
             }
-        }
+        };
 
         let input = line.trim().to_string();
         if input.is_empty() || looks_like_artifact(&input) {
             continue;
         }
+        let _ = rl.add_history_entry(&input);
+        save_editor_history(&mut rl);
 
         match input.to_lowercase().as_str() {
             "exit" | "quit" | "bye" => {
@@ -365,8 +405,6 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
             }
             _ => {}
         }
-
-        if looks_like_artifact(&input) { continue; }
 
         if let Some(reply) = cli_flag_reply(&input) {
             println!("Luna: {}", reply);
@@ -454,17 +492,26 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
     let mut mode = RunMode::Hybrid;
 
     // ── Stdin reader thread → channel ─────────────────────────────────────────
+    // Uses rustyline on its own thread so ↑/↓ history works while the main
+    // loop handles voice events concurrently. The thread owns the "You: "
+    // prompt; the main loop must NOT print its own prompt for typed input.
     let (text_tx, mut text_rx) = tokio::sync::mpsc::channel::<String>(32);
     std::thread::spawn(move || {
-        let stdin = std::io::stdin();
+        let mut rl = make_editor();
         loop {
-            let mut line = String::new();
-            if stdin.read_line(&mut line).is_ok() {
-                if text_tx.blocking_send(line).is_err() {
-                    break;
+            match rl.readline("You: ") {
+                Ok(line) => {
+                    let trimmed = line.trim().to_string();
+                    if !trimmed.is_empty() {
+                        let _ = rl.add_history_entry(&trimmed);
+                        save_editor_history(&mut rl);
+                    }
+                    if text_tx.blocking_send(trimmed).is_err() {
+                        break;
+                    }
                 }
-            } else {
-                break;
+                Err(rustyline::error::ReadlineError::Interrupted) => continue,
+                Err(_) => break, // EOF or terminal closed
             }
         }
     });
@@ -507,11 +554,6 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 
     // ── Main event loop ───────────────────────────────────────────────────────
     loop {
-        if mode != RunMode::Voice {
-            print!("You: ");
-            io::stdout().flush().ok();
-        }
-
         tokio::select! {
             // ── Text input ───────────────────────────────────────────────────
             maybe_line = text_rx.recv() => {

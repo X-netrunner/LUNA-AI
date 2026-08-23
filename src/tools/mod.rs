@@ -318,7 +318,9 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 name: "memory_report".into(),
                 description: "Summarize what Luna has permanently learned about the user: shell \
                               workflow facts, system index, and memory stats. Use for 'what do \
-                              you know about me / what have you learned'.".into(),
+                              you know about me / what have you learned'. ALWAYS relay the \
+                              returned facts to the user as your answer — never reply with a \
+                              menu of options instead.".into(),
                 parameters: json!({ "type": "object", "properties": {}, "required": [] }),
             },
         },
@@ -964,6 +966,10 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
                     out.push_str(&format!("  ... and {} more\n", items.len() - 15));
                 }
             }
+            out.push_str(
+                "\n(These facts ARE the answer to the user's question — present them \
+                 clearly now. Do not ask what they want to do next.)\n",
+            );
             Ok(out)
         }
 
