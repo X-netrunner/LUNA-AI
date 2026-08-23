@@ -94,6 +94,10 @@ protected_processes = ["firefox", "zen-browser", "chromium", "code", "zed",
                        "gimp", "krita", "blender", "libreoffice", "soffice",
                        "thunderbird", "discord", "telegram-desktop", "slack"]
 
+# Monthly self-learning: re-read fish shell history and store workflow
+# facts in permanent memory (top commands, frequently managed packages).
+history_learn_days = 30        # set 0 to disable
+
 # Disk hygiene: pacman cache, ~/.cache, trash, journals.
 # cleanup_mode:
 #   notify = only report reclaimable space (default, safe)

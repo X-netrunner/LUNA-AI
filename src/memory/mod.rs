@@ -1,6 +1,7 @@
 //! memory/mod.rs — Conversation history and context management
 
 pub mod permanent;
+pub mod workflow;
 
 use crate::llm::ollama::Message;
 use anyhow::{Context, Result};

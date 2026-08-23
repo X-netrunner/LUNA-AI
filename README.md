@@ -249,4 +249,4 @@ main.rs
   three-tier web search, keyring secrets, background daemon with usage
   learning and idle auto-kill
 
-Built by [Netrunner](https://github.com/X-netrunner) — MIT Bengaluru
+Built by [Srijan Satya Bandaru](https://www.linkedin.com/in/srijan-bandaru-nex/) — MIT Bengaluru

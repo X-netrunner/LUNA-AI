@@ -139,8 +139,7 @@ pub async fn run(config: LunaConfig) -> Result<()> {
         }
 
         // ── 6. Orphaned packages ─────────────────────────────────────────
-        if let Ok(n) = sh("pacman -Qtdq 2>/dev/null | wc -l").await {
-            if let Ok(count) = n.trim().parse::<u32>() {
+        if let Ok(n) = sh("pacman -Qtdq 2>/dev/null | wc -l").await {            if let Ok(count) = n.trim().parse::<u32>() {
                 if count > 0 {
                     static ONCE: std::sync::atomic::AtomicBool =
                         std::sync::atomic::AtomicBool::new(false);
@@ -155,6 +154,18 @@ pub async fn run(config: LunaConfig) -> Result<()> {
                         .await;
                     }
                 }
+            }
+        }
+
+        // ── 7. Monthly shell-history learning ────────────────────────────
+        if config.daemon.history_learn_days > 0 {
+            match crate::memory::workflow::learn_if_due(config.daemon.history_learn_days) {
+                Ok(Some(summary)) => {
+                    tracing::info!("{}", summary);
+                    notify("Luna daemon", &summary).await;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("Workflow learning failed: {}", e),
             }
         }
 

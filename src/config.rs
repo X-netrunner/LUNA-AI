@@ -335,6 +335,8 @@ pub struct DaemonConfig {
     /// Stateful apps never auto-killed even when allowlisted
     #[serde(default)]
     pub protected_processes: Vec<String>,
+    /// How often (days) Luna re-analyzes fish history into permanent memory
+    pub history_learn_days: u32,
 }
 
 impl Default for DaemonConfig {
@@ -373,6 +375,7 @@ impl Default for DaemonConfig {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+            history_learn_days: 30,
         }
     }
 }

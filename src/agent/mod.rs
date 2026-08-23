@@ -95,6 +95,23 @@ fn load_shell_history() -> Vec<String> {
     commands.into_iter().rev().take(30).collect()
 }
 
+/// Detect CLI-style flags typed into the chat ("luna --set-key gemini").
+/// These are terminal commands; answering them via the LLM just produces
+/// confusion, and secrets must never pass through chat (they would be
+/// saved to history.json). Returns a canned guidance reply.
+fn cli_flag_reply(input: &str) -> Option<String> {
+    let t = input.trim();
+    let body = t.strip_prefix("luna ").unwrap_or(t);
+    if !body.starts_with("--") {
+        return None;
+    }
+    Some(format!(
+        "That's a terminal command — run it in your shell instead:\n  luna {}\n\
+         I refuse secrets typed in chat: they'd be saved to history.json.",
+        body
+    ))
+}
+
 /// Build an enriched system prompt that includes shell history context.
 fn build_system_prompt(config: &LunaConfig) -> String {
     let pm = crate::memory::permanent::PermanentMemory::load().unwrap_or_default();
@@ -325,6 +342,13 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
             _ => {}
         }
 
+        if looks_like_artifact(&input) { continue; }
+
+        if let Some(reply) = cli_flag_reply(&input) {
+            println!("Luna: {}", reply);
+            continue;
+        }
+
         let debug = config.logging.level == "debug";
         let (active_react, effective_prompt, is_fast): (&ReactLoop, String, bool) =
             match classify(&input) {
@@ -477,6 +501,11 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                 }
 
                 if looks_like_artifact(&input) { continue; }
+
+                if let Some(reply) = cli_flag_reply(&input) {
+                    println!("Luna: {}", reply);
+                    continue;
+                }
 
                 let debug = config.logging.level == "debug";
                 let (active_react, effective_prompt, is_fast): (&ReactLoop, String, bool) =
