@@ -21,6 +21,7 @@ const HALLUCINATION_PATTERNS: &[&str] = &[
     "please subscribe",
 ];
 
+#[derive(Clone)]
 pub struct WhisperStt {
     model_path: String,
     /// Initial prompt fed to Whisper — massively helps with accents and

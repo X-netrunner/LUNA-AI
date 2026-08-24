@@ -126,6 +126,32 @@ pub async fn record_until_silence(sample_rate: u32, silence_ms: u64) -> Result<S
     Ok(wav_path)
 }
 
+/// Continuous listening for conversation mode — records utterances back-to-back
+/// without any wake-word filtering. Returns each transcribed utterance.
+/// Caller should loop this. Errors only on hard failures (device lost, etc.);
+/// silence timeouts just yield empty string and continue.
+pub async fn listen_continuous(
+    sample_rate: u32,
+    silence_ms: u64,
+    stt: &crate::stt::whisper::WhisperStt,
+) -> Result<String> {
+    let wav_path = match record_until_silence(sample_rate, silence_ms).await {
+        Ok(p) => p,
+        Err(_) => return Ok(String::new()), // timeout / no speech — yield empty
+    };
+
+    let text = match stt.transcribe(&wav_path).await {
+        Ok(t) => t,
+        Err(_) => {
+            tokio::fs::remove_file(&wav_path).await.ok();
+            return Ok(String::new());
+        }
+    };
+    tokio::fs::remove_file(&wav_path).await.ok();
+
+    Ok(text)
+}
+
 // ── Core recording ────────────────────────────────────────────────────────────
 
 fn record_blocking(wav_path: &str, sample_rate: u32, silence_ms: u64) -> Result<()> {

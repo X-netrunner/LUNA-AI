@@ -11,6 +11,7 @@ use rustyline::{history::FileHistory, Config as RlConfig, Editor};
 use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 // ── Interactive input (readline) ──────────────────────────────────────────────
 
@@ -491,6 +492,13 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 
     let mut mode = RunMode::Hybrid;
 
+    // Conversation mode state — after a wake-word session ends, keep
+    // listening without wake word for `conversation_timeout_mins`.
+    let conversation_timeout = Duration::from_secs(config.audio.conversation_timeout_mins as u64 * 60);
+    let mut conversation_until: Option<Instant> = None;
+    let mut conversation_tx: Option<tokio::sync::mpsc::Sender<String>> = None;
+    let mut conversation_rx: Option<tokio::sync::mpsc::Receiver<String>> = None;
+
     // ── Stdin reader thread → channel ─────────────────────────────────────────
     // Uses rustyline on its own thread so ↑/↓ history works while the main
     // loop handles voice events concurrently. The thread owns the "You: "
@@ -554,6 +562,80 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 
     // ── Main event loop ───────────────────────────────────────────────────────
     loop {
+        // Check conversation mode channel first (non-blocking)
+        if let Some(rx) = &mut conversation_rx {
+            if let Ok(conv_text) = rx.try_recv() {
+                let input = conv_text.trim().to_string();
+                if !input.is_empty() && !looks_like_artifact(&input) {
+                    println!("  You: {}", input);
+                    let debug = config.logging.level == "debug";
+                    let (mut active_react, mut effective_prompt, mut is_fast): (
+                        &ReactLoop,
+                        String,
+                        bool,
+                    ) = match classify(&input) {
+                        QueryComplexity::Simple if fast_react.is_some() => {
+                            (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true)
+                        }
+                        _ => (&react, system_prompt.to_string(), false),
+                    };
+                    effective_prompt
+                        .push_str(&memory_block_for(&input, config, if is_fast { 3 } else { 6 }).await);
+
+                    for attempt in 1..=2 {
+                        let mem_snapshot = memory.len();
+                        let tag = if debug {
+                            if is_fast { "[fast] " } else { "[full] " }
+                        } else {
+                            ""
+                        };
+                        print!("Luna{}: ", tag);
+                        io::stdout().flush().ok();
+
+                        match active_react.run(&input, &mut memory, &effective_prompt).await {
+                            Ok((response, streamed)) => {
+                                if is_fast && response.trim() == "ESCALATE" && attempt < 2 {
+                                    tracing::info!("Fast model escalated — re-running on full model");
+                                    memory.truncate_to(mem_snapshot);
+                                    active_react = &react;
+                                    is_fast = false;
+                                    effective_prompt = system_prompt.to_string();
+                                    effective_prompt
+                                        .push_str(&memory_block_for(&input, config, 6).await);
+                                    continue;
+                                }
+                                if !streamed {
+                                    println!("{}", response);
+                                }
+                                if config.voice.mode != VoiceMode::Off {
+                                    tts::speak(&response, &config.voice.mode, config).await.ok();
+                                }
+                                break;
+                            }
+                            Err(e) => {
+                                eprintln!("\nLuna error: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    println!();
+                }
+                // Check if conversation window expired
+                if let Some(until) = conversation_until {
+                    if Instant::now() >= until {
+                        println!(
+                            "  [Conversation mode ended — say \"{}\" to wake me again]",
+                            config.audio.wake_word
+                        );
+                        conversation_until = None;
+                        conversation_tx = None;
+                        conversation_rx = None;
+                    }
+                }
+                continue;
+            }
+        }
+
         tokio::select! {
             // ── Text input ───────────────────────────────────────────────────
             maybe_line = text_rx.recv() => {
@@ -666,7 +748,52 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                         mode = RunMode::Text;
                         println!("  [Switched to text mode]");
                     }
-                    ControlFlow::Continue => {}
+                    ControlFlow::Continue => {
+                        // Session ended (user said "that's all").
+                        // If conversation_timeout_mins > 0, keep listening without
+                        // wake word for that many minutes.
+                        if config.audio.conversation_timeout_mins > 0
+                            && conversation_tx.is_none()
+                        {
+                            conversation_until = Some(Instant::now() + conversation_timeout);
+                            let (tx, rx) = tokio::sync::mpsc::channel::<String>(4);
+                            let tx_for_task = tx.clone();
+                            conversation_tx = Some(tx);
+                            conversation_rx = Some(rx);
+                            let stt_conv = stt.clone();
+                            let sample_rate = config.audio.sample_rate;
+                            let silence_ms = config.audio.vad_silence_ms;
+                            println!(
+                                "  [Conversation mode — listening for {} min without \"{}\"]",
+                                config.audio.conversation_timeout_mins, config.audio.wake_word
+                            );
+                            tokio::spawn(async move {
+                                loop {
+                                    match crate::audio::capture::listen_continuous(
+                                        sample_rate,
+                                        silence_ms,
+                                        &stt_conv,
+                                    )
+                                    .await
+                                    {
+                                        Ok(text) if !text.trim().is_empty() => {
+                                            if tx_for_task.send(text).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        Ok(_) => {} // silence timeout, continue
+                                        Err(e) => {
+                                            tracing::debug!("Conversation listener error: {}", e);
+                                            tokio::time::sleep(
+                                                tokio::time::Duration::from_millis(200),
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
                 }
             }
         }

@@ -184,6 +184,9 @@ pub struct AudioConfig {
     pub wake_aliases: Vec<String>,
     pub vad_silence_ms: u64,
     pub sample_rate: u32,
+    /// After a wake-word activation, keep listening for voice without
+    /// requiring "luna" again for this many minutes (0 = off).
+    pub conversation_timeout_mins: u32,
 }
 
 impl Default for AudioConfig {
@@ -204,6 +207,7 @@ impl Default for AudioConfig {
             ],
             vad_silence_ms: 2000,
             sample_rate: 16000,
+            conversation_timeout_mins: 5,
         }
     }
 }
