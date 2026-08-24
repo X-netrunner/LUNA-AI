@@ -100,6 +100,9 @@ protected_processes = ["firefox", "zen-browser", "chromium", "code", "zed",
 history_learn_days = 30
 # How often (days) Luna re-indexes projects/scripts/configs (0 = off)
 index_learn_days = 30
+# "I'm alive" desktop notification every N hours while the daemon runs
+# (0 = off). Includes uptime, cycles, auto-kills and known-fact count.
+notify_hours = 1
 
 # Disk hygiene: pacman cache, ~/.cache, trash, journals.
 # cleanup_mode:

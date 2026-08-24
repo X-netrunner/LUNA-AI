@@ -344,6 +344,10 @@ pub struct DaemonConfig {
     pub history_learn_days: u32,
     /// How often (days) Luna re-indexes projects/scripts/configs (0 = off)
     pub index_learn_days: u32,
+    /// Send an "I'm alive" desktop notification every N hours while the
+    /// daemon runs (0 = off). The notification includes uptime, cycles,
+    /// auto-kills and how much Luna knows.
+    pub notify_hours: u32,
 }
 
 impl Default for DaemonConfig {
@@ -384,6 +388,7 @@ impl Default for DaemonConfig {
             .collect(),
             history_learn_days: 30,
             index_learn_days: 30,
+            notify_hours: 0,
         }
     }
 }

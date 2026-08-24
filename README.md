@@ -113,6 +113,11 @@ tavily_api_key = ""           # tavily.com (1000 free searches/month)
 gemini_api_key = ""           # aistudio.google.com
 # Or keep them OUT of this file entirely (see Secrets below):
 # gemini_api_key = "keyring:gemini"
+
+[daemon]
+enabled = true
+check_interval_mins = 30
+notify_hours = 1              # "I'm alive" desktop notification every N hours (0 = off)
 ```
 
 ## Secrets (OS keyring)

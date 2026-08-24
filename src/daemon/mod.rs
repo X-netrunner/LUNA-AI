@@ -49,6 +49,13 @@ pub async fn run(config: LunaConfig) -> Result<()> {
     let mut last_cleanup_notify: Option<Instant> = None;
     let mut tracker = Tracker::load();
 
+    // Heartbeat stats — surfaced in the periodic "I'm alive" notification
+    let started = Instant::now();
+    let mut last_heartbeat = Instant::now();
+    let mut cycles: u64 = 0;
+    let mut autokills: u64 = 0;
+    let mut reminders_fired: u64 = 0;
+
     loop {
         // ── 0. Due reminders — checked FIRST every cycle so heavyweight
         // jobs below (disk du, system re-index) never delay a firing
@@ -57,6 +64,7 @@ pub async fn run(config: LunaConfig) -> Result<()> {
             Ok(due) if !due.is_empty() => {
                 for r in due {
                     tracing::info!("Reminder fired: {}", r.text);
+                    reminders_fired += 1;
                     notify("Luna — Reminder", &r.text).await;
                 }
             }
@@ -140,7 +148,8 @@ pub async fn run(config: LunaConfig) -> Result<()> {
 
         // ── 4. Idle process policy ───────────────────────────────────────
         if learning {
-            handle_idle(&config, &procs, &by_name, &mut tracker, &mut term_killed, &mut last_suggest).await;
+            autokills +=
+                handle_idle(&config, &procs, &by_name, &mut tracker, &mut term_killed, &mut last_suggest).await;
         }
 
         // ── 5. Disk hygiene ──────────────────────────────────────────────
@@ -202,6 +211,29 @@ pub async fn run(config: LunaConfig) -> Result<()> {
 
         tracker.save_if_dirty();
         prev_jiffies.retain(|pid, _| procs.iter().any(|p| p.pid == *pid));
+        cycles += 1;
+
+        // ── Periodic "I'm alive" notification (notify_hours, 0 = off) ────
+        if config.daemon.notify_hours > 0
+            && last_heartbeat.elapsed() >= Duration::from_secs(config.daemon.notify_hours as u64 * 3600)
+        {
+            last_heartbeat = Instant::now();
+            let facts = crate::memory::permanent::PermanentMemory::load()
+                .map(|p| p.all_facts().len())
+                .unwrap_or(0);
+            notify(
+                "Luna daemon",
+                &format!(
+                    "Alive {} · {} cycles · {} auto-kills · {} reminders fired · {} known facts",
+                    fmt_uptime(started.elapsed()),
+                    cycles,
+                    autokills,
+                    reminders_fired,
+                    facts
+                ),
+            )
+            .await;
+        }
 
         // Sleep until the next scan OR the next reminder, whichever first —
         // so a "remind me in 2 minutes" doesn't wait out the whole interval.
@@ -221,8 +253,9 @@ async fn handle_idle(
     tracker: &mut Tracker,
     term_killed: &mut HashSet<u32>,
     last_suggest: &mut HashMap<String, Instant>,
-) {
+) -> u64 {
     let interval_mins = config.daemon.check_interval_mins.max(1);
+    let mut kills: u64 = 0;
 
     for (name, stats) in by_name {
         // Protected stateful apps are untouchable, full stop
@@ -260,6 +293,7 @@ async fn handle_idle(
             for pid in &survivors {
                 let _ = sh(&format!("kill -9 {} 2>/dev/null", pid)).await;
                 tracing::info!("SIGKILL idle process '{}' (pid {})", name, pid);
+                kills += 1;
             }
 
             // Fresh targets get SIGTERM
@@ -272,6 +306,7 @@ async fn handle_idle(
             for pid in &targets {
                 let _ = sh(&format!("kill -TERM {} 2>/dev/null", pid)).await;
                 tracing::info!("SIGTERM idle process '{}' (pid {})", name, pid);
+                kills += 1;
             }
             for pid in &stats.pids {
                 term_killed.insert(*pid);
@@ -308,6 +343,7 @@ async fn handle_idle(
         }
         let _ = procs; // pids come from by_name aggregation
     }
+    kills
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -327,4 +363,14 @@ pub(crate) async fn notify(title: &str, body: &str) {
         .args(["-u", "normal", title, body])
         .output()
         .await;
+}
+
+/// "2h05m" / "47m" / "<1m" for the heartbeat digest
+fn fmt_uptime(d: Duration) -> String {
+    let mins = d.as_secs() / 60;
+    if mins >= 60 {
+        format!("{}h{:02}m", mins / 60, mins % 60)
+    } else {
+        format!("{}m", mins.max(1))
+    }
 }
