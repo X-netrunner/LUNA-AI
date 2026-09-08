@@ -43,6 +43,20 @@ pub fn classify(input: &str) -> QueryComplexity {
         return QueryComplexity::Simple;
     }
 
+    // Factual/current-info queries needing web search — route to full model
+    let current_info_signals = [
+        "latest version", "current version", "recent version",
+        "what is the latest", "what's the latest",
+        "recent news", "breaking news", "today's news",
+        "this week", "this month", "this year",
+        "as of today", "as of now", "right now",
+        "live score", "stock price", "weather today",
+        "exchange rate", "currency rate",
+    ];
+    if current_info_signals.iter().any(|s| lower.contains(s)) {
+        return QueryComplexity::Complex;
+    }
+
     // Deep reasoning / code generation — route to deep_model (check FIRST)
     let deep_signals = [
         "write me a ", "write a ", "write a script", "write code", "write a function",
