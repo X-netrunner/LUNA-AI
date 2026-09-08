@@ -175,3 +175,25 @@ fn urlencoding(s: &str) -> String {
         })
         .collect()
 }
+
+/// Get a brief summary of overdue and due-soon tasks for proactive notifications.
+/// Returns None if no actionable tasks, or Some(summary) if there are tasks to mention.
+pub async fn proactive_task_summary(api_token: &str) -> Result<Option<String>> {
+    // Fetch tasks with "overdue" and "due today" filters
+    let overdue = list_tasks(api_token, Some("overdue")).await?;
+    let today = list_tasks(api_token, Some("today")).await?;
+
+    let mut parts = Vec::new();
+    if !overdue.starts_with("No tasks") {
+        parts.push(format!("{} overdue", overdue.lines().count()));
+    }
+    if !today.starts_with("No tasks") {
+        parts.push(format!("{} due today", today.lines().count()));
+    }
+
+    if parts.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(format!("📋 Todoist: {}", parts.join(", "))))
+    }
+}

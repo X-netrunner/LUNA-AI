@@ -7,6 +7,7 @@ use crate::llm::react::ReactLoop;
 use crate::memory::Memory;
 use crate::tts;
 use anyhow::Result;
+use chrono::Timelike;
 use rustyline::{history::FileHistory, Config as RlConfig, Editor};
 use std::collections::HashSet;
 use std::io::{self, Write};
@@ -186,7 +187,21 @@ fn build_system_prompt(config: &LunaConfig) -> String {
         String::new()
     };
 
-    format!("{}{}", config.agent.system_prompt, history_block)
+    // Time-aware context: inject current time and appropriate greeting
+    let now = chrono::Local::now();
+    let hour = now.hour();
+    let time_context = format!(
+        "\n[Context] Current time: {} ({}). ",
+        now.format("%H:%M"),
+        match hour {
+            5..=11 => "morning",
+            12..=16 => "afternoon",
+            17..=21 => "evening",
+            _ => "night",
+        }
+    );
+
+    format!("{}{}{}", config.agent.system_prompt, time_context, history_block)
 }
 
 /// Per-turn memory injection: top-k facts semantically similar to the

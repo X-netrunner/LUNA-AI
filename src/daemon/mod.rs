@@ -221,15 +221,27 @@ pub async fn run(config: LunaConfig) -> Result<()> {
             let facts = crate::memory::permanent::PermanentMemory::load()
                 .map(|p| p.all_facts().len())
                 .unwrap_or(0);
+
+            // Proactive Todoist summary (if token configured)
+            let mut todoist_line = String::new();
+            if let Some(token) = &config.todoist.api_token {
+                if !token.is_empty() {
+                    if let Ok(Some(summary)) = crate::tools::todoist::proactive_task_summary(token).await {
+                        todoist_line = format!(" · {}", summary);
+                    }
+                }
+            }
+
             notify(
                 "Luna daemon",
                 &format!(
-                    "Alive {} · {} cycles · {} auto-kills · {} reminders fired · {} known facts",
+                    "Alive {} · {} cycles · {} auto-kills · {} reminders fired · {} known facts{}",
                     fmt_uptime(started.elapsed()),
                     cycles,
                     autokills,
                     reminders_fired,
-                    facts
+                    facts,
+                    todoist_line
                 ),
             )
             .await;
