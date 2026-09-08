@@ -27,6 +27,7 @@ temperature = 0.7
 max_tokens = 2048
 enable_thinking = true
 fast_model = "qwen3:0.6b"      # Small fast model for greetings & short factual questions
+deep_model = "qwen3:8b"       # Large thinking model for code, reasoning, analysis
                                  # Remove or comment out to disable the two-model split
 embedding_model = "nomic-embed-text"  # Semantic memory recall (RAG-lite).
                                       # One-time: ollama pull nomic-embed-text

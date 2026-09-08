@@ -106,6 +106,9 @@ pub struct LlmConfig {
     pub max_tokens: u32,
     pub enable_thinking: bool,
     pub fast_model: Option<String>,
+    /// Optional large model for complex reasoning / code (e.g. qwen3:8b).
+    /// Queries needing deep thought are routed here instead of `model`.
+    pub deep_model: Option<String>,
     /// Local embedding model used for semantic memory recall (RAG-lite).
     /// Pull once with: ollama pull nomic-embed-text
     pub embedding_model: String,
@@ -120,6 +123,7 @@ impl Default for LlmConfig {
             max_tokens: 2048,
             enable_thinking: true,
             fast_model: None,
+            deep_model: None,
             embedding_model: "nomic-embed-text".into(),
         }
     }

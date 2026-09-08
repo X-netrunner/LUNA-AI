@@ -68,6 +68,20 @@ fn build_fast_client(config: &LunaConfig) -> Option<OllamaClient> {
     )
 }
 
+fn build_deep_client(config: &LunaConfig) -> Option<OllamaClient> {
+    // Only build if a deep_model is configured
+    let model = config.llm.deep_model.as_deref()?;
+    Some(
+        OllamaClient::new(
+            &config.llm.base_url,
+            model,
+            config.llm.temperature,
+            config.llm.max_tokens,
+        )
+        .debug(config.logging.level == "debug"),
+    )
+}
+
 fn build_client(config: &LunaConfig) -> OllamaClient {
     OllamaClient::new(
         &config.llm.base_url,
@@ -211,6 +225,13 @@ const FAST_PROMPT: &str = "You are Luna. You were built by Netrunner. You run lo
     If you don't know something specific, say 'I don't know' instead of guessing. \
     If the request needs tools, files, commands, web data, or actions on this machine, \
     reply with exactly: ESCALATE";
+
+const DEEP_PROMPT: &str = "You are Luna. You were built by Netrunner. You run locally \
+    on Arch Linux. You are a deep reasoning model — think step by step, show your work, \
+    and provide thorough, accurate answers for complex tasks like code generation, \
+    system design, debugging, and multi-step analysis. \
+    If you need to run commands, search the web, or use tools, do so. \
+    Be comprehensive but well-structured. Never guess — if uncertain, say so.";
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum RunMode {
@@ -361,9 +382,12 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
 
     let client = build_client(config);
     let fast_client = build_fast_client(config);
+    let deep_client = build_deep_client(config);
     let mut memory = Memory::new(config.memory.context_window, &config.memory.history_path)?;
     let react = ReactLoop::new(&client, config.agent.max_react_iterations, config.agent.native_tools, config);
+    tracing::debug!("fast_client is_some: {}", fast_client.is_some());
     let fast_react = fast_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
+    let deep_react = deep_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
     let system_prompt = build_system_prompt(config);
 
     println!("  Luna — text mode");
@@ -413,23 +437,25 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         }
 
         let debug = config.logging.level == "debug";
-        let (mut active_react, mut effective_prompt, mut is_fast): (&ReactLoop, String, bool) =
+        let (mut active_react, mut effective_prompt, mut is_fast, mut is_deep): (&ReactLoop, String, bool, bool) =
             match classify(&input) {
                 QueryComplexity::Simple if fast_react.is_some() => {
-                    tracing::debug!("Simple query — using fast model");
-                    (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true)
+                    (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true, false)
                 }
-                _ => (&react, system_prompt.to_string(), false),
+                QueryComplexity::Deep if deep_react.is_some() => {
+                    (deep_react.as_ref().unwrap(), DEEP_PROMPT.to_string(), false, true)
+                }
+                _ => (&react, system_prompt.to_string(), false, false),
             };
         effective_prompt
-            .push_str(&memory_block_for(&input, config, if is_fast { 3 } else { 6 }).await);
+            .push_str(&memory_block_for(&input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
 
         // Up to two attempts: a fast-model reply of "ESCALATE" rolls back
         // the exchange and retries once on the full model with tools.
         for attempt in 1..=2 {
             let mem_snapshot = memory.len();
             let tag = if debug {
-                if is_fast { "[fast] " } else { "[full] " }
+                if is_fast { "[fast] " } else if is_deep { "[deep] " } else { "[full] " }
             } else {
                 ""
             };
@@ -443,6 +469,9 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                         memory.truncate_to(mem_snapshot);
                         active_react = &react;
                         is_fast = false;
+                        is_deep = false;
+                        effective_prompt = system_prompt.to_string();
+                        effective_prompt.push_str(&memory_block_for(&input, config, 6).await);
                         effective_prompt = system_prompt.to_string();
                         effective_prompt.push_str(&memory_block_for(&input, config, 6).await);
                         continue;
@@ -481,6 +510,8 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
     let mut memory = Memory::new(config.memory.context_window, &config.memory.history_path)?;
     let react = ReactLoop::new(&client, config.agent.max_react_iterations, config.agent.native_tools, config);
     let fast_react = fast_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
+    let deep_client = build_deep_client(config);
+    let deep_react = deep_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
     let stt = build_stt(config);
     let system_prompt = build_system_prompt(config);
 
@@ -569,23 +600,29 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                 if !input.is_empty() && !looks_like_artifact(&input) {
                     println!("  You: {}", input);
                     let debug = config.logging.level == "debug";
-                    let (mut active_react, mut effective_prompt, mut is_fast): (
+                    let (mut active_react, mut effective_prompt, mut is_fast, mut is_deep): (
                         &ReactLoop,
                         String,
                         bool,
+                        bool,
                     ) = match classify(&input) {
                         QueryComplexity::Simple if fast_react.is_some() => {
-                            (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true)
+                            (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true, false)
                         }
-                        _ => (&react, system_prompt.to_string(), false),
+                        QueryComplexity::Deep if deep_react.is_some() => {
+                            (deep_react.as_ref().unwrap(), DEEP_PROMPT.to_string(), false, true)
+                        }
+_ => {
+                    (&react, system_prompt.to_string(), false, false)
+                }
                     };
                     effective_prompt
-                        .push_str(&memory_block_for(&input, config, if is_fast { 3 } else { 6 }).await);
+                        .push_str(&memory_block_for(&input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
 
                     for attempt in 1..=2 {
                         let mem_snapshot = memory.len();
                         let tag = if debug {
-                            if is_fast { "[fast] " } else { "[full] " }
+                            if is_fast { "[fast] " } else if is_deep { "[deep] " } else { "[full] " }
                         } else {
                             ""
                         };
@@ -599,6 +636,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                                     memory.truncate_to(mem_snapshot);
                                     active_react = &react;
                                     is_fast = false;
+                                    is_deep = false;
                                     effective_prompt = system_prompt.to_string();
                                     effective_prompt
                                         .push_str(&memory_block_for(&input, config, 6).await);
@@ -676,23 +714,27 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                 }
 
                 let debug = config.logging.level == "debug";
-                let (mut active_react, mut effective_prompt, mut is_fast): (
+                let (mut active_react, mut effective_prompt, mut is_fast, mut is_deep): (
                     &ReactLoop,
                     String,
                     bool,
+                    bool,
                 ) = match classify(&input) {
                     QueryComplexity::Simple if fast_react.is_some() => {
-                        (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true)
+                        (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true, false)
                     }
-                    _ => (&react, system_prompt.to_string(), false),
+                    QueryComplexity::Deep if deep_react.is_some() => {
+                        (deep_react.as_ref().unwrap(), DEEP_PROMPT.to_string(), false, true)
+                    }
+                    _ => (&react, system_prompt.to_string(), false, false),
                 };
                 effective_prompt
-                    .push_str(&memory_block_for(&input, config, if is_fast { 3 } else { 6 }).await);
+                    .push_str(&memory_block_for(&input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
 
                 for attempt in 1..=2 {
                     let mem_snapshot = memory.len();
                     let tag = if debug {
-                        if is_fast { "[fast] " } else { "[full] " }
+                        if is_fast { "[fast] " } else if is_deep { "[deep] " } else { "[full] " }
                     } else {
                         ""
                     };
@@ -706,6 +748,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                                 memory.truncate_to(mem_snapshot);
                                 active_react = &react;
                                 is_fast = false;
+                                is_deep = false;
                                 effective_prompt = system_prompt.to_string();
                                 effective_prompt
                                     .push_str(&memory_block_for(&input, config, 6).await);
@@ -805,9 +848,12 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 fn looks_like_artifact(s: &str) -> bool {
     let t = s.trim().to_lowercase();
-    // Very short single words that are clearly not commands
+    // Very short single words that are clearly not commands — but allow common greetings
     if t.split_whitespace().count() <= 1 && t.len() < 4 {
-        return true;
+        let common_greetings = ["hi", "hey", "yo", "ok", "okay", "hiya", "sup", "hello", "bye"];
+        if !common_greetings.contains(&t.as_str()) {
+            return true;
+        }
     }
     let hallucinations = [
         "thank you for watching",

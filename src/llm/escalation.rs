@@ -1,12 +1,15 @@
 //! llm/escalation.rs — Model escalation
 //!
-//! Routes queries to a small fast model or the full model based on complexity.
-//! Simple = greetings, short questions, chitchat → fast model (e.g. qwen2.5:0.5b)
-//! Complex = anything needing tools, code, reasoning → full model (e.g. qwen2.5:7b)
+//! Three-tier routing:
+//!   Simple = greetings, short questions, chitchat → fast model (qwen3:0.6b)
+//!   Complex = tool calls, moderate reasoning → normal model (qwen2.5:7b)
+//!   Deep = code generation, multi-step reasoning, analysis → deep model (qwen3:8b)
 
+#[derive(Debug)]
 pub enum QueryComplexity {
     Simple,
     Complex,
+    Deep,
 }
 
 pub fn classify(input: &str) -> QueryComplexity {
@@ -38,6 +41,28 @@ pub fn classify(input: &str) -> QueryComplexity {
                          "tell me about yourself", "what's your name"];
     if simple_starts.iter().any(|s| lower.starts_with(s)) {
         return QueryComplexity::Simple;
+    }
+
+    // Deep reasoning / code generation — route to deep_model (check FIRST)
+    let deep_signals = [
+        "write me a ", "write a ", "write a script", "write code", "write a function",
+        "write a program", "write a class", "write a module", "write an algorithm",
+        "implement ", "implement a ", "implement the ", "implement this",
+        "refactor ", "refactor this", "refactor the ", "optimize this",
+        "optimize the code", "debug this", "debug the code", "fix this bug",
+        "fix the bug", "fix the error", "explain the code", "explain this code",
+        "explain how", "explain why", "how does this work", "how does it work",
+        "architecture", "design pattern", "system design",
+        "step by step", "walk me through", "break down", "analyze this",
+        "think about", "reason through", "solve this", "solve the problem",
+        "plan this", "plan the ", "strategy", "approach for",
+        "code review", "review this code", "review the code",
+        "complexity", "time complexity", "space complexity",
+        "algorithm", "data structure", "race condition", "deadlock",
+        "multi-step", "multi step", "chain of thought",
+    ];
+    if deep_signals.iter().any(|s| lower.contains(s)) {
+        return QueryComplexity::Deep;
     }
 
     // Anything that clearly needs a tool
