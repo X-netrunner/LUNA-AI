@@ -15,6 +15,7 @@ mod memory;
 mod stt;
 mod tools;
 mod tts;
+mod tui;
 mod util;
 
 use anyhow::{Context, Result};
@@ -36,6 +37,10 @@ struct Args {
     /// Skip voice input, use text mode only (useful for debugging)
     #[arg(long)]
     text_only: bool,
+
+    /// Use the Ratatui TUI interface
+    #[arg(long)]
+    tui: bool,
 
     /// Increase log verbosity (use multiple times: -v, -vv, -vvv)
     #[arg(short, action = clap::ArgAction::Count)]
@@ -151,7 +156,11 @@ async fn main() -> Result<()> {
         }
     }
 
-        if args.text_only {
+        if args.tui {
+        tracing::info!("TUI mode — using Ratatui interface");
+        config.audio.input_mode = crate::config::InputMode::Tui;
+        agent::run(&config).await?;
+    } else if args.text_only {
         tracing::info!("Text-only mode — voice input disabled");
         agent::run_text(&config).await?;
     } else {

@@ -58,6 +58,8 @@ chrono = { version = "0.4", features = ["serde"] }
 # OS keyring (freedesktop Secret Service) — stores API keys encrypted
 # instead of plaintext in luna.toml
 keyring = { version = "3", features = ["sync-secret-service"] }
+ratatui = "0.30.2"
+crossterm = "0.29.0"
 
 
 # ── Build profiles ────────────────────────────────────────────────────────────

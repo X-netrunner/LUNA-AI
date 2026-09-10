@@ -174,7 +174,7 @@ fn cli_flag_reply(input: &str) -> Option<String> {
 /// Build an enriched system prompt that includes shell history context.
 /// Permanent-memory facts are NOT baked in here — they are recalled
 /// per-query by `memory_block_for` so only relevant facts get injected.
-fn build_system_prompt(config: &LunaConfig) -> String {
+pub fn build_system_prompt(config: &LunaConfig) -> String {
     let history = load_shell_history();
     let history_block = if !history.is_empty() {
         format!(
@@ -256,6 +256,7 @@ enum RunMode {
     Text,
     Voice,
     Hybrid,
+    Tui,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -273,6 +274,9 @@ pub async fn run(config: &LunaConfig) -> Result<()> {
     match config.audio.input_mode {
         crate::config::InputMode::WakeWord | crate::config::InputMode::Both => {
             run_hybrid(config).await
+        }
+        crate::config::InputMode::Tui => {
+            run_tui(config).await
         }
         _ => run_text(config).await,
     }
@@ -861,6 +865,12 @@ _ => {
     }
 
     Ok(())
+}
+
+// ── TUI mode ──────────────────────────────────────────────────────────────────
+async fn run_tui(config: &LunaConfig) -> Result<()> {
+    tracing::info!("Starting Luna agent (TUI mode)");
+    crate::tui::run_tui(config.clone()).await
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

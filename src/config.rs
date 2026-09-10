@@ -178,6 +178,7 @@ pub enum InputMode {
     WakeWord,
     #[default]
     Both,
+    Tui,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

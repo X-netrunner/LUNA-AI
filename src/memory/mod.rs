@@ -8,6 +8,7 @@ use crate::llm::ollama::Message;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 pub struct Memory {
     messages: Vec<Message>,
     window_size: usize,
