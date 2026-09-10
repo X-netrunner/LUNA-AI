@@ -31,10 +31,7 @@ fn make_editor() -> RlEditor {
         .max_history_size(500)
         .map(|b| b.build())
         .unwrap_or_else(|_| RlConfig::default());
-    let mut rl = match RlEditor::with_config(cfg) {
-        Ok(rl) => rl,
-        Err(_) => Editor::<(), FileHistory>::new().expect("rustyline editor"),
-    };
+    let mut rl = RlEditor::with_config(cfg).unwrap_or_else(|_| Editor::<(), FileHistory>::new().unwrap());
     if let Some(path) = input_history_path() {
         if path.exists() {
             let _ = rl.load_history(&path); // ignore — empty history is fine
@@ -461,11 +458,19 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         let debug = config.logging.level == "debug";
         let (mut active_react, mut effective_prompt, mut is_fast, mut is_deep): (&ReactLoop, String, bool, bool) =
             match classify(&input) {
-                QueryComplexity::Simple if fast_react.is_some() => {
-                    (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true, false)
+                QueryComplexity::Simple => {
+                    if let Some(fr) = fast_react.as_ref() {
+                        (fr, FAST_PROMPT.to_string(), true, false)
+                    } else {
+                        (&react, system_prompt.to_string(), false, false)
+                    }
                 }
-                QueryComplexity::Deep if deep_react.is_some() => {
-                    (deep_react.as_ref().unwrap(), DEEP_PROMPT.to_string(), false, true)
+                QueryComplexity::Deep => {
+                    if let Some(dr) = deep_react.as_ref() {
+                        (dr, DEEP_PROMPT.to_string(), false, true)
+                    } else {
+                        (&react, system_prompt.to_string(), false, false)
+                    }
                 }
                 _ => (&react, system_prompt.to_string(), false, false),
             };
@@ -623,20 +628,26 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                     println!("  You: {}", input);
                     let debug = config.logging.level == "debug";
                     let (mut active_react, mut effective_prompt, mut is_fast, mut is_deep): (
-                        &ReactLoop,
+&ReactLoop,
                         String,
                         bool,
                         bool,
                     ) = match classify(&input) {
-                        QueryComplexity::Simple if fast_react.is_some() => {
-                            (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true, false)
+                        QueryComplexity::Simple => {
+                            if let Some(fr) = fast_react.as_ref() {
+                                (fr, FAST_PROMPT.to_string(), true, false)
+                            } else {
+                                (&react, system_prompt.to_string(), false, false)
+                            }
                         }
-                        QueryComplexity::Deep if deep_react.is_some() => {
-                            (deep_react.as_ref().unwrap(), DEEP_PROMPT.to_string(), false, true)
+                        QueryComplexity::Deep => {
+                            if let Some(dr) = deep_react.as_ref() {
+                                (dr, DEEP_PROMPT.to_string(), false, true)
+                            } else {
+                                (&react, system_prompt.to_string(), false, false)
+                            }
                         }
-_ => {
-                    (&react, system_prompt.to_string(), false, false)
-                }
+                        _ => (&react, system_prompt.to_string(), false, false),
                     };
                     effective_prompt
                         .push_str(&memory_block_for(&input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
@@ -742,11 +753,19 @@ _ => {
                     bool,
                     bool,
                 ) = match classify(&input) {
-                    QueryComplexity::Simple if fast_react.is_some() => {
-                        (fast_react.as_ref().unwrap(), FAST_PROMPT.to_string(), true, false)
+                    QueryComplexity::Simple => {
+                        if let Some(fr) = fast_react.as_ref() {
+                            (fr, FAST_PROMPT.to_string(), true, false)
+                        } else {
+                            (&react, system_prompt.to_string(), false, false)
+                        }
                     }
-                    QueryComplexity::Deep if deep_react.is_some() => {
-                        (deep_react.as_ref().unwrap(), DEEP_PROMPT.to_string(), false, true)
+                    QueryComplexity::Deep => {
+                        if let Some(dr) = deep_react.as_ref() {
+                            (dr, DEEP_PROMPT.to_string(), false, true)
+                        } else {
+                            (&react, system_prompt.to_string(), false, false)
+                        }
                     }
                     _ => (&react, system_prompt.to_string(), false, false),
                 };
