@@ -92,6 +92,8 @@ struct ChatOptions {
     temperature: f32,
     num_predict: u32,
     num_ctx: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
 }
 
 // ── Response shapes ───────────────────────────────────────────────────────────
@@ -143,6 +145,7 @@ pub struct OllamaClient {
     model: String,
     temperature: f32,
     max_tokens: u32,
+    enable_thinking: bool,
     debug: bool,
 }
 
@@ -154,8 +157,14 @@ impl OllamaClient {
             model: model.to_string(),
             temperature,
             max_tokens,
+            enable_thinking: true,
             debug: false,
         }
+    }
+
+    pub fn enable_thinking(mut self, on: bool) -> Self {
+        self.enable_thinking = on;
+        self
     }
 
     pub fn debug(mut self, on: bool) -> Self {
@@ -187,6 +196,7 @@ impl OllamaClient {
                 temperature: self.temperature,
                 num_predict: self.max_tokens,
                 num_ctx: 4096, // Ensure enough context for long prompts
+                think: (!self.enable_thinking).then_some(false),
             },
             tools: None,
         };
@@ -278,6 +288,7 @@ impl OllamaClient {
                 temperature: self.temperature,
                 num_predict: self.max_tokens,
                 num_ctx: 4096, // Ensure enough context for long prompts + tools
+                think: (!self.enable_thinking).then_some(false),
             },
             tools,
         };

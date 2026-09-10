@@ -65,6 +65,7 @@ fn build_fast_client(config: &LunaConfig) -> Option<OllamaClient> {
             config.llm.temperature,
             512, // smaller token budget — fast model is for short answers
         )
+        .enable_thinking(config.llm.enable_thinking)
         .debug(config.logging.level == "debug"),
     )
 }
@@ -79,6 +80,7 @@ fn build_deep_client(config: &LunaConfig) -> Option<OllamaClient> {
             config.llm.temperature,
             config.llm.max_tokens,
         )
+        .enable_thinking(config.llm.enable_thinking)
         .debug(config.logging.level == "debug"),
     )
 }
@@ -90,6 +92,7 @@ fn build_client(config: &LunaConfig) -> OllamaClient {
         config.llm.temperature,
         config.llm.max_tokens,
     )
+    .enable_thinking(config.llm.enable_thinking)
     .debug(config.logging.level == "debug")
 }
 
