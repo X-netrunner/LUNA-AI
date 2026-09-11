@@ -313,6 +313,22 @@ pub async fn run_routed_turn(
         }
         _ => (&react, system_prompt.clone(), false, false),
     };
+
+    let tier_label = if is_fast { "fast" } else if is_deep { "deep" } else { "full" };
+    let model_initial = if is_fast {
+        config.llm.fast_model.as_deref().unwrap_or("?")
+    } else if is_deep {
+        config.llm.deep_model.as_deref().unwrap_or("?")
+    } else {
+        &config.llm.model
+    };
+    tracing::info!(
+        "Model: {} ({}) — for \"{}\"",
+        model_initial,
+        tier_label,
+        crate::util::truncate(input, 60)
+    );
+
     effective_prompt.push_str(
         &memory_block_for(input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await,
     );

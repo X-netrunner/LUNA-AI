@@ -315,6 +315,24 @@ impl TuiApp {
     /// Spawn the routed async turn (fast/deep/full) — the UI stays responsive.
     /// The status bar shows the model that actually answered.
     fn submit(&mut self, user_input: String) {
+        let lower = user_input.trim().to_lowercase();
+        match lower.as_str() {
+            "clear" => {
+                let _ = self.memory.clear();
+                self.messages.push(Msg {
+                    role: "assistant".into(),
+                    content: "Memory cleared. Fresh start.".into(),
+                    thinking: None,
+                });
+                self.chat_scroll = 0;
+                return;
+            }
+            "exit" | "quit" | "bye" => {
+                self.should_quit = true;
+                return;
+            }
+            _ => {}
+        }
         self.status = String::from("Thinking...");
         let config = self.config.clone();
         let mut memory = self.memory.clone();

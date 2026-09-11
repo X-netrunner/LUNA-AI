@@ -244,5 +244,64 @@ fn parse_freeform_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> 
         }
     }
 
+    // Pattern 4: known tool name followed by a JSON object — e.g.
+    //   run_shell {"command": "ls"}   or   run_shell: {"command": "ls"}
+    // This is the shorthand 7B models emit when streaming without native
+    // tool bindings (e.g. after the Ollama 500 → chat_streaming fallback).
+    if let Some(call) = parse_json_tool_call(text) {
+        return Some(call);
+    }
+
+    None
+}
+
+/// Try to read `tool_name {json}` out of the middle of a response.
+fn parse_json_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> {
+    use crate::llm::ollama::{ToolCall, ToolCallFunction};
+
+    let open = text.find('{')?;
+    let head = text[..open].trim();
+    // Allow: "run_shell" / "run_shell:" / "Call run_shell" / "tool run_shell"
+    let name = head.split_whitespace().last()?.trim_end_matches(':');
+    if name.is_empty() {
+        return None;
+    }
+    let defs = crate::tools::tool_definitions();
+    let known: Vec<&str> = defs.iter().map(|t| t.function.name.as_str()).collect();
+    if !known.contains(&name) {
+        return None;
+    }
+
+    // Extract the balanced JSON object starting at '{', ignoring trailing text.
+    let obj = &text[open..];
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, ch) in obj.char_indices() {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_str = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let args: serde_json::Value = serde_json::from_str(&obj[..=i]).ok()?;
+                    return Some(ToolCall {
+                        function: ToolCallFunction { name: name.to_string(), arguments: args },
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
     None
 }
