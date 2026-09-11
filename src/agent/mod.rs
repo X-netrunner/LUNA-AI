@@ -248,6 +248,103 @@ const DEEP_PROMPT: &str = "You are Luna. You were built by Netrunner. You run lo
     If you need to run commands, search the web, or use tools, do so. \
     Be comprehensive but well-structured. Never guess — if uncertain, say so.";
 
+/// Result of a routed turn: the reply text and the model that produced it.
+/// `model` is the display name (fast/deep/full) actually used for the answer.
+pub struct TurnOutcome {
+    pub text: String,
+    pub model: String,
+}
+
+/// Route a single turn through fast/deep/full tiers, handling fast-model
+/// escalation to the full model. Shared by the TUI so its status bar can
+/// show the real model that answered instead of always the main one.
+pub async fn run_routed_turn(
+    input: &str,
+    memory: &mut Memory,
+    config: &LunaConfig,
+) -> Result<TurnOutcome> {
+    let client = build_client(config);
+    let fast_client = build_fast_client(config);
+    let deep_client = build_deep_client(config);
+
+    let react = ReactLoop::new(
+        &client,
+        config.agent.max_react_iterations,
+        config.agent.native_tools,
+        config,
+    );
+    let fast_react = fast_client
+        .as_ref()
+        .map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
+    let deep_react = deep_client
+        .as_ref()
+        .map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
+
+    let system_prompt = build_system_prompt(config);
+
+    let (mut active_react, mut effective_prompt, mut is_fast, mut is_deep): (
+        &ReactLoop,
+        String,
+        bool,
+        bool,
+    ) = match classify(input) {
+        QueryComplexity::Simple => {
+            if let Some(fr) = fast_react.as_ref() {
+                (fr, FAST_PROMPT.to_string(), true, false)
+            } else {
+                (&react, system_prompt.clone(), false, false)
+            }
+        }
+        QueryComplexity::Deep => {
+            if let Some(dr) = deep_react.as_ref() {
+                (dr, DEEP_PROMPT.to_string(), false, true)
+            } else {
+                (&react, system_prompt.clone(), false, false)
+            }
+        }
+        _ => (&react, system_prompt.clone(), false, false),
+    };
+    effective_prompt.push_str(
+        &memory_block_for(input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await,
+    );
+
+    for attempt in 1..=2 {
+        let mem_snapshot = memory.len();
+        match active_react.run(input, memory, &effective_prompt).await {
+            Ok((response, _streamed)) => {
+                if is_fast && response.trim() == "ESCALATE" && attempt < 2 {
+                    tracing::info!("Fast model escalated — re-running on full model");
+                    memory.truncate_to(mem_snapshot);
+                    active_react = &react;
+                    is_fast = false;
+                    is_deep = false;
+                    effective_prompt = system_prompt.clone();
+                    effective_prompt.push_str(&memory_block_for(input, config, 6).await);
+                    continue;
+                }
+                let model = if is_fast {
+                    config
+                        .llm
+                        .fast_model
+                        .clone()
+                        .unwrap_or_else(|| config.llm.model.clone())
+                } else if is_deep {
+                    config
+                        .llm
+                        .deep_model
+                        .clone()
+                        .unwrap_or_else(|| config.llm.model.clone())
+                } else {
+                    config.llm.model.clone()
+                };
+                return Ok(TurnOutcome { text: response, model });
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("turn loop exceeded maximum attempts")
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum RunMode {
     Text,

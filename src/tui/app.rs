@@ -1,8 +1,6 @@
 //! tui/app.rs — TUI application state and event loop
 
 use crate::config::{LunaConfig, VoiceMode};
-use crate::llm::ollama::OllamaClient;
-use crate::llm::react::ReactLoop;
 use crate::memory::Memory;
 use crate::tui::log::LogBuffer;
 use crate::tui::widgets::{ChatHistory, DebugPanel, InputLine, StatusBar};
@@ -23,7 +21,7 @@ use tokio::sync::mpsc;
 
 enum AppEvent {
     Input(Event),
-    Response(Msg, Duration, Memory),
+    Response(Msg, Duration, Memory, String),
     Metrics,
     Voice(String),
 }
@@ -52,7 +50,6 @@ enum Focus {
 pub struct TuiApp {
     config: LunaConfig,
     memory: Memory,
-    client: Arc<OllamaClient>,
     messages: Vec<Msg>,
     input: String,
     cursor_pos: usize,
@@ -75,17 +72,6 @@ pub struct TuiApp {
 
 impl TuiApp {
     pub fn new(config: LunaConfig, logs: LogBuffer) -> Result<Self> {
-        let client = Arc::new(
-            OllamaClient::new(
-                &config.llm.base_url,
-                &config.llm.model,
-                config.llm.temperature,
-                config.llm.max_tokens,
-            )
-            .enable_thinking(config.llm.enable_thinking)
-            .debug(config.logging.level == "debug"),
-        );
-
         let memory = Memory::new(config.memory.context_window, &config.memory.history_path)?;
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -95,7 +81,6 @@ impl TuiApp {
         Ok(Self {
             config,
             memory,
-            client,
             messages: Vec::new(),
             input: String::new(),
             cursor_pos: 0,
@@ -215,10 +200,11 @@ impl TuiApp {
             AppEvent::Input(Event::Resize(_, _)) => {}
             AppEvent::Input(_) => {}
             AppEvent::Metrics => {}
-            AppEvent::Response(msg, latency, memory) => {
+            AppEvent::Response(msg, latency, memory, model) => {
                 self.messages.push(msg);
                 self.memory = memory;
                 self.last_latency = latency;
+                self.model_name = model;
                 self.chat_scroll = 0;
                 self.status = String::from("Ready");
             }
@@ -326,38 +312,37 @@ impl TuiApp {
         self.chat_scroll = 0;
     }
 
-    /// Spawn the async turn on the shared model — the UI stays responsive.
+    /// Spawn the routed async turn (fast/deep/full) — the UI stays responsive.
+    /// The status bar shows the model that actually answered.
     fn submit(&mut self, user_input: String) {
         self.status = String::from("Thinking...");
-        let client = self.client.clone();
         let config = self.config.clone();
         let mut memory = self.memory.clone();
-        let system_prompt = crate::agent::build_system_prompt(&config);
         let response_tx = self.tx.clone();
         let started = Instant::now();
 
         tokio::spawn(async move {
-            let react = ReactLoop::new(
-                &client,
-                config.agent.max_react_iterations,
-                config.agent.native_tools,
-                &config,
-            );
-            let result = react.run(&user_input, &mut memory, &system_prompt).await;
+            let result = crate::agent::run_routed_turn(&user_input, &mut memory, &config).await;
             let latency = started.elapsed();
             match result {
-                Ok((text, _streamed)) => {
+                Ok(outcome) => {
                     if config.voice.mode != crate::config::VoiceMode::Off {
-                        if let Err(e) = crate::tts::speak(&text, &config.voice.mode, &config).await {
+                        if let Err(e) = crate::tts::speak(&outcome.text, &config.voice.mode, &config).await
+                        {
                             tracing::warn!("TTS error: {}", e);
                         }
                     }
                     let msg = Msg {
                         role: "assistant".into(),
-                        content: text,
+                        content: outcome.text,
                         thinking: None,
                     };
-                    let _ = response_tx.send(AppEvent::Response(msg, latency, memory));
+                    let _ = response_tx.send(AppEvent::Response(
+                        msg,
+                        latency,
+                        memory,
+                        outcome.model,
+                    ));
                 }
                 Err(e) => {
                     let msg = Msg {
@@ -365,7 +350,12 @@ impl TuiApp {
                         content: format!("Error: {}", e),
                         thinking: None,
                     };
-                    let _ = response_tx.send(AppEvent::Response(msg, latency, memory));
+                    let _ = response_tx.send(AppEvent::Response(
+                        msg,
+                        latency,
+                        memory,
+                        config.llm.model.clone(),
+                    ));
                 }
             }
         });

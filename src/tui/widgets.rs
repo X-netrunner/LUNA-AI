@@ -1,4 +1,8 @@
 //! tui/widgets.rs — Custom TUI widgets
+//!
+//! The chat and debug panels render with `Paragraph` (wrap + scroll). Ratatui's
+//! Paragraph clears its text area on render, so stale cells never leak through
+//! when content shrinks or scrolls.
 
 use crate::tui::app::Msg;
 use ratatui::layout::Rect;
@@ -10,7 +14,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 // ── Text wrapping helper ──────────────────────────────────────────────────────
 /// Wrap `text` to `width` columns at word boundaries, preserving newlines.
 /// Used so long assistant replies render on multiple lines instead of one.
-pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     for para in text.split('\n') {
         if para.is_empty() {
@@ -43,6 +47,17 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// Scroll offset (in wrapped lines, from the top) for a widget that tracks
+/// `scroll_from_bottom`. 0 means "follow the newest content".
+fn scroll_top(total: usize, view_h: usize, scroll_from_bottom: usize) -> u16 {
+    let max = total.saturating_sub(view_h);
+    if scroll_from_bottom == 0 {
+        max as u16
+    } else {
+        max.saturating_sub(scroll_from_bottom) as u16
+    }
+}
+
 // ── Chat history ──────────────────────────────────────────────────────────────
 
 pub struct ChatHistory<'a> {
@@ -55,6 +70,49 @@ pub struct ChatHistory<'a> {
 impl<'a> ChatHistory<'a> {
     pub fn new(messages: &'a [Msg], scroll_from_bottom: usize, focused: bool) -> Self {
         Self { messages, scroll_from_bottom, focused }
+    }
+
+    fn build_lines(&self, width: usize) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        for msg in self.messages {
+            let (prefix, indent, color) = match msg.role.as_str() {
+                "user" => ("You:  ", "       ", Color::Green),
+                "assistant" => ("Luna: ", "       ", Color::Cyan),
+                "tool" => ("Tool: ", "       ", Color::Yellow),
+                _ => ("", "", Color::White),
+            };
+            let content_width = width.saturating_sub(prefix.chars().count() + 2);
+            let mut first = true;
+            for chunk in wrap_text(&msg.content, content_width.max(4)) {
+                if first {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            prefix.to_string(),
+                            Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(chunk, Style::default().fg(Color::White)),
+                    ]));
+                    first = false;
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::raw(indent.to_string()),
+                        Span::styled(chunk, Style::default().fg(Color::White)),
+                    ]));
+                }
+            }
+            if let Some(thinking) = &msg.thinking {
+                for chunk in wrap_text(thinking, width.saturating_sub(16)) {
+                    lines.push(Line::from(Span::styled(
+                        format!("   [think] {}", chunk),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
+            }
+            lines.push(Line::from(""));
+        }
+        lines
     }
 }
 
@@ -80,108 +138,11 @@ impl<'a> Widget for ChatHistory<'a> {
             return;
         }
 
-        // Flatten every message into wrapped lines with role-based styling.
-        // The role prefix is shown once per message; continuation lines are
-        // indented to align under the content.
-        let width = inner.width.saturating_sub(2) as usize;
-        let mut all_lines: Vec<styled_line::StyledLine> = Vec::new();
-        for msg in self.messages {
-            let (prefix, indent, color) = match msg.role.as_str() {
-                "user" => ("You:  ", "       ", Color::Green),
-                "assistant" => ("Luna: ", "       ", Color::Cyan),
-                "tool" => ("Tool: ", "       ", Color::Yellow),
-                _ => ("", "", Color::White),
-            };
-            let mut first = true;
-            for wrapped in wrap_text(&msg.content, width.saturating_sub(prefix.chars().count())) {
-                if first {
-                    all_lines.push(styled_line::StyledLine::new(prefix, &wrapped, color));
-                    first = false;
-                } else {
-                    all_lines.push(styled_line::StyledLine::indent(indent, &wrapped));
-                }
-            }
-            if let Some(thinking) = &msg.thinking {
-                for wrapped in wrap_text(thinking, width.saturating_sub(4)) {
-                    all_lines
-                        .push(styled_line::StyledLine::dim("   [think] ", &wrapped));
-                }
-            }
-            // blank spacer line between messages
-            all_lines.push(styled_line::StyledLine::blank());
-        }
-
-        let total = all_lines.len();
-        let view_h = inner.height.saturating_sub(1) as usize;
-        // start index: follow bottom unless scrolled up
-        let start = if self.scroll_from_bottom == 0 {
-            total.saturating_sub(view_h)
-        } else {
-            total.saturating_sub(view_h).saturating_sub(self.scroll_from_bottom)
-        };
-
-        for (i, line) in all_lines.iter().enumerate().skip(start).take(view_h) {
-            let y = inner.y + i as u16 - start as u16;
-            line.render(buf, inner.x + 1, y, width);
-        }
-    }
-}
-
-mod styled_line {
-    use ratatui::buffer::Buffer;
-    use ratatui::style::{Color, Modifier, Style};
-    use ratatui::text::{Line, Span};
-
-    pub struct StyledLine {
-        spans: Vec<Span<'static>>,
-        blank: bool,
-    }
-
-    impl StyledLine {
-        pub fn new(prefix: &str, text: &str, color: Color) -> Self {
-            Self {
-                spans: vec![
-                    Span::styled(
-                        prefix.to_string(),
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(text.to_string(), Style::default().fg(Color::White)),
-                ],
-                blank: false,
-            }
-        }
-
-        pub fn dim(prefix: &str, text: &str) -> Self {
-            Self {
-                spans: vec![Span::styled(
-                    format!("{}{}", prefix, text),
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                )],
-                blank: false,
-            }
-        }
-
-        /// Continuation line: no role prefix, indented to match content.
-        pub fn indent(indent: &str, text: &str) -> Self {
-            let mut spans = vec![Span::raw(indent.to_string())];
-            spans.push(Span::styled(text.to_string(), Style::default().fg(Color::White)));
-            Self { spans, blank: false }
-        }
-
-        pub fn blank() -> Self {
-            Self { spans: vec![], blank: true }
-        }
-
-        pub fn render(&self, buf: &mut Buffer, x: u16, y: u16, width: usize) {
-            if self.blank {
-                buf.set_stringn(x, y, " ", 1, Style::default());
-            } else {
-                let line = Line::from(self.spans.clone());
-                buf.set_line(x, y, &line, width as u16);
-            }
-        }
+        let lines = self.build_lines(inner.width as usize);
+        let total = lines.len();
+        let view_h = inner.height.max(1) as usize;
+        let offset = scroll_top(total, view_h, self.scroll_from_bottom);
+        Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((offset, 0)).render(inner, buf);
     }
 }
 
@@ -236,6 +197,25 @@ impl<'a> DebugPanel<'a> {
     pub fn new(logs: &'a [String], scroll_from_bottom: usize, focused: bool) -> Self {
         Self { logs, scroll_from_bottom, focused }
     }
+
+    fn build_lines(&self, width: usize) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        for log in self.logs {
+            let color = if log.contains("ERROR") || log.contains("WARN") {
+                Color::Red
+            } else if log.contains("DEBUG") {
+                Color::DarkGray
+            } else if log.contains("INFO") {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            };
+            for chunk in wrap_text(log, width.saturating_sub(2).max(4)) {
+                lines.push(Line::from(Span::styled(chunk, Style::default().fg(color))));
+            }
+        }
+        lines
+    }
 }
 
 impl<'a> Widget for DebugPanel<'a> {
@@ -260,41 +240,11 @@ impl<'a> Widget for DebugPanel<'a> {
             return;
         }
 
-        let width = (inner.width.saturating_sub(2)) as usize;
-        let mut wrapped: Vec<(String, Color)> = Vec::new();
-        for line in self.logs {
-            let color = if line.contains("ERROR") || line.contains("WARN") {
-                Color::Red
-            } else if line.contains("DEBUG") {
-                Color::DarkGray
-            } else if line.contains("INFO") {
-                Color::Cyan
-            } else {
-                Color::DarkGray
-            };
-            for w in wrap_text(line, width) {
-                wrapped.push((w, color));
-            }
-        }
-
-        let view_h = inner.height.saturating_sub(1) as usize;
-        let total = wrapped.len();
-        let start = if self.scroll_from_bottom == 0 {
-            total.saturating_sub(view_h)
-        } else {
-            total.saturating_sub(view_h).saturating_sub(self.scroll_from_bottom)
-        };
-
-        for (i, (line, color)) in wrapped.iter().enumerate().skip(start).take(view_h) {
-            let y = inner.y + i as u16 - start as u16;
-            buf.set_stringn(
-                inner.x + 1,
-                y,
-                line,
-                inner.width.saturating_sub(2) as usize,
-                Style::default().fg(*color),
-            );
-        }
+        let lines = self.build_lines(inner.width as usize);
+        let total = lines.len();
+        let view_h = inner.height.max(1) as usize;
+        let offset = scroll_top(total, view_h, self.scroll_from_bottom);
+        Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((offset, 0)).render(inner, buf);
     }
 }
 
