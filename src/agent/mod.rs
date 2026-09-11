@@ -624,8 +624,6 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                         is_deep = false;
                         effective_prompt = system_prompt.to_string();
                         effective_prompt.push_str(&memory_block_for(&input, config, 6).await);
-                        effective_prompt = system_prompt.to_string();
-                        effective_prompt.push_str(&memory_block_for(&input, config, 6).await);
                         continue;
                     }
                     if !streamed {

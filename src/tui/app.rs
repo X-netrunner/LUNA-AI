@@ -253,8 +253,11 @@ impl TuiApp {
                 self.chat_scroll = 0;
                 self.status = String::from("Ready");
                 // After a voice reply, keep the wake-word window open so the
-                // user can keep talking without repeating "luna".
-                self.refresh_conversation_window();
+                // user can keep talking without repeating "luna". Only extends
+                // an already-active window — a typed turn shouldn't open one.
+                if self.window_deadline.load(Ordering::Relaxed) > 0 {
+                    self.refresh_conversation_window();
+                }
             }
             AppEvent::Voice(text) => {
                 let t = text.trim();

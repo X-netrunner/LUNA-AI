@@ -45,7 +45,9 @@ impl<'a> ReactLoop<'a> {
         memory.push(Message::user(user_input));
 
         let tool_defs = tools::tool_definitions();
-        let tools_arg = if self.native_tools { Some(tool_defs.as_slice()) } else { None };
+        let tools_arg = if self.native_tools { Some(tool_defs.as_slice()) } else { None
+        };
+
         let mut iteration = 0;
         let mut turn_messages: Vec<Message> = Vec::new();
         let mut empty_retries = 0;
@@ -258,10 +260,11 @@ fn parse_freeform_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> 
 /// Detect a standalone `ESCALATE` token in the response.
 /// The 0.6b fast model sometimes appends "ESCALATE" after a greeting
 /// (e.g. "Hi there, built by Netrunner! ESCALATE") — we still want to
-/// escalate in that case.
+/// escalate in that case. Case-sensitive so normal prose using the word
+/// "escalate" isn't treated as an escalation request.
 pub(crate) fn is_escalation_response(text: &str) -> bool {
     text.split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|w| w.eq_ignore_ascii_case("ESCALATE"))
+        .any(|w| w == "ESCALATE")
 }
 
 /// Try to read `tool_name {json}` out of the middle of a response.
@@ -313,4 +316,56 @@ fn parse_json_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_escalation_as_standalone_word() {
+        assert!(is_escalation_response("ESCALATE"));
+        assert!(is_escalation_response("Hi there, built by Netrunner! ESCALATE"));
+        assert!(!is_escalation_response("escalate"));
+        assert!(!is_escalation_response("I'll escalate this to the team."));
+        assert!(!is_escalation_response(""));
+        assert!(!is_escalation_response("ESCALATED"));
+    }
+
+    #[test]
+    fn parses_json_shorthand_tool_call() {
+        let text = r#"run_shell {"command": "systemctl --user stop bluetooth"}"#;
+        let call = parse_freeform_tool_call(text).unwrap();
+        assert_eq!(call.function.name, "run_shell");
+        assert_eq!(
+            call.function.arguments["command"],
+            "systemctl --user stop bluetooth"
+        );
+    }
+
+    #[test]
+    fn parses_json_shorthand_with_colon_and_prefix() {
+        let call = parse_freeform_tool_call(r#"Call: run_shell: {"command": "ls"}"#).unwrap();
+        assert_eq!(call.function.name, "run_shell");
+        let call = parse_freeform_tool_call(r#"tool run_shell {"command": "ls"}"#).unwrap();
+        assert_eq!(call.function.name, "run_shell");
+    }
+
+    #[test]
+    fn rejects_non_tool_json_text() {
+        assert!(parse_freeform_tool_call("Tell me the time").is_none());
+        assert!(parse_freeform_tool_call(r#"{"command": "ls"}"#).is_none());
+        assert!(parse_freeform_tool_call(r#"unknown_tool {"a": 1}"#).is_none());
+    }
+
+    #[test]
+    fn still_parses_classic_patterns() {
+        let call = parse_freeform_tool_call(r#"[tool_call: run_shell({"command": "ls"})]"#).unwrap();
+        assert_eq!(call.function.name, "run_shell");
+        let call =
+            parse_freeform_tool_call(r#"Called tool: run_shell with args {"command": "ls"}"#).unwrap();
+        assert_eq!(call.function.name, "run_shell");
+        let call = parse_freeform_tool_call("<|tool_call|>run_shell<|/tool_call|>").unwrap();
+        assert_eq!(call.function.name, "run_shell");
+    }
 }
