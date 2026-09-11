@@ -182,6 +182,7 @@ pub enum InputMode {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct AudioConfig {
     pub input_mode: InputMode,
     pub ptt_key: String,
@@ -192,6 +193,9 @@ pub struct AudioConfig {
     /// After a wake-word activation, keep listening for voice without
     /// requiring "luna" again for this many minutes (0 = off).
     pub conversation_timeout_mins: u32,
+    /// After a wake-word response in TUI mode, keep listening without
+    /// the wake word for this many seconds (0 = off).
+    pub conversation_window_secs: u64,
 }
 
 impl Default for AudioConfig {
@@ -213,6 +217,7 @@ impl Default for AudioConfig {
             vad_silence_ms: 2000,
             sample_rate: 16000,
             conversation_timeout_mins: 5,
+            conversation_window_secs: 15,
         }
     }
 }

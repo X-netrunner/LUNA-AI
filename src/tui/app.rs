@@ -16,8 +16,16 @@ use ratatui::{Frame, Terminal};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
+
+/// Current time as milliseconds since the Unix epoch.
+fn millis_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis() as u64
+}
 
 enum AppEvent {
     Input(Event),
@@ -68,6 +76,9 @@ pub struct TuiApp {
     tx: mpsc::UnboundedSender<AppEvent>,
     rx: mpsc::UnboundedReceiver<AppEvent>,
     logs: LogBuffer,
+    /// Unix-millis deadline until which the wake listener skips wake-word
+    /// detection and accepts any speech (0 = no active window).
+    window_deadline: Arc<AtomicU64>,
 }
 
 impl TuiApp {
@@ -96,6 +107,7 @@ impl TuiApp {
             tx,
             rx,
             logs,
+            window_deadline: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -150,8 +162,41 @@ impl TuiApp {
             let aliases = self.config.audio.wake_aliases.clone();
             let sample_rate = self.config.audio.sample_rate;
             let silence_ms = self.config.audio.vad_silence_ms;
+            let window_deadline = Arc::clone(&self.window_deadline);
+            let window_secs = self.config.audio.conversation_window_secs;
+            let window_active = window_secs > 0;
             tokio::spawn(async move {
                 loop {
+                    // If a conversation window is open (user recently got a
+                    // voice response), accept any speech without the wake word.
+                    if window_active
+                        && window_deadline.load(Ordering::Relaxed) > 0
+                        && millis_now() < window_deadline.load(Ordering::Relaxed)
+                    {
+                        match crate::audio::capture::listen_continuous(
+                            sample_rate,
+                            silence_ms,
+                            &stt,
+                        )
+                        .await
+                        {
+                            Ok(text) if !text.trim().is_empty() => {
+                                if tx_voice.send(AppEvent::Voice(text)).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(_) => {
+                                // silence timeout / no speech — refresh deadline check
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::debug!("Conversation window listener error: {}", e);
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                            }
+                        }
+                        continue;
+                    }
+
                     match crate::audio::capture::listen_for_wake_word(
                         sample_rate,
                         silence_ms,
@@ -207,15 +252,29 @@ impl TuiApp {
                 self.model_name = model;
                 self.chat_scroll = 0;
                 self.status = String::from("Ready");
+                // After a voice reply, keep the wake-word window open so the
+                // user can keep talking without repeating "luna".
+                self.refresh_conversation_window();
             }
             AppEvent::Voice(text) => {
                 let t = text.trim();
                 if t.is_empty() {
                     return;
                 }
+                // A wake-word or window utterance keeps the window extended.
+                self.refresh_conversation_window();
                 self.add_user_message(t);
                 self.submit(t.to_string());
             }
+        }
+    }
+
+    /// Open (or extend) the wake-word-free conversation window on any voice
+    /// interaction so the user can keep talking without repeating "luna".
+    fn refresh_conversation_window(&mut self) {
+        let secs = self.config.audio.conversation_window_secs;
+        if secs > 0 {
+            self.window_deadline.store(millis_now() + secs * 1000, Ordering::Relaxed);
         }
     }
 

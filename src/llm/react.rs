@@ -255,6 +255,15 @@ fn parse_freeform_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> 
     None
 }
 
+/// Detect a standalone `ESCALATE` token in the response.
+/// The 0.6b fast model sometimes appends "ESCALATE" after a greeting
+/// (e.g. "Hi there, built by Netrunner! ESCALATE") — we still want to
+/// escalate in that case.
+pub(crate) fn is_escalation_response(text: &str) -> bool {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| w.eq_ignore_ascii_case("ESCALATE"))
+}
+
 /// Try to read `tool_name {json}` out of the middle of a response.
 fn parse_json_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> {
     use crate::llm::ollama::{ToolCall, ToolCallFunction};

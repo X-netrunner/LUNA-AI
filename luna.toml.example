@@ -129,6 +129,7 @@ wake_word = "hello luna"
 wake_aliases = ["luna", "hey luna", "hello luna", "hay luna"]
 vad_silence_ms = 800
 sample_rate = 16000
+conversation_window_secs = 15   # TUI: keep listening without "luna" for N sec after a voice reply (0 = off)
 
 [memory]
 context_window = 6

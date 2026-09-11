@@ -342,7 +342,7 @@ log_model_choice(input, is_fast, is_deep, config);
         let mem_snapshot = memory.len();
         match active_react.run(input, memory, &effective_prompt).await {
             Ok((response, _streamed)) => {
-                if is_fast && response.trim() == "ESCALATE" && attempt < 2 {
+                if is_fast && crate::llm::react::is_escalation_response(&response) && attempt < 2 {
                     tracing::info!("Fast model escalated — re-running on full model");
                     memory.truncate_to(mem_snapshot);
                     active_react = &react;
@@ -616,7 +616,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
 
             match active_react.run(&input, &mut memory, &effective_prompt).await {
                 Ok((response, streamed)) => {
-                    if is_fast && response.trim() == "ESCALATE" && attempt < 2 {
+                    if is_fast && crate::llm::react::is_escalation_response(&response) && attempt < 2 {
                         tracing::info!("Fast model escalated — re-running on full model");
                         memory.truncate_to(mem_snapshot);
                         active_react = &react;
@@ -790,7 +790,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 
                         match active_react.run(&input, &mut memory, &effective_prompt).await {
                             Ok((response, streamed)) => {
-                                if is_fast && response.trim() == "ESCALATE" && attempt < 2 {
+                                if is_fast && crate::llm::react::is_escalation_response(&response) && attempt < 2 {
                                     tracing::info!("Fast model escalated — re-running on full model");
                                     memory.truncate_to(mem_snapshot);
                                     active_react = &react;
@@ -911,7 +911,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 
                     match active_react.run(&input, &mut memory, &effective_prompt).await {
                         Ok((response, streamed)) => {
-                            if is_fast && response.trim() == "ESCALATE" && attempt < 2 {
+                            if is_fast && crate::llm::react::is_escalation_response(&response) && attempt < 2 {
                                 tracing::info!("Fast model escalated — re-running on full model");
                                 memory.truncate_to(mem_snapshot);
                                 active_react = &react;
