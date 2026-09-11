@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
             .with_env_filter(EnvFilter::new(filter))
             .with_target(false)
             .without_time()
+            .with_ansi(false)
             .with_writer(move || writer.clone())
             .init();
         Some(log)

@@ -42,6 +42,13 @@ struct Metrics {
     cpu: AtomicU64,
 }
 
+/// Which panel Up/Down/PgUp/PgDn scroll. Tab switches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    Chat,
+    Debug,
+}
+
 pub struct TuiApp {
     config: LunaConfig,
     memory: Memory,
@@ -53,6 +60,8 @@ pub struct TuiApp {
     chat_scroll: usize,
     /// Lines scrolled up from bottom (0 = newest). Right-hand debug panel.
     debug_scroll: usize,
+    /// Which panel the arrow keys scroll.
+    focus: Focus,
     status: String,
     model_name: String,
     metrics: Arc<Metrics>,
@@ -92,6 +101,7 @@ impl TuiApp {
             cursor_pos: 0,
             chat_scroll: 0,
             debug_scroll: 0,
+            focus: Focus::Chat,
             status: String::from("Ready"),
             model_name,
             metrics: Arc::new(Metrics::default()),
@@ -275,18 +285,30 @@ impl TuiApp {
             }
             (_, KeyCode::Home) => self.cursor_pos = 0,
             (_, KeyCode::End) => self.cursor_pos = self.input.len(),
-            (_, KeyCode::Up) => self.chat_scroll += 1,
-            (_, KeyCode::Down) => self.chat_scroll = self.chat_scroll.saturating_sub(1),
-            (_, KeyCode::PageUp) => {
-                self.chat_scroll = self.chat_scroll.saturating_add(10);
+            (_, KeyCode::Tab) => {
+                self.focus = match self.focus {
+                    Focus::Chat => Focus::Debug,
+                    Focus::Debug => Focus::Chat,
+                };
             }
-            (_, KeyCode::PageDown) => {
-                self.chat_scroll = self.chat_scroll.saturating_sub(10);
-            }
-            (_, KeyCode::Char(']')) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Ctrl-] scrolls the debug panel; keep keys discoverable
-                self.debug_scroll += 1;
-            }
+            (_, KeyCode::Up) => match self.focus {
+                Focus::Chat => self.chat_scroll += 1,
+                Focus::Debug => self.debug_scroll += 1,
+            },
+            (_, KeyCode::Down) => match self.focus {
+                Focus::Chat => self.chat_scroll = self.chat_scroll.saturating_sub(1),
+                Focus::Debug => {
+                    self.debug_scroll = self.debug_scroll.saturating_sub(1);
+                }
+            },
+            (_, KeyCode::PageUp) => match self.focus {
+                Focus::Chat => self.chat_scroll = self.chat_scroll.saturating_add(10),
+                Focus::Debug => self.debug_scroll = self.debug_scroll.saturating_add(10),
+            },
+            (_, KeyCode::PageDown) => match self.focus {
+                Focus::Chat => self.chat_scroll = self.chat_scroll.saturating_sub(10),
+                Focus::Debug => self.debug_scroll = self.debug_scroll.saturating_sub(10),
+            },
             (_, KeyCode::Char(c)) => {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += 1;
@@ -325,6 +347,11 @@ impl TuiApp {
             let latency = started.elapsed();
             match result {
                 Ok((text, _streamed)) => {
+                    if config.voice.mode != crate::config::VoiceMode::Off {
+                        if let Err(e) = crate::tts::speak(&text, &config.voice.mode, &config).await {
+                            tracing::warn!("TTS error: {}", e);
+                        }
+                    }
                     let msg = Msg {
                         role: "assistant".into(),
                         content: text,
@@ -380,12 +407,13 @@ impl TuiApp {
         f.render_widget(status, outer[0]);
 
         // Chat history
-        let chat = ChatHistory::new(&self.messages, self.chat_scroll);
+        let chat = ChatHistory::new(&self.messages, self.chat_scroll, self.focus == Focus::Chat);
         f.render_widget(chat, mid[0]);
 
         // Debug panel (right side)
         let log_lines = self.logs.lines();
-        let debug = DebugPanel::new(&log_lines, self.debug_scroll);
+        let focused = self.focus == Focus::Debug;
+        let debug = DebugPanel::new(&log_lines, self.debug_scroll, focused);
         f.render_widget(debug, mid[1]);
 
         // Input line

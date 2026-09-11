@@ -49,11 +49,12 @@ pub struct ChatHistory<'a> {
     messages: &'a [Msg],
     /// How many *lines* up from the bottom we're scrolled. 0 = follow newest.
     scroll_from_bottom: usize,
+    focused: bool,
 }
 
 impl<'a> ChatHistory<'a> {
-    pub fn new(messages: &'a [Msg], scroll_from_bottom: usize) -> Self {
-        Self { messages, scroll_from_bottom }
+    pub fn new(messages: &'a [Msg], scroll_from_bottom: usize, focused: bool) -> Self {
+        Self { messages, scroll_from_bottom, focused }
     }
 }
 
@@ -62,7 +63,11 @@ impl<'a> Widget for ChatHistory<'a> {
         let block = Block::default()
             .title(" Luna ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(if self.focused {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            });
 
         let inner = block.inner(area);
         block.render(area, buf);
@@ -76,17 +81,25 @@ impl<'a> Widget for ChatHistory<'a> {
         }
 
         // Flatten every message into wrapped lines with role-based styling.
+        // The role prefix is shown once per message; continuation lines are
+        // indented to align under the content.
         let width = inner.width.saturating_sub(2) as usize;
         let mut all_lines: Vec<styled_line::StyledLine> = Vec::new();
         for msg in self.messages {
-            let (prefix, color) = match msg.role.as_str() {
-                "user" => ("You: ", Color::Green),
-                "assistant" => ("Luna: ", Color::Cyan),
-                "tool" => ("Tool: ", Color::Yellow),
-                _ => ("", Color::White),
+            let (prefix, indent, color) = match msg.role.as_str() {
+                "user" => ("You:  ", "       ", Color::Green),
+                "assistant" => ("Luna: ", "       ", Color::Cyan),
+                "tool" => ("Tool: ", "       ", Color::Yellow),
+                _ => ("", "", Color::White),
             };
-            for wrapped in wrap_text(&msg.content, width) {
-                all_lines.push(styled_line::StyledLine::new(prefix, &wrapped, color));
+            let mut first = true;
+            for wrapped in wrap_text(&msg.content, width.saturating_sub(prefix.chars().count())) {
+                if first {
+                    all_lines.push(styled_line::StyledLine::new(prefix, &wrapped, color));
+                    first = false;
+                } else {
+                    all_lines.push(styled_line::StyledLine::indent(indent, &wrapped));
+                }
             }
             if let Some(thinking) = &msg.thinking {
                 for wrapped in wrap_text(thinking, width.saturating_sub(4)) {
@@ -150,6 +163,13 @@ mod styled_line {
             }
         }
 
+        /// Continuation line: no role prefix, indented to match content.
+        pub fn indent(indent: &str, text: &str) -> Self {
+            let mut spans = vec![Span::raw(indent.to_string())];
+            spans.push(Span::styled(text.to_string(), Style::default().fg(Color::White)));
+            Self { spans, blank: false }
+        }
+
         pub fn blank() -> Self {
             Self { spans: vec![], blank: true }
         }
@@ -190,7 +210,7 @@ impl<'a> InputLine<'a> {
 impl<'a> Widget for InputLine<'a> {
     fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let block = Block::default()
-            .title(" Input  (Enter send · ↑/↓ scroll · PgUp/PgDn · Ctrl-C exit)")
+            .title(" Input  (Enter send · Tab focus · ↑/↓ scroll · Ctrl-C exit)")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Green));
 
@@ -209,11 +229,12 @@ impl<'a> Widget for InputLine<'a> {
 pub struct DebugPanel<'a> {
     logs: &'a [String],
     scroll_from_bottom: usize,
+    focused: bool,
 }
 
 impl<'a> DebugPanel<'a> {
-    pub fn new(logs: &'a [String], scroll_from_bottom: usize) -> Self {
-        Self { logs, scroll_from_bottom }
+    pub fn new(logs: &'a [String], scroll_from_bottom: usize, focused: bool) -> Self {
+        Self { logs, scroll_from_bottom, focused }
     }
 }
 
@@ -222,7 +243,11 @@ impl<'a> Widget for DebugPanel<'a> {
         let block = Block::default()
             .title(" Debug ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow));
+            .border_style(if self.focused {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            });
 
         let inner = block.inner(area);
         block.render(area, buf);
@@ -235,16 +260,9 @@ impl<'a> Widget for DebugPanel<'a> {
             return;
         }
 
-        let view_h = inner.height.saturating_sub(1) as usize;
-        let total = self.logs.len();
-        let start = if self.scroll_from_bottom == 0 {
-            total.saturating_sub(view_h)
-        } else {
-            total.saturating_sub(view_h).saturating_sub(self.scroll_from_bottom)
-        };
-
-        for (i, line) in self.logs.iter().enumerate().skip(start).take(view_h) {
-            let y = inner.y + i as u16 - start as u16;
+        let width = (inner.width.saturating_sub(2)) as usize;
+        let mut wrapped: Vec<(String, Color)> = Vec::new();
+        for line in self.logs {
             let color = if line.contains("ERROR") || line.contains("WARN") {
                 Color::Red
             } else if line.contains("DEBUG") {
@@ -254,12 +272,27 @@ impl<'a> Widget for DebugPanel<'a> {
             } else {
                 Color::DarkGray
             };
+            for w in wrap_text(line, width) {
+                wrapped.push((w, color));
+            }
+        }
+
+        let view_h = inner.height.saturating_sub(1) as usize;
+        let total = wrapped.len();
+        let start = if self.scroll_from_bottom == 0 {
+            total.saturating_sub(view_h)
+        } else {
+            total.saturating_sub(view_h).saturating_sub(self.scroll_from_bottom)
+        };
+
+        for (i, (line, color)) in wrapped.iter().enumerate().skip(start).take(view_h) {
+            let y = inner.y + i as u16 - start as u16;
             buf.set_stringn(
                 inner.x + 1,
                 y,
                 line,
                 inner.width.saturating_sub(2) as usize,
-                Style::default().fg(color),
+                Style::default().fg(*color),
             );
         }
     }
