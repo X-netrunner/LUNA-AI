@@ -9,6 +9,7 @@ use crate::memory::Memory;
 use crate::tools;
 use anyhow::Result;
 use serde_json::json;
+use std::io::Write;
 
 pub struct ReactLoop<'a> {
     client: &'a OllamaClient,
@@ -27,6 +28,12 @@ impl<'a> ReactLoop<'a> {
         config: &crate::config::LunaConfig,
     ) -> Self {
         Self { client, max_iterations, native_tools, config: config.clone() }
+    }
+
+    /// True when the TUI is rendering — tool progress must go through
+    /// tracing rather than direct print! to avoid corrupting the screen.
+    fn tui(&self) -> bool {
+        self.config.audio.input_mode == crate::config::InputMode::Tui
     }
 
     pub async fn run(
@@ -82,18 +89,28 @@ impl<'a> ReactLoop<'a> {
                     if let Some(tool_call) = parse_freeform_tool_call(&text) {
                         let tool_name = tool_call.function.name.clone();
                         tracing::info!("Intercepted freeform tool: {}", tool_name);
-                        print!("\n[Luna → {}] ", tool_name);
-                        use std::io::Write;
-                        std::io::stdout().flush().ok();
 
                         let tool_result = match tools::execute(&tool_call, &self.config).await {
                             Ok(o) => {
-                                println!("✓");
-                                print_sources(&tool_name, &o);
+                                if self.tui() {
+                                    tracing::info!("Tool {} succeeded: {}", tool_name, crate::util::truncate(&o, 120));
+                                    print_sources(&tool_name, &o, true);
+                                } else {
+                                    print!("\n[Luna → {}] ", tool_name);
+                                    std::io::stdout().flush().ok();
+                                    println!("✓");
+                                    print_sources(&tool_name, &o, false);
+                                }
                                 o
                             }
                             Err(e) => {
-                                println!("✗");
+                                if self.tui() {
+                                    tracing::warn!("Tool {} failed: {}", tool_name, e);
+                                } else {
+                                    print!("\n[Luna → {}] ", tool_name);
+                                    std::io::stdout().flush().ok();
+                                    println!("✗");
+                                }
                                 format!("Error: {}", e)
                             }
                         };
@@ -119,18 +136,28 @@ impl<'a> ReactLoop<'a> {
                     for tool_call in &tool_calls {
                         let tool_name = tool_call.function.name.clone();
                         tracing::info!("Tool call: {}", tool_name);
-                        print!("\n[Luna → {}] ", tool_name);
-                        use std::io::Write;
-                        std::io::stdout().flush().ok();
 
                         let tool_result = match tools::execute(tool_call, &self.config).await {
                             Ok(o) => {
-                                println!("✓");
-                                print_sources(&tool_name, &o);
+                                if self.tui() {
+                                    tracing::info!("Tool {} succeeded: {}", tool_name, crate::util::truncate(&o, 120));
+                                    print_sources(&tool_name, &o, true);
+                                } else {
+                                    print!("\n[Luna → {}] ", tool_name);
+                                    std::io::stdout().flush().ok();
+                                    println!("✓");
+                                    print_sources(&tool_name, &o, false);
+                                }
                                 o
                             }
                             Err(e) => {
-                                println!("✗");
+                                if self.tui() {
+                                    tracing::warn!("Tool {} failed: {}", tool_name, e);
+                                } else {
+                                    print!("\n[Luna → {}] ", tool_name);
+                                    std::io::stdout().flush().ok();
+                                    println!("✗");
+                                }
                                 format!("Error: {}", e)
                             }
                         };
@@ -154,14 +181,19 @@ impl<'a> ReactLoop<'a> {
 }
 
 /// Print the URLs a research tool referenced, so the user can click through.
-fn print_sources(tool_name: &str, result: &str) {
+/// In TUI mode these go through tracing so they land in the debug panel.
+fn print_sources(tool_name: &str, result: &str, tui: bool) {
     let sources = crate::tools::extract_sources(tool_name, result);
     if sources.is_empty() {
         return;
     }
-    println!("  Sources:");
-    for src in &sources {
-        println!("    ↳ {}", src);
+    if tui {
+        tracing::info!("Sources: {}", sources.join(" | "));
+    } else {
+        println!("  Sources:");
+        for src in &sources {
+            println!("    ↳ {}", src);
+        }
     }
 }
 

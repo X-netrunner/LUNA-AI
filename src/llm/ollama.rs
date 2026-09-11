@@ -147,6 +147,10 @@ pub struct OllamaClient {
     max_tokens: u32,
     enable_thinking: bool,
     debug: bool,
+    /// When false, never print tokens/thinking directly to stdout/stderr.
+    /// The TUI renders its own screen, so stray print!()/eprintln!() would
+    /// corrupt the alternate screen — they go through tracing instead.
+    term_output: bool,
 }
 
 impl OllamaClient {
@@ -159,6 +163,7 @@ impl OllamaClient {
             max_tokens,
             enable_thinking: true,
             debug: false,
+            term_output: true,
         }
     }
 
@@ -169,6 +174,11 @@ impl OllamaClient {
 
     pub fn debug(mut self, on: bool) -> Self {
         self.debug = on;
+        self
+    }
+
+    pub fn term_output(mut self, on: bool) -> Self {
+        self.term_output = on;
         self
     }
 
@@ -248,21 +258,28 @@ impl OllamaClient {
                     // Strip emojis as tokens arrive — they'd otherwise be
                     // echoed live to the terminal.
                     let clean = crate::util::strip_emojis(&token);
-                    print!("{}", clean);
-                    use std::io::Write;
-                    std::io::stdout().flush().ok();
+                    if self.term_output {
+                        print!("{}", clean);
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
+                    }
                     full_text.push_str(&clean);
                 }
 
                 if chunk.done {
-                    // Print the accumulated thinking block at the end
+                    // Log the accumulated thinking block — tracing in TUI mode
+                    // routes it to the debug panel instead of raw stderr.
                     if !thinking_buf.is_empty() {
-                        eprintln!(
-                            "\n[think] {}",
-                            crate::util::truncate_marked(&thinking_buf, 800)
-                        );
+                        let think = crate::util::truncate_marked(&thinking_buf, 800);
+                        if self.term_output {
+                            eprintln!("\n[think] {}", think);
+                        } else {
+                            tracing::debug!("[think] {}", think);
+                        }
                     }
-                    println!();
+                    if self.term_output {
+                        println!();
+                    }
                     break;
                 }
             }
@@ -334,10 +351,15 @@ impl OllamaClient {
 
         // Tool call takes priority — if present, return it immediately
         if !parsed.message.tool_calls.is_empty() {
-            // Print thinking tokens in debug mode even when there's a tool call
+            // Surface thinking tokens in debug mode even when there's a tool call
             if self.debug {
                 if let Some(ref think) = parsed.message.thinking {
-                    eprintln!("[think] {}", crate::util::truncate_marked(think, 500));
+                    let think = crate::util::truncate_marked(think, 500);
+                    if self.term_output {
+                        eprintln!("[think] {}", think);
+                    } else {
+                        tracing::debug!("[think] {}", think);
+                    }
                 }
             }
             return Ok(OllamaResponse::ToolUse(parsed.message.tool_calls));
@@ -347,7 +369,12 @@ impl OllamaClient {
         // The caller (agent/mod.rs) owns all printing so there's one print site.
         if self.debug {
             if let Some(ref think) = parsed.message.thinking {
-                eprintln!("[think] {}", crate::util::truncate_marked(think, 500));
+                let think = crate::util::truncate_marked(think, 500);
+                if self.term_output {
+                    eprintln!("[think] {}", think);
+                } else {
+                    tracing::debug!("[think] {}", think);
+                }
             }
         }
         let text = crate::util::strip_emojis(&parsed.message.content.unwrap_or_default());

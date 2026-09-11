@@ -52,6 +52,12 @@ fn save_editor_history(rl: &mut RlEditor) {
 // ── Shared setup ──────────────────────────────────────────────────────────────
 
 
+/// TUI renders its own screen — the Ollama client must never print tokens
+/// or thinking blocks directly to stdout/stderr in that mode.
+fn tui_quiet(config: &LunaConfig) -> bool {
+    config.audio.input_mode == crate::config::InputMode::Tui
+}
+
 fn build_fast_client(config: &LunaConfig) -> Option<OllamaClient> {
     // Only build if a fast_model is configured
     let model = config.llm.fast_model.as_deref()?;
@@ -63,7 +69,8 @@ fn build_fast_client(config: &LunaConfig) -> Option<OllamaClient> {
             512, // smaller token budget — fast model is for short answers
         )
         .enable_thinking(config.llm.enable_thinking)
-        .debug(config.logging.level == "debug"),
+        .debug(config.logging.level == "debug")
+        .term_output(!tui_quiet(config)),
     )
 }
 
@@ -78,7 +85,8 @@ fn build_deep_client(config: &LunaConfig) -> Option<OllamaClient> {
             config.llm.max_tokens,
         )
         .enable_thinking(config.llm.enable_thinking)
-        .debug(config.logging.level == "debug"),
+        .debug(config.logging.level == "debug")
+        .term_output(!tui_quiet(config)),
     )
 }
 
@@ -91,6 +99,7 @@ fn build_client(config: &LunaConfig) -> OllamaClient {
     )
     .enable_thinking(config.llm.enable_thinking)
     .debug(config.logging.level == "debug")
+    .term_output(!tui_quiet(config))
 }
 
 fn build_stt(config: &LunaConfig) -> crate::stt::whisper::WhisperStt {
