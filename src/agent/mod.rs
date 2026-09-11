@@ -257,6 +257,24 @@ const DEEP_PROMPT: &str = "You are Luna. You were built by Netrunner. You run lo
     If you need to run commands, search the web, or use tools, do so. \
     Be comprehensive but well-structured. Never guess — if uncertain, say so.";
 
+/// Log which model tier was chosen for a given query, always visible
+/// in both TUI (debug panel) and terminal (stderr) modes.
+fn log_model_choice(input: &str, is_fast: bool, is_deep: bool, config: &LunaConfig) {
+    let (tier, model) = if is_fast {
+        ("fast", config.llm.fast_model.as_deref().unwrap_or("?"))
+    } else if is_deep {
+        ("deep", config.llm.deep_model.as_deref().unwrap_or("?"))
+    } else {
+        ("full", config.llm.model.as_str())
+    };
+    tracing::info!(
+        "Model: {} ({}) — for \"{}\"",
+        model,
+        tier,
+        crate::util::truncate(input, 60)
+    );
+}
+
 /// Result of a routed turn: the reply text and the model that produced it.
 /// `model` is the display name (fast/deep/full) actually used for the answer.
 pub struct TurnOutcome {
@@ -314,20 +332,7 @@ pub async fn run_routed_turn(
         _ => (&react, system_prompt.clone(), false, false),
     };
 
-    let tier_label = if is_fast { "fast" } else if is_deep { "deep" } else { "full" };
-    let model_initial = if is_fast {
-        config.llm.fast_model.as_deref().unwrap_or("?")
-    } else if is_deep {
-        config.llm.deep_model.as_deref().unwrap_or("?")
-    } else {
-        &config.llm.model
-    };
-    tracing::info!(
-        "Model: {} ({}) — for \"{}\"",
-        model_initial,
-        tier_label,
-        crate::util::truncate(input, 60)
-    );
+log_model_choice(input, is_fast, is_deep, config);
 
     effective_prompt.push_str(
         &memory_block_for(input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await,
@@ -593,6 +598,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                 }
                 _ => (&react, system_prompt.to_string(), false, false),
             };
+        log_model_choice(&input, is_fast, is_deep, config);
         effective_prompt
             .push_str(&memory_block_for(&input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
 
@@ -768,6 +774,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                         }
                         _ => (&react, system_prompt.to_string(), false, false),
                     };
+                    log_model_choice(&input, is_fast, is_deep, config);
                     effective_prompt
                         .push_str(&memory_block_for(&input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
 
@@ -888,6 +895,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                     }
                     _ => (&react, system_prompt.to_string(), false, false),
                 };
+                log_model_choice(&input, is_fast, is_deep, config);
                 effective_prompt
                     .push_str(&memory_block_for(&input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
 
