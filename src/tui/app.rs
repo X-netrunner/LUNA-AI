@@ -1,40 +1,45 @@
 //! tui/app.rs — TUI application state and event loop
 
-use crate::config::LunaConfig;
+use crate::config::{LunaConfig, VoiceMode};
 use crate::llm::ollama::OllamaClient;
 use crate::llm::react::ReactLoop;
 use crate::memory::Memory;
-use crate::tui::widgets::{ChatHistory, InputLine, StatusBar};
+use crate::tui::log::LogBuffer;
+use crate::tui::widgets::{ChatHistory, DebugPanel, InputLine, StatusBar};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::{Frame, Terminal};
-use std::io::{self, Stdout};
+use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-type Backend = CrosstermBackend<Stdout>;
-type Term = Terminal<Backend>;
-
-#[derive(Debug)]
 enum AppEvent {
     Input(Event),
-    Response(Msg),
+    Response(Msg, Duration, Memory),
+    Metrics,
+    Voice(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct Msg {
     pub role: String,
     pub content: String,
-    pub is_tool: bool,
     pub thinking: Option<String>,
+}
+
+/// Shared live metrics written by a background poll task and read by the UI.
+#[derive(Default)]
+struct Metrics {
+    gpu: AtomicU64,
+    cpu: AtomicU64,
 }
 
 pub struct TuiApp {
@@ -44,18 +49,23 @@ pub struct TuiApp {
     messages: Vec<Msg>,
     input: String,
     cursor_pos: usize,
-    scroll_offset: usize,
+    /// Lines scrolled up from bottom (0 = newest). Shared by chat area.
+    chat_scroll: usize,
+    /// Lines scrolled up from bottom (0 = newest). Right-hand debug panel.
+    debug_scroll: usize,
     status: String,
     model_name: String,
-    gpu_percent: String,
+    metrics: Arc<Metrics>,
     last_latency: Duration,
     should_quit: bool,
+    thinking: bool,
     tx: mpsc::UnboundedSender<AppEvent>,
     rx: mpsc::UnboundedReceiver<AppEvent>,
+    logs: LogBuffer,
 }
 
 impl TuiApp {
-    pub fn new(config: LunaConfig) -> Result<Self> {
+    pub fn new(config: LunaConfig, logs: LogBuffer) -> Result<Self> {
         let client = Arc::new(
             OllamaClient::new(
                 &config.llm.base_url,
@@ -71,7 +81,7 @@ impl TuiApp {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let model_name = config.llm.model.clone();
-        let gpu_percent = String::from("?");
+        let thinking = config.llm.enable_thinking;
 
         Ok(Self {
             config,
@@ -80,14 +90,17 @@ impl TuiApp {
             messages: Vec::new(),
             input: String::new(),
             cursor_pos: 0,
-            scroll_offset: 0,
+            chat_scroll: 0,
+            debug_scroll: 0,
             status: String::from("Ready"),
             model_name,
-            gpu_percent,
+            metrics: Arc::new(Metrics::default()),
             last_latency: Duration::ZERO,
             should_quit: false,
+            thinking,
             tx,
             rx,
+            logs,
         })
     }
 
@@ -100,7 +113,7 @@ impl TuiApp {
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
 
-        // Spawn event reader
+        // Event reader task (keyboard/resize)
         let tx = self.tx.clone();
         tokio::spawn(async move {
             loop {
@@ -114,40 +127,99 @@ impl TuiApp {
             }
         });
 
+        // Metrics poller task (GPU + CPU every 2s)
+        let metrics = self.metrics.clone();
+        let tx_metrics = self.tx.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Some(g) = gpu_utilization().await {
+                    metrics.gpu.store(g, Ordering::Relaxed);
+                }
+                if let Some(c) = cpu_utilization().await {
+                    metrics.cpu.store(c, Ordering::Relaxed);
+                }
+                if tx_metrics.send(AppEvent::Metrics).is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
+
+        // Voice wake-word listener (if voice enabled)
+        if self.config.voice.mode != VoiceMode::Off {
+            let tx_voice = self.tx.clone();
+            let stt = crate::stt::whisper::WhisperStt::with_prompt(
+                &self.config.voice.whisper_model.to_string_lossy(),
+                Some("Luna, open, close, run, search, volume, terminal, browser.".into()),
+            );
+            let aliases = self.config.audio.wake_aliases.clone();
+            let sample_rate = self.config.audio.sample_rate;
+            let silence_ms = self.config.audio.vad_silence_ms;
+            tokio::spawn(async move {
+                loop {
+                    match crate::audio::capture::listen_for_wake_word(
+                        sample_rate,
+                        silence_ms,
+                        &aliases,
+                        &stt,
+                    )
+                    .await
+                    {
+                        Ok(text) => {
+                            if tx_voice.send(AppEvent::Voice(text)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Wake word listener error: {}", e);
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+            });
+        }
+
         // Initial draw
         terminal.draw(|f| self.ui(f))?;
 
         // Main loop
         while !self.should_quit {
-            // Handle events
             while let Ok(ev) = self.rx.try_recv() {
                 self.handle_app_event(ev);
             }
 
-            // Redraw
             terminal.draw(|f| self.ui(f))?;
-
-            tokio::time::sleep(Duration::from_millis(16)).await; // ~60fps
+            tokio::time::sleep(Duration::from_millis(16)).await;
         }
 
         // Cleanup
         disable_raw_mode()?;
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
         terminal.show_cursor()?;
-
         Ok(())
     }
 
     fn handle_app_event(&mut self, ev: AppEvent) {
         match ev {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key),
-            AppEvent::Input(Event::Resize(_, _)) => {}, // auto-handled by ratatui
-            AppEvent::Input(_) => {},
-            AppEvent::Response(msg) => {
+            AppEvent::Input(Event::Resize(_, _)) => {}
+            AppEvent::Input(_) => {}
+            AppEvent::Metrics => {}
+            AppEvent::Response(msg, latency, memory) => {
                 self.messages.push(msg);
-                self.scroll_to_bottom();
+                self.memory = memory;
+                self.last_latency = latency;
+                self.chat_scroll = 0;
                 self.status = String::from("Ready");
-            },
+            }
+            AppEvent::Voice(text) => {
+                let t = text.trim();
+                if t.is_empty() {
+                    return;
+                }
+                self.add_user_message(t);
+                self.submit(t.to_string());
+            }
         }
     }
 
@@ -171,39 +243,13 @@ impl TuiApp {
                     let user_input = self.input.clone();
                     self.input.clear();
                     self.cursor_pos = 0;
-                    self.add_user_message(&user_input);
-                    self.status = String::from("Thinking...");
-                    
-                    // Create ReactLoop and run it
-                    let client = self.client.clone();
-                    let config = self.config.clone();
-                    let mut memory = self.memory.clone();
-                    let system_prompt = crate::agent::build_system_prompt(&config);
-                    let response_tx = self.tx.clone(); // We'll reuse the event channel for responses
-                    
-                    tokio::spawn(async move {
-                        let react = ReactLoop::new(&client, config.agent.max_react_iterations, config.agent.native_tools, &config);
-                        match react.run(&user_input, &mut memory, &system_prompt).await {
-                            Ok((text, _streamed)) => {
-                                let msg = Msg {
-                                    role: "assistant".into(),
-                                    content: text,
-                                    is_tool: false,
-                                    thinking: None,
-                                };
-                                let _ = response_tx.send(AppEvent::Response(msg));
-                            }
-                            Err(e) => {
-                                let msg = Msg {
-                                    role: "assistant".into(),
-                                    content: format!("Error: {}", e),
-                                    is_tool: false,
-                                    thinking: None,
-                                };
-                                let _ = response_tx.send(AppEvent::Response(msg));
-                            }
-                        }
+                    self.messages.push(Msg {
+                        role: "user".into(),
+                        content: user_input.clone(),
+                        thinking: None,
                     });
+                    self.chat_scroll = 0;
+                    self.submit(user_input);
                 }
             }
             (_, KeyCode::Backspace) => {
@@ -229,21 +275,17 @@ impl TuiApp {
             }
             (_, KeyCode::Home) => self.cursor_pos = 0,
             (_, KeyCode::End) => self.cursor_pos = self.input.len(),
-            (_, KeyCode::Up) => {
-                if self.scroll_offset > 0 {
-                    self.scroll_offset -= 1;
-                }
-            }
-            (_, KeyCode::Down) => {
-                if self.scroll_offset < self.messages.len().saturating_sub(1) {
-                    self.scroll_offset += 1;
-                }
-            }
+            (_, KeyCode::Up) => self.chat_scroll += 1,
+            (_, KeyCode::Down) => self.chat_scroll = self.chat_scroll.saturating_sub(1),
             (_, KeyCode::PageUp) => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                self.chat_scroll = self.chat_scroll.saturating_add(10);
             }
             (_, KeyCode::PageDown) => {
-                self.scroll_offset = (self.scroll_offset + 10).min(self.messages.len().saturating_sub(1));
+                self.chat_scroll = self.chat_scroll.saturating_sub(10);
+            }
+            (_, KeyCode::Char(']')) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Ctrl-] scrolls the debug panel; keep keys discoverable
+                self.debug_scroll += 1;
             }
             (_, KeyCode::Char(c)) => {
                 self.input.insert(self.cursor_pos, c);
@@ -257,64 +299,142 @@ impl TuiApp {
         self.messages.push(Msg {
             role: "user".into(),
             content: text.into(),
-            is_tool: false,
             thinking: None,
         });
-        self.scroll_to_bottom();
+        self.chat_scroll = 0;
     }
 
-    fn add_assistant_message(&mut self, text: &str, thinking: Option<String>) {
-        self.messages.push(Msg {
-            role: "assistant".into(),
-            content: text.into(),
-            is_tool: false,
-            thinking,
+    /// Spawn the async turn on the shared model — the UI stays responsive.
+    fn submit(&mut self, user_input: String) {
+        self.status = String::from("Thinking...");
+        let client = self.client.clone();
+        let config = self.config.clone();
+        let mut memory = self.memory.clone();
+        let system_prompt = crate::agent::build_system_prompt(&config);
+        let response_tx = self.tx.clone();
+        let started = Instant::now();
+
+        tokio::spawn(async move {
+            let react = ReactLoop::new(
+                &client,
+                config.agent.max_react_iterations,
+                config.agent.native_tools,
+                &config,
+            );
+            let result = react.run(&user_input, &mut memory, &system_prompt).await;
+            let latency = started.elapsed();
+            match result {
+                Ok((text, _streamed)) => {
+                    let msg = Msg {
+                        role: "assistant".into(),
+                        content: text,
+                        thinking: None,
+                    };
+                    let _ = response_tx.send(AppEvent::Response(msg, latency, memory));
+                }
+                Err(e) => {
+                    let msg = Msg {
+                        role: "assistant".into(),
+                        content: format!("Error: {}", e),
+                        thinking: None,
+                    };
+                    let _ = response_tx.send(AppEvent::Response(msg, latency, memory));
+                }
+            }
         });
-        self.scroll_to_bottom();
-    }
-
-    fn add_tool_message(&mut self, tool_name: &str, result: &str) {
-        self.messages.push(Msg {
-            role: "tool".into(),
-            content: format!("[{}]: {}", tool_name, result),
-            is_tool: true,
-            thinking: None,
-        });
-        self.scroll_to_bottom();
-    }
-
-    fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.messages.len().saturating_sub(1);
     }
 
     fn ui(&mut self, f: &mut Frame) {
-        let size = f.size();
-        
-        // Layout: header (status), chat area, input
-        let chunks = Layout::default()
+        let size = f.area();
+
+        // ── Layout: status on top, then chat+debug side by side, input below
+        let outer = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),  // Status bar
-                Constraint::Min(10),    // Chat history
+                Constraint::Min(10),    // Chat + debug
                 Constraint::Length(3),  // Input line
             ])
             .split(size);
 
+        // Horizontal split: chat takes 60%, debug 40%
+        let mid = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(outer[1]);
+
+        let gpu = self.metrics.gpu.load(Ordering::Relaxed);
+        let cpu = self.metrics.cpu.load(Ordering::Relaxed);
+        let gpu_str = if gpu == 0 { "N/A".to_string() } else { format!("{}%", gpu) };
+        let cpu_str = if cpu == 0 { "N/A".to_string() } else { format!("{}%", cpu) };
+
         // Status bar
-        let status = StatusBar::new(&self.model_name, &self.gpu_percent, self.last_latency, &self.status);
-        f.render_widget(status, chunks[0]);
+        let status = StatusBar::new(
+            &self.model_name,
+            &gpu_str,
+            &cpu_str,
+            self.last_latency,
+            &self.status,
+            self.thinking,
+        );
+        f.render_widget(status, outer[0]);
 
         // Chat history
-        let chat = ChatHistory::new(&self.messages, self.scroll_offset);
-        f.render_widget(chat, chunks[1]);
+        let chat = ChatHistory::new(&self.messages, self.chat_scroll);
+        f.render_widget(chat, mid[0]);
+
+        // Debug panel (right side)
+        let log_lines = self.logs.lines();
+        let debug = DebugPanel::new(&log_lines, self.debug_scroll);
+        f.render_widget(debug, mid[1]);
 
         // Input line
-        let input = InputLine::new(&self.input, self.cursor_pos);
-        f.render_widget(input, chunks[2]);
+        let input = InputLine::new(&self.input);
+        f.render_widget(input, outer[2]);
 
-        // Set cursor position
-        if let Some(cursor_area) = InputLine::cursor_area(chunks[2], self.cursor_pos, &self.input) {
+        // Cursor
+        if let Some(cursor_area) = InputLine::cursor_area(outer[2], self.cursor_pos, &self.input) {
             f.set_cursor_position(cursor_area);
         }
     }
+}
+
+/// Query NVIDIA GPU utilization (%) via nvidia-smi. Returns None if unavailable.
+async fn gpu_utilization() -> Option<u64> {
+    let out = tokio::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    s.trim().split(',').next()?.trim().parse::<u64>().ok()
+}
+
+/// Approximate CPU utilization (%) by sampling /proc/stat twice.
+async fn cpu_utilization() -> Option<u64> {
+    let (idle1, total1) = read_proc_stat()?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (idle2, total2) = read_proc_stat()?;
+    let id_delta = idle2.saturating_sub(idle1);
+    let total_delta = total2.saturating_sub(total1);
+    if total_delta == 0 {
+        return None;
+    }
+    Some(100u64.saturating_sub(id_delta.saturating_mul(100) / total_delta))
+}
+
+/// Read aggregate CPU times from /proc/stat. Returns (idle_ticks, total_ticks).
+fn read_proc_stat() -> Option<(u64, u64)> {
+    let content = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = content.lines().next()?;
+    let mut fields = line.split_whitespace();
+    // "cpu" header is fields[0]; values begin at fields[1]
+    fields.next()?;
+    let vals: Vec<u64> = fields.take(8).map(|f| f.parse().unwrap_or(0)).collect();
+    let idle = vals.get(3).copied().unwrap_or(0) + vals.get(4).copied().unwrap_or(0);
+    let total: u64 = vals.iter().sum();
+    Some((idle, total))
 }

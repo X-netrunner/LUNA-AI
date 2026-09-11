@@ -253,7 +253,6 @@ enum RunMode {
     Text,
     Voice,
     Hybrid,
-    Tui,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -269,11 +268,9 @@ pub async fn run(config: &LunaConfig) -> Result<()> {
     crate::tools::proactive::spawn(config);
 
     match config.audio.input_mode {
+        crate::config::InputMode::Tui => run_text(config).await,
         crate::config::InputMode::WakeWord | crate::config::InputMode::Both => {
             run_hybrid(config).await
-        }
-        crate::config::InputMode::Tui => {
-            run_tui(config).await
         }
         _ => run_text(config).await,
     }
@@ -887,9 +884,9 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 }
 
 // ── TUI mode ──────────────────────────────────────────────────────────────────
-async fn run_tui(config: &LunaConfig) -> Result<()> {
+pub async fn run_tui(config: &LunaConfig, log: crate::tui::LogBuffer) -> Result<()> {
     tracing::info!("Starting Luna agent (TUI mode)");
-    crate::tui::run_tui(config.clone()).await
+    crate::tui::run_tui(config.clone(), log).await
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

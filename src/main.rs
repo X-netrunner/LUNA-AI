@@ -80,11 +80,27 @@ async fn main() -> Result<()> {
     } else {
         format!("luna={}", config.logging.level)
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(filter))
-        .with_target(false)
-        .without_time()
-        .init();
+
+    // In TUI mode, route tracing into an in-memory buffer (shown in the debug
+    // panel) instead of stderr so log lines don't overwrite the alternate screen.
+    let tui_log = if args.tui {
+        let log = crate::tui::log::LogBuffer::new(500);
+        let writer = crate::tui::log::BufferWriter::new(log.clone_handle(), 500);
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new(filter))
+            .with_target(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .init();
+        Some(log)
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new(filter))
+            .with_target(false)
+            .without_time()
+            .init();
+        None
+    };
 
     tracing::info!("Luna starting up...");
 
@@ -159,7 +175,12 @@ async fn main() -> Result<()> {
         if args.tui {
         tracing::info!("TUI mode — using Ratatui interface");
         config.audio.input_mode = crate::config::InputMode::Tui;
-        agent::run(&config).await?;
+        if let Some(log) = tui_log {
+            agent::run_tui(&config, log).await?;
+        } else {
+            // Shouldn't happen — TUI always builds a log buffer at startup.
+            anyhow::bail!("TUI log buffer missing");
+        }
     } else if args.text_only {
         tracing::info!("Text-only mode — voice input disabled");
         agent::run_text(&config).await?;
