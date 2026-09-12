@@ -68,7 +68,10 @@ fn build_fast_client(config: &LunaConfig) -> Option<OllamaClient> {
             config.llm.temperature,
             512, // smaller token budget — fast model is for short answers
         )
-        .enable_thinking(config.llm.enable_thinking)
+        // The fast tier is for quick answers — thinking ON makes qwen3 models
+        // return empty `content` (answer sits in `thinking`) and crawl. Brief
+        // replies don't need a chain of thought.
+        .enable_thinking(false)
         .debug(config.logging.level == "debug")
         .term_output(!tui_quiet(config)),
     )

@@ -201,20 +201,29 @@ impl<'a> DebugPanel<'a> {
     fn build_lines(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         for log in self.logs {
-            let color = if log.contains("ERROR") || log.contains("WARN") {
-                Color::Red
-            } else if log.contains("DEBUG") {
-                Color::DarkGray
-            } else if log.contains("INFO") {
-                Color::Cyan
+            // Map the level prefix onto a compact badge + color so the panel
+            // reads at a glance: [*] info, [!] warn/error, [+] debug, [~] trace.
+            let (badge, color) = if log.starts_with("ERROR") {
+                ("[!]", Color::Red)
+            } else if log.starts_with("WARN") {
+                ("[!]", Color::Yellow)
+            } else if log.starts_with("INFO") {
+                ("[*]", Color::Cyan)
+            } else if log.starts_with("TRACE") {
+                ("[~]", Color::DarkGray)
             } else {
-                Color::DarkGray
+                ("[+]", Color::DarkGray)
             };
             // Defensive: collapse long tool-dump lines (HTML/CSS from
             // fetch_page etc.) so one huge result can't flood the panel.
-            let compact: String = log.chars().take(220).collect();
-            for chunk in wrap_text(&compact, width.saturating_sub(2).max(4)) {
-                lines.push(Line::from(Span::styled(chunk, Style::default().fg(color))));
+            let compact: String = log.chars().take(215).collect();
+            let badge_span =
+                Span::styled(badge, Style::default().fg(color).add_modifier(Modifier::BOLD));
+            for chunk in wrap_text(&compact, width.saturating_sub(4).max(4)) {
+                lines.push(Line::from(vec![badge_span.clone(), Span::styled(
+                    format!(" {}", chunk),
+                    Style::default().fg(color),
+                )]));
             }
         }
         lines

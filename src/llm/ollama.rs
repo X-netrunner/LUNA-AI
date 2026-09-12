@@ -127,6 +127,42 @@ struct FullMessage {
     tool_calls: Vec<ToolCall>,
 }
 
+/// Pull a usable answer out of a qwen3-style thinking block when `content`
+/// came back empty. Take the tail, drop meta-monologue sentence openers
+/// ("So I'll...", "I can answer..."), and cap length so a CoT dump isn't
+/// echoed back wholesale.
+fn thinking_as_answer(thinking: &str) -> String {
+    let collapsed: String = thinking
+        .split('\n')
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let collapsed = collapsed.trim();
+
+    // Drop leading filler sentences, keep the substantive tail.
+    let mut start = 0;
+    for sent in collapsed.split('.').collect::<Vec<_>>().iter() {
+        let s = sent.trim().to_lowercase();
+        let is_filler = s.starts_with("so i'll")
+            || s.starts_with("so i ")
+            || s.starts_with("i can answer")
+            || s.starts_with("i'll answer")
+            || s.starts_with("i should ")
+            || s.starts_with("okay")
+            || s.starts_with("let me")
+            || s.starts_with("the user")
+            || s.starts_with("i need to")
+            || s.starts_with("based on my");
+        if !is_filler {
+            break;
+        }
+        start += s.len() + 1;
+    }
+    let tail = &collapsed[start.min(collapsed.len())..];
+    crate::util::strip_emojis(crate::util::truncate(tail.trim(), 400)).trim().to_string()
+}
+
 // ── What our client returns ───────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -292,6 +328,16 @@ impl OllamaClient {
             }
         }
 
+        // A qwen3 thinking model can finish with empty content (answer stuck
+        // in the thinking block) — rescue it so the caller never retries.
+        if full_text.trim().is_empty() && !thinking_buf.is_empty() {
+            let rescued = thinking_as_answer(&thinking_buf);
+            if !rescued.is_empty() {
+                tracing::debug!("Rescued answer from thinking ({} chars)", rescued.chars().count());
+                full_text = rescued;
+            }
+        }
+
         Ok(OllamaResponse::Text {
             text: full_text,
             streamed: true,
@@ -384,7 +430,21 @@ impl OllamaClient {
                 }
             }
         }
-        let text = crate::util::strip_emojis(&parsed.message.content.unwrap_or_default());
+        let mut text = crate::util::strip_emojis(&parsed.message.content.unwrap_or_default());
+
+        // qwen3 thinking models sometimes return an empty `content` with the
+        // real answer stuck in `thinking` — rescue it instead of surfacing an
+        // empty reply and forcing a retry nudge.
+        if text.trim().is_empty() {
+            if let Some(think) = parsed.message.thinking.as_deref() {
+                let rescued = thinking_as_answer(think);
+                if !rescued.is_empty() {
+                    tracing::debug!("Rescued answer from thinking ({} chars)", rescued.chars().count());
+                    text = rescued;
+                }
+            }
+        }
+
         Ok(OllamaResponse::Text {
             text,
             streamed: false,
@@ -394,7 +454,6 @@ impl OllamaClient {
 
 impl OllamaClient {
     /// Embed one or more inputs via Ollama's /api/embed endpoint.
-    /// Used by semantic memory recall (RAG-lite).
     pub async fn embed(&self, model: &str, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
         #[derive(serde::Deserialize)]
         struct EmbedResp {
@@ -420,5 +479,30 @@ impl OllamaClient {
 
         let parsed: EmbedResp = resp.json().await.context("Bad embed response")?;
         Ok(parsed.embeddings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_as_answer_skips_filler_and_keeps_tail() {
+        let t = "The user asked why they are called the Big Three. \
+                 I should search the web. \
+                 So I'll use the web_search function with the query \"why is it called the big three\". \
+                 They're called the Big Three because Naruto, One Piece, and Bleach were \
+                 the three most popular shonen manga of their era.";
+        let a = thinking_as_answer(t);
+        assert!(a.contains("Big Three"), "got: {}", a);
+        assert!(!a.contains("I should"), "filler leaked: {}", a);
+        assert!(!a.contains("web_search function"), "meta leaked: {}", a);
+    }
+
+    #[test]
+    fn thinking_as_answer_returns_empty_for_empty() {
+        assert!(thinking_as_answer("").is_empty());
+        assert!(thinking_as_answer("Okay.").is_empty());
+        assert!(thinking_as_answer("   \n  ").is_empty());
     }
 }
