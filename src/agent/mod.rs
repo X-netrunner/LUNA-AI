@@ -213,6 +213,24 @@ pub fn build_system_prompt(config: &LunaConfig) -> String {
     format!("{}{}{}", config.agent.system_prompt, time_context, history_block)
 }
 
+/// Append the live clock context to any tier prompt (full/deep/fast) so the
+/// model never has to guess the current time.
+fn with_time_context(prompt: String) -> String {
+    let now = chrono::Local::now();
+    let hour = now.hour();
+    let time_context = format!(
+        "\n[Context] Current time: {} ({}). ",
+        now.format("%A, %b %e %Y %H:%M:%S %Z"),
+        match hour {
+            5..=11 => "morning",
+            12..=16 => "afternoon",
+            17..=21 => "evening",
+            _ => "night",
+        }
+    );
+    format!("{}{}", prompt, time_context)
+}
+
 /// Per-turn memory injection: top-k facts semantically similar to the
 /// query (RAG-lite), falling back to the full dump when embeddings are
 /// unavailable. Covers BOTH models — even simple fast-path queries now
@@ -317,14 +335,14 @@ pub async fn run_routed_turn(
     ) = match classify(input) {
         QueryComplexity::Simple => {
             if let Some(fr) = fast_react.as_ref() {
-                (fr, FAST_PROMPT.to_string(), true, false)
+                (fr, with_time_context(FAST_PROMPT.to_string()), true, false)
             } else {
                 (&react, system_prompt.clone(), false, false)
             }
         }
         QueryComplexity::Deep => {
             if let Some(dr) = deep_react.as_ref() {
-                (dr, DEEP_PROMPT.to_string(), false, true)
+                (dr, with_time_context(DEEP_PROMPT.to_string()), false, true)
             } else {
                 (&react, system_prompt.clone(), false, false)
             }
@@ -584,14 +602,14 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
             match classify(&input) {
                 QueryComplexity::Simple => {
                     if let Some(fr) = fast_react.as_ref() {
-                        (fr, FAST_PROMPT.to_string(), true, false)
+                        (fr, with_time_context(FAST_PROMPT.to_string()), true, false)
                     } else {
                         (&react, system_prompt.to_string(), false, false)
                     }
                 }
                 QueryComplexity::Deep => {
                     if let Some(dr) = deep_react.as_ref() {
-                        (dr, DEEP_PROMPT.to_string(), false, true)
+                        (dr, with_time_context(DEEP_PROMPT.to_string()), false, true)
                     } else {
                         (&react, system_prompt.to_string(), false, false)
                     }
@@ -758,14 +776,14 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                     ) = match classify(&input) {
                         QueryComplexity::Simple => {
                             if let Some(fr) = fast_react.as_ref() {
-                                (fr, FAST_PROMPT.to_string(), true, false)
+                                (fr, with_time_context(FAST_PROMPT.to_string()), true, false)
                             } else {
                                 (&react, system_prompt.to_string(), false, false)
                             }
                         }
                         QueryComplexity::Deep => {
                             if let Some(dr) = deep_react.as_ref() {
-                                (dr, DEEP_PROMPT.to_string(), false, true)
+                                (dr, with_time_context(DEEP_PROMPT.to_string()), false, true)
                             } else {
                                 (&react, system_prompt.to_string(), false, false)
                             }
@@ -879,14 +897,14 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                 ) = match classify(&input) {
                     QueryComplexity::Simple => {
                         if let Some(fr) = fast_react.as_ref() {
-                            (fr, FAST_PROMPT.to_string(), true, false)
+                            (fr, with_time_context(FAST_PROMPT.to_string()), true, false)
                         } else {
                             (&react, system_prompt.to_string(), false, false)
                         }
                     }
                     QueryComplexity::Deep => {
                         if let Some(dr) = deep_react.as_ref() {
-                            (dr, DEEP_PROMPT.to_string(), false, true)
+                            (dr, with_time_context(DEEP_PROMPT.to_string()), false, true)
                         } else {
                             (&react, system_prompt.to_string(), false, false)
                         }

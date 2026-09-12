@@ -68,6 +68,12 @@ impl<'a> ReactLoop<'a> {
 
             let response = self.client.chat(&context, tools_arg).await?;
 
+            tracing::debug!(
+                "model output {}: {}",
+                if self.native_tools { "(tools)" } else { "(text)" },
+                crate::util::truncate(&truncate_control(&text_of(&response)), 600)
+            );
+
             match response {
                 OllamaResponse::Text { text, streamed } => {
                     // ── Empty response — retry with nudge ─────────────────
@@ -91,7 +97,6 @@ impl<'a> ReactLoop<'a> {
                     if let Some(tool_call) = parse_freeform_tool_call(&text) {
                         let tool_name = tool_call.function.name.clone();
                         tracing::info!("Intercepted freeform tool: {}", tool_name);
-
                         let tool_result = match tools::execute(&tool_call, &self.config).await {
                             Ok(o) => {
                                 if self.tui() {
@@ -167,7 +172,7 @@ impl<'a> ReactLoop<'a> {
                         tracing::debug!(
                             "Tool '{}' result: {}",
                             tool_name,
-                            &crate::util::truncate(&tool_result, 400)
+                            &crate::util::truncate(&tool_result, 160)
                         );
 
                         turn_messages.push(Message::assistant(format!(
@@ -255,6 +260,27 @@ fn parse_freeform_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> 
     }
 
     None
+}
+
+/// Collapse embedded \n / \r / \t into spaces so tool-result dumps don't
+/// turn one log line into dozens of wrapped rows.
+fn truncate_control(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\n' | '\r' | '\t' => ' ',
+            c => c,
+        })
+        .collect()
+}
+
+fn text_of(response: &OllamaResponse) -> String {
+    match response {
+        OllamaResponse::Text { text, .. } => text.clone(),
+        OllamaResponse::ToolUse(calls) => {
+            let names: Vec<String> = calls.iter().map(|c| c.function.name.clone()).collect();
+            format!("[tools: {}]", names.join(", "))
+        }
+    }
 }
 
 /// Detect a standalone `ESCALATE` token in the response.

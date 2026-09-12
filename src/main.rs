@@ -21,6 +21,7 @@ mod util;
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::{LunaConfig, VoiceMode};
+use std::io;
 use tracing_subscriber::EnvFilter;
 
 // ── CLI flags ─────────────────────────────────────────────────────────────────
@@ -63,6 +64,14 @@ struct Args {
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
+/// Where the persistent session log lives: ~/.local/share/luna/session.log
+fn session_log_path() -> std::path::PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("luna")
+        .join("session.log")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -83,9 +92,15 @@ async fn main() -> Result<()> {
 
     // In TUI mode, route tracing into an in-memory buffer (shown in the debug
     // panel) instead of stderr so log lines don't overwrite the alternate screen.
+    // The same lines are also appended to a persistent session log file so a
+    // session can be reviewed after the fact.
     let tui_log = if args.tui {
         let log = crate::tui::log::LogBuffer::new(500);
-        let writer = crate::tui::log::BufferWriter::new(log.clone_handle(), 500);
+        let file = crate::tui::log::FileLog::new(session_log_path());
+        let writer = crate::tui::log::TeeWriter::new(
+            crate::tui::log::BufferWriter::new(log.clone_handle(), 500),
+            file,
+        );
         tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::new(filter))
             .with_target(false)
@@ -95,10 +110,16 @@ async fn main() -> Result<()> {
             .init();
         Some(log)
     } else {
+        let file = crate::tui::log::FileLog::new(session_log_path());
+        let writer = crate::tui::log::TeeWriter::new(
+            crate::tui::log::Shared::new(io::stderr()),
+            file,
+        );
         tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::new(filter))
             .with_target(false)
-            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
             .init();
         None
     };

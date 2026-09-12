@@ -210,7 +210,10 @@ impl<'a> DebugPanel<'a> {
             } else {
                 Color::DarkGray
             };
-            for chunk in wrap_text(log, width.saturating_sub(2).max(4)) {
+            // Defensive: collapse long tool-dump lines (HTML/CSS from
+            // fetch_page etc.) so one huge result can't flood the panel.
+            let compact: String = log.chars().take(220).collect();
+            for chunk in wrap_text(&compact, width.saturating_sub(2).max(4)) {
                 lines.push(Line::from(Span::styled(chunk, Style::default().fg(color))));
             }
         }

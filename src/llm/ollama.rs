@@ -270,11 +270,18 @@ impl OllamaClient {
                     // Log the accumulated thinking block — tracing in TUI mode
                     // routes it to the debug panel instead of raw stderr.
                     if !thinking_buf.is_empty() {
-                        let think = crate::util::truncate_marked(&thinking_buf, 800);
+                        let think = crate::util::truncate_marked(&thinking_buf, 160);
+                        let think_one_line = think
+                            .chars()
+                            .map(|c| match c {
+                                '\n' | '\r' | '\t' => ' ',
+                                c => c,
+                            })
+                            .collect::<String>();
                         if self.term_output {
-                            eprintln!("\n[think] {}", think);
+                            eprintln!("\n[think] {}", think_one_line);
                         } else {
-                            tracing::debug!("[think] {}", think);
+                            tracing::debug!("[think] {}", think_one_line);
                         }
                     }
                     if self.term_output {
