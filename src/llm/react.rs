@@ -39,6 +39,30 @@ impl<'a> ReactLoop<'a> {
         self.config.audio.input_mode == crate::config::InputMode::Tui
     }
 
+    /// When the ReAct loop exhausts or repeats, give the user something useful
+    /// from the last tool result instead of a bare "iteration limit" apology.
+    fn synthesize_answer(&self, turn_messages: &[Message]) -> String {
+        let last_tool = turn_messages
+            .iter()
+            .rev()
+            .find_map(|m| (m.role == "tool").then(|| m.content.clone()));
+        let Some(result) = last_tool else {
+            return "I hit my iteration limit.".to_string();
+        };
+        // Drop structural headers like "=== Search results ===" so the user
+        // sees the substance, not the tool's instrument panel.
+        let cleaned: String = result
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('='))
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "Here's what I found:\n\n{}",
+            crate::util::truncate(&truncate_control(&cleaned), 500)
+        )
+    }
+
     pub async fn run(
         &self,
         user_input: &str,
@@ -56,12 +80,16 @@ impl<'a> ReactLoop<'a> {
         let mut iteration = 0;
         let mut turn_messages: Vec<Message> = Vec::new();
         let mut empty_retries = 0;
+        // Tool calls already executed this turn (name + JSON args), tracked to
+        // break identical-repeat loops where a model calls the same tool with
+        // the same arguments forever instead of writing an answer.
+        let mut used_calls: Vec<String> = Vec::new();
 
         loop {
             iteration += 1;
             if iteration > self.max_iterations {
                 tracing::warn!("ReAct max iterations ({}) reached", self.max_iterations);
-                let fallback = "I hit my iteration limit.".to_string();
+                let fallback = self.synthesize_answer(&turn_messages);
                 memory.push(Message::assistant(&fallback));
                 return Ok((fallback, false));
             }
@@ -90,7 +118,7 @@ impl<'a> ReactLoop<'a> {
                             memory.push(Message::assistant(&fallback));
                             return Ok((fallback, false));
                         }
-                        tracing::warn!("Empty response, retrying ({}/2)...", empty_retries);
+                        tracing::debug!("Empty response, retrying ({}/2)...", empty_retries);
                         turn_messages.push(Message::user(
                             "Please respond or use a tool to complete the request.",
                         ));
@@ -102,6 +130,22 @@ impl<'a> ReactLoop<'a> {
                     if let Some(tool_call) = parse_freeform_tool_call(&text) {
                         let tool_name = tool_call.function.name.clone();
                         tracing::info!("Intercepted freeform tool: {}", tool_name);
+
+                        // Identical-repeat guard — same call twice in a turn is
+                        // a loop, not a second request.
+                        let sig =
+                            format!("{} {}", tool_name, tool_call.function.arguments);
+                        if used_calls.contains(&sig) {
+                            tracing::warn!(
+                                "Freeform tool '{}' repeated with identical args — breaking loop",
+                                tool_name
+                            );
+                            let fallback = self.synthesize_answer(&turn_messages);
+                            memory.push(Message::assistant(&fallback));
+                            return Ok((fallback, false));
+                        }
+                        used_calls.push(sig);
+
                         let tool_result = match tools::execute(&tool_call, &self.config).await {
                             Ok(o) => {
                                 if self.tui() {
@@ -148,6 +192,21 @@ impl<'a> ReactLoop<'a> {
                     for tool_call in &tool_calls {
                         let tool_name = tool_call.function.name.clone();
                         tracing::info!("Tool call: {}", tool_name);
+
+                        // Identical-repeat guard — the model called this exact
+                        // tool+args before; answer from the results instead.
+                        let sig =
+                            format!("{} {}", tool_name, tool_call.function.arguments);
+                        if used_calls.contains(&sig) {
+                            tracing::warn!(
+                                "Tool '{}' repeated with identical args — breaking loop",
+                                tool_name
+                            );
+                            let fallback = self.synthesize_answer(&turn_messages);
+                            memory.push(Message::assistant(&fallback));
+                            return Ok((fallback, false));
+                        }
+                        used_calls.push(sig);
 
                         let tool_result = match tools::execute(tool_call, &self.config).await {
                             Ok(o) => {

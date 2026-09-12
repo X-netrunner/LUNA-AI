@@ -128,9 +128,11 @@ struct FullMessage {
 }
 
 /// Pull a usable answer out of a qwen3-style thinking block when `content`
-/// came back empty. Take the tail, drop meta-monologue sentence openers
-/// ("So I'll...", "I can answer..."), and cap length so a CoT dump isn't
-/// echoed back wholesale.
+/// came back empty. Scans from the END and keeps the composed final answer,
+/// discarding the front-loaded deliberation about HOW to answer. Returns ""
+/// when the thinking is nothing but meta-monologue, so the caller falls back
+/// to a retry nudge instead of echoing the model's instructions back at the
+/// user.
 fn thinking_as_answer(thinking: &str) -> String {
     let collapsed: String = thinking
         .split('\n')
@@ -138,29 +140,108 @@ fn thinking_as_answer(thinking: &str) -> String {
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    let collapsed = collapsed.trim();
+    if collapsed.trim().is_empty() {
+        return String::new();
+    }
 
-    // Drop leading filler sentences, keep the substantive tail.
-    let mut start = 0;
-    for sent in collapsed.split('.').collect::<Vec<_>>().iter() {
-        let s = sent.trim().to_lowercase();
-        let is_filler = s.starts_with("so i'll")
-            || s.starts_with("so i ")
-            || s.starts_with("i can answer")
-            || s.starts_with("i'll answer")
-            || s.starts_with("i should ")
-            || s.starts_with("okay")
-            || s.starts_with("let me")
-            || s.starts_with("the user")
-            || s.starts_with("i need to")
-            || s.starts_with("based on my");
-        if !is_filler {
+    let sentences: Vec<&str> = collapsed
+        .split('.')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if sentences.is_empty() {
+        return String::new();
+    }
+
+    // Walk backwards, keeping up to 3 trailing non-meta sentences (the real
+    // answer), and stop as soon as deliberation reappears in the middle.
+    let mut kept: Vec<&str> = Vec::new();
+    for s in sentences.iter().rev() {
+        if is_meta_sentence(s) {
+            if kept.is_empty() {
+                continue;
+            }
             break;
         }
-        start += s.len() + 1;
+        kept.push(s);
+        if kept.len() >= 3 {
+            break;
+        }
     }
-    let tail = &collapsed[start.min(collapsed.len())..];
-    crate::util::strip_emojis(crate::util::truncate(tail.trim(), 400)).trim().to_string()
+    if kept.is_empty() {
+        return String::new();
+    }
+    kept.reverse();
+
+    let mut answer = crate::util::strip_emojis(&kept.join(". ")).trim().to_string();
+    answer = answer
+        .trim_end_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_string();
+
+    if answer.chars().count() < 8 || answer.chars().count() > 300 {
+        return String::new();
+    }
+    answer
+}
+
+/// CoT / meta-monologue tell: the model narrating what it should do or
+/// quoting its own instructions, rather than talking to the user. Sentences
+/// matching any marker are treated as deliberation, never as the answer.
+fn is_meta_sentence(sentence: &str) -> bool {
+    let t = sentence.trim().to_lowercase();
+    const META: &[&str] = &[
+        // Instruction-recitation
+        "the response should be",
+        "the reply should be",
+        "the answer should be",
+        "should be 1-2",
+        "should be 2-3",
+        "1-2 sentenc",
+        "2-3 sentenc",
+        "sentences max",
+        // Self-narration about the user / payload
+        "i remember",
+        "remember that",
+        "the user is",
+        "the user asked",
+        "the user wants",
+        "the user isn't",
+        "i should",
+        "i need to",
+        "i'll answer",
+        "i'll respond",
+        "i'll search",
+        "i'll look",
+        "i'll use",
+        "i'm going to",
+        "i am going to",
+        "so i'll",
+        "so i should",
+        "so let me",
+        "let me",
+        "but first",
+        // Control / formatting deliberation
+        "check if",
+        "make sure",
+        "no tool",
+        "no need",
+        "don't add",
+        "do not add",
+        "don't introduce",
+        "introduce myself",
+        "my introduction",
+        "beyond the",
+        "the system prompt",
+        "the instruction",
+        "given the",
+        "based on my",
+        "just a short",
+        "just a quick",
+        "as luna",
+        "in my role",
+        "as the assistant",
+    ];
+    META.iter().any(|m| t.contains(m))
 }
 
 // ── What our client returns ───────────────────────────────────────────────────
@@ -504,5 +585,32 @@ mod tests {
         assert!(thinking_as_answer("").is_empty());
         assert!(thinking_as_answer("Okay.").is_empty());
         assert!(thinking_as_answer("   \n  ").is_empty());
+    }
+
+    #[test]
+    fn thinking_as_answer_drops_instruction_monologue() {
+        let t = ". The response should be 1-2 sentences max. First, I remember \
+                 that Luna's intro is strictly \"I'm Luna, built by Netrunner\". \
+                 Don't add more. The user is greeting me, so I should acknowledge \
+                 it briefly. Check if there's any need for tools here. The user \
+                 isn't asking for a command or action, just a hello. So no tool \
+                 calls needed. Just a short reply. Make sure not to introduce \
+                 myself beyond the requirements";
+        assert!(
+            thinking_as_answer(t).is_empty(),
+            "pure meta-monologue leaked through: {:?}",
+            thinking_as_answer(t)
+        );
+    }
+
+    #[test]
+    fn thinking_as_answer_skips_leading_deliberation_keeps_final_answer() {
+        let t = "I should check the weather for the user's city. Let me use the \
+                 weather tool. So I'll fetch current conditions. The weather in \
+                 Bengaluru is 28 C, partly cloudy, with a 20% chance of rain";
+        let a = thinking_as_answer(t);
+        assert!(a.contains("Bengaluru is 28"), "answer lost: {:?}", a);
+        assert!(!a.contains("I should"), "deliberation leaked: {}", a);
+        assert!(!a.contains("tool"), "tool narration leaked: {}", a);
     }
 }

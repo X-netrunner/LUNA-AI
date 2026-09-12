@@ -12,6 +12,27 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 // ── Text wrapping helper ──────────────────────────────────────────────────────
+/// Pick a content color that makes the interesting parts of a debug line pop:
+/// research sources green, tool calls magenta, thinking blocks yellow, model
+/// output cyan. Everything else follows the level color (from the badge).
+fn debug_content_color(log: &str, level: Color) -> Color {
+    let l = log.to_lowercase();
+    if l.contains("sources:") {
+        Color::Green
+    } else if l.contains("tool call")
+        || l.contains("executing tool")
+        || l.contains("intercepted freeform")
+    {
+        Color::Magenta
+    } else if l.contains("[think]") || l.contains("rescued answer") {
+        Color::Yellow
+    } else if l.contains("model output") {
+        Color::Cyan
+    } else {
+        level
+    }
+}
+
 /// Wrap `text` to `width` columns at word boundaries, preserving newlines.
 /// Used so long assistant replies render on multiple lines instead of one.
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
@@ -217,12 +238,13 @@ impl<'a> DebugPanel<'a> {
             // Defensive: collapse long tool-dump lines (HTML/CSS from
             // fetch_page etc.) so one huge result can't flood the panel.
             let compact: String = log.chars().take(215).collect();
+            let content_color = debug_content_color(&compact, color);
             let badge_span =
                 Span::styled(badge, Style::default().fg(color).add_modifier(Modifier::BOLD));
             for chunk in wrap_text(&compact, width.saturating_sub(4).max(4)) {
                 lines.push(Line::from(vec![badge_span.clone(), Span::styled(
                     format!(" {}", chunk),
-                    Style::default().fg(color),
+                    Style::default().fg(content_color),
                 )]));
             }
         }
