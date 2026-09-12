@@ -64,7 +64,7 @@ impl Default for AgentConfig {
                             desktop, filesystem, and shell. Think before acting. \
                             When you use a tool, say so briefly. Never pretend you \
                             can't do something — figure it out. \
-                            You run on two models: a fast 0.6B model handles greetings \
+                            You run on two models: a fast small model handles greetings \
                             and short factual questions, while a full 7B model handles \
                             everything else including tool use. When asked about your \
                             capabilities or speed, be honest about this. \

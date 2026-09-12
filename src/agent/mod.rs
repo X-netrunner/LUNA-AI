@@ -264,8 +264,8 @@ const FAST_PROMPT: &str = "You are Luna. You were built by Netrunner. You run lo
     on Arch Linux. You are direct, efficient, and have a dry wit. Be brief — answer in \
     1-2 sentences max. Never introduce yourself beyond 'I'm Luna, built by Netrunner'. \
     Never say you were made by a company. Never say you don't have a physical form. \
-    If you don't know something specific, say 'I don't know' instead of guessing. \
-    If the request needs tools, files, commands, web data, or actions on this machine, \
+    If you don't know something specific, use web_search to look it up rather than \
+    guessing. If the request needs files, commands, or actions on this machine, \
     reply with exactly: ESCALATE";
 
 const DEEP_PROMPT: &str = "You are Luna. You were built by Netrunner. You run locally \
@@ -315,15 +315,28 @@ pub async fn run_routed_turn(
     let react = ReactLoop::new(
         &client,
         config.agent.max_react_iterations,
-        config.agent.native_tools,
+        if config.agent.native_tools {
+            crate::tools::tool_definitions()
+        } else {
+            Vec::new()
+        },
         config,
     );
-    let fast_react = fast_client
-        .as_ref()
-        .map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
-    let deep_react = deep_client
-        .as_ref()
-        .map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
+    let fast_react = fast_client.as_ref().map(|c| {
+        ReactLoop::new(c, config.agent.max_react_iterations, crate::tools::fast_tool_definitions(), config)
+    });
+    let deep_react = deep_client.as_ref().map(|c| {
+        ReactLoop::new(
+            c,
+            config.agent.max_react_iterations,
+            if config.agent.native_tools {
+                crate::tools::tool_definitions()
+            } else {
+                Vec::new()
+            },
+            config,
+        )
+    });
 
     let system_prompt = build_system_prompt(config);
 
@@ -545,10 +558,30 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
     let fast_client = build_fast_client(config);
     let deep_client = build_deep_client(config);
     let mut memory = Memory::new(config.memory.context_window, &config.memory.history_path)?;
-    let react = ReactLoop::new(&client, config.agent.max_react_iterations, config.agent.native_tools, config);
+    let react = ReactLoop::new(
+        &client,
+        config.agent.max_react_iterations,
+        if config.agent.native_tools {
+            crate::tools::tool_definitions()
+        } else {
+            Vec::new()
+        },
+        config,
+    );
     tracing::debug!("fast_client is_some: {}", fast_client.is_some());
-    let fast_react = fast_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
-    let deep_react = deep_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
+    let fast_react = fast_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, crate::tools::fast_tool_definitions(), config));
+    let deep_react = deep_client.as_ref().map(|c| {
+        ReactLoop::new(
+            c,
+            config.agent.max_react_iterations,
+            if config.agent.native_tools {
+                crate::tools::tool_definitions()
+            } else {
+                Vec::new()
+            },
+            config,
+        )
+    });
     let system_prompt = build_system_prompt(config);
 
     println!("  Luna — text mode");
@@ -676,10 +709,30 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
     let client = build_client(config);
     let fast_client = build_fast_client(config);
     let mut memory = Memory::new(config.memory.context_window, &config.memory.history_path)?;
-    let react = ReactLoop::new(&client, config.agent.max_react_iterations, config.agent.native_tools, config);
-    let fast_react = fast_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
+    let react = ReactLoop::new(
+        &client,
+        config.agent.max_react_iterations,
+        if config.agent.native_tools {
+            crate::tools::tool_definitions()
+        } else {
+            Vec::new()
+        },
+        config,
+    );
+    let fast_react = fast_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, crate::tools::fast_tool_definitions(), config));
     let deep_client = build_deep_client(config);
-    let deep_react = deep_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, false, config));
+    let deep_react = deep_client.as_ref().map(|c| {
+        ReactLoop::new(
+            c,
+            config.agent.max_react_iterations,
+            if config.agent.native_tools {
+                crate::tools::tool_definitions()
+            } else {
+                Vec::new()
+            },
+            config,
+        )
+    });
     let stt = build_stt(config);
     let system_prompt = build_system_prompt(config);
 

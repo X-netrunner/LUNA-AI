@@ -14,7 +14,10 @@ use std::io::Write;
 pub struct ReactLoop<'a> {
     client: &'a OllamaClient,
     max_iterations: u8,
-    native_tools: bool,
+    /// Tools exposed to the model this loop drives (native Ollama tool use).
+    /// Empty = no tools: the loop still supports freeform `name {json}` text
+    /// calls, but no native function-calling is enabled.
+    tools: Vec<crate::llm::ollama::ToolDef>,
     /// Loaded once at startup — tools must NOT reload config per call
     /// (that would redo keyring lookups and log noise every turn).
     config: crate::config::LunaConfig,
@@ -24,10 +27,10 @@ impl<'a> ReactLoop<'a> {
     pub fn new(
         client: &'a OllamaClient,
         max_iterations: u8,
-        native_tools: bool,
+        tools: Vec<crate::llm::ollama::ToolDef>,
         config: &crate::config::LunaConfig,
     ) -> Self {
-        Self { client, max_iterations, native_tools, config: config.clone() }
+        Self { client, max_iterations, tools, config: config.clone() }
     }
 
     /// True when the TUI is rendering — tool progress must go through
@@ -44,8 +47,10 @@ impl<'a> ReactLoop<'a> {
     ) -> Result<(String, bool)> {
         memory.push(Message::user(user_input));
 
-        let tool_defs = tools::tool_definitions();
-        let tools_arg = if self.native_tools { Some(tool_defs.as_slice()) } else { None
+        let tools_arg = if self.tools.is_empty() {
+            None
+        } else {
+            Some(self.tools.as_slice())
         };
 
         let mut iteration = 0;
@@ -70,7 +75,7 @@ impl<'a> ReactLoop<'a> {
 
             tracing::debug!(
                 "model output {}: {}",
-                if self.native_tools { "(tools)" } else { "(text)" },
+                if !self.tools.is_empty() { "(tools)" } else { "(text)" },
                 crate::util::truncate(&truncate_control(&text_of(&response)), 600)
             );
 
@@ -283,14 +288,44 @@ fn text_of(response: &OllamaResponse) -> String {
     }
 }
 
-/// Detect a standalone `ESCALATE` token in the response.
-/// The 0.6b fast model sometimes appends "ESCALATE" after a greeting
-/// (e.g. "Hi there, built by Netrunner! ESCALATE") — we still want to
-/// escalate in that case. Case-sensitive so normal prose using the word
-/// "escalate" isn't treated as an escalation request.
+/// Detect a standalone `ESCALATE` token in the response, or a general
+/// refusal/uncertainty ("I don't know", "can't answer", …). The latter is the
+/// general safety net: ANY time the fast model confesses it can't answer, the
+/// turn re-runs on the full model — so we never need to predict phrasing.
 pub(crate) fn is_escalation_response(text: &str) -> bool {
-    text.split(|c: char| !c.is_ascii_alphanumeric())
+    if text
+        .split(|c: char| !c.is_ascii_alphanumeric())
         .any(|w| w == "ESCALATE")
+    {
+        return true;
+    }
+
+    let t = text.to_lowercase();
+    let phrases: &[&str] = &[
+        "i don't know",
+        "i dont know",
+        "i do not know",
+        "i'm not sure",
+        "i am not sure",
+        "im not sure",
+        "i have no idea",
+        "i can't answer",
+        "i cannot answer",
+        "cannot answer",
+        "can't answer that",
+        "unable to answer",
+        "i am unable to",
+        "no information",
+        "i can't help",
+        "i cannot help",
+    ];
+
+    // A refusal is inherently short; only treat it as escalation when the
+    // whole reply is the refusal (short) or it *starts* with the phrase.
+    let begins = phrases.iter().any(|p| t.trim_start().starts_with(p));
+    let contained_in_short_reply =
+        text.trim().chars().count() < 200 && phrases.iter().any(|p| t.contains(p));
+    begins || contained_in_short_reply
 }
 
 /// Try to read `tool_name {json}` out of the middle of a response.
@@ -356,6 +391,36 @@ mod tests {
         assert!(!is_escalation_response("I'll escalate this to the team."));
         assert!(!is_escalation_response(""));
         assert!(!is_escalation_response("ESCALATED"));
+    }
+
+    #[test]
+    fn detects_refusal_and_uncertainty() {
+        // The general safety net: a fast model that confesses ignorance
+        // must escalate even without the literal ESCALATE token.
+        assert!(is_escalation_response("I don't know about *Bleach the Anime*."));
+        assert!(is_escalation_response("I don't know"));
+        assert!(is_escalation_response("I'm not sure how to answer that."));
+        assert!(is_escalation_response("I cannot answer this question."));
+        assert!(is_escalation_response(
+            "I have no idea about that. Ask me something else."
+        ));
+    }
+
+    #[test]
+    fn does_not_escalate_on_friendly_or_resolving_replies() {
+        // Friendly replies with NO refusal phrase, and long substantive
+        // answers that merely contain "don't know" mid-sentence, must NOT
+        // escalate. (A short reply that mentions ignorance DOES escalate —
+        // over-escalation only costs a full-model re-run, which is safe.)
+        assert!(!is_escalation_response(
+            "I'm Luna, built by Netrunner. Let me know if there's anything I can help with!"
+        ));
+        let long_answer = "Bleach is a long-running anime adapted from Tite Kubo's manga; \
+            it aired from 2004 to 2012, following Ichigo Kurosaki. The Thousand-Year Blood War \
+            arc returned in 2022. It is one of the 'big three' shonen series alongside \
+            One Piece and Naruto. I don't know your dog's name though.";
+        assert!(long_answer.chars().count() > 200);
+        assert!(!is_escalation_response(long_answer));
     }
 
     #[test]

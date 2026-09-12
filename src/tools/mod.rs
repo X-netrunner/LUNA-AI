@@ -575,6 +575,38 @@ pub fn tool_definitions() -> Vec<ToolDef> {
     ]
 }
 
+/// Safe subset of tools exposed to the fast tier (qwen3:4b etc.).
+///
+/// The fast model must be able to RESOLVE "I don't know" cases itself —
+/// especially web lookups — without being handed dangerous primitives like
+/// `run_shell` or `write_file`. Anything here should be read-only or
+/// non-destructive.
+pub fn fast_tool_definitions() -> Vec<ToolDef> {
+    let safe: &[&str] = &[
+        "web_search",
+        "fetch_page",
+        "read_file",
+        "find_file",
+        "system_info",
+        "process_stats",
+        "clipboard",
+        "media_info",
+        "remember",
+        "forget",
+        "list_memories",
+        "memory_report",
+        "notify",
+        "set_reminder",
+        "list_reminders",
+        "cancel_reminder",
+        "dns_lookup",
+    ];
+    tool_definitions()
+        .into_iter()
+        .filter(|t| safe.contains(&t.function.name.as_str()))
+        .collect()
+}
+
 pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> Result<String> {
     let name = &tool_call.function.name;
     let args = &tool_call.function.arguments;
