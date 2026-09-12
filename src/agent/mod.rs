@@ -66,11 +66,14 @@ fn build_fast_client(config: &LunaConfig) -> Option<OllamaClient> {
             &config.llm.base_url,
             model,
             config.llm.temperature,
-            512, // smaller token budget — fast model is for short answers
+            // qwen3 emits a thinking block even with thinking off (when tools
+            // are present) — a small budget like 512 lets it burn the whole
+            // budget on thinking and return empty content. Give it room to
+            // chew and still emit the real answer.
+            config.llm.max_tokens.max(4096),
         )
-        // The fast tier is for quick answers — thinking ON makes qwen3 models
-        // return empty `content` (answer sits in `thinking`) and crawl. Brief
-        // replies don't need a chain of thought.
+        // The fast tier is for quick answers — but thinking must stay OFF so
+        // brief replies get generated as real content after the reasoning.
         .enable_thinking(false)
         .debug(config.logging.level == "debug")
         .term_output(!tui_quiet(config)),
@@ -260,18 +263,22 @@ async fn memory_block_for(input: &str, config: &LunaConfig, k: usize) -> String 
     }
 }
 
-/// Compact prompt for the fast model. The 0.6b model is too small to follow
-/// the full ruleset and echoes a long system prompt back as its reply — so it
-/// gets a distilled version instead: no tools, no rules, just brevity.
-const FAST_PROMPT: &str = "You are Luna. You were built by Netrunner. You run locally \
-    on Arch Linux. You are direct, efficient, and have a dry wit. Be brief — answer in \
-    1-2 sentences max. Never introduce yourself beyond 'I'm Luna, built by Netrunner'. \
-    Never say you were made by a company. Never say you don't have a physical form. \
-    If you don't know something specific, use web_search to look it up rather than \
-    guessing. If the request needs files, commands, or actions on this machine, \
-    reply with exactly: ESCALATE";
+/// Compact prompt for the fast model. Greetings land here, so the intro must
+/// be baked in: Netrunner (Srijan Satya Bandaru) is Luna's one and only creator.
+const FAST_PROMPT: &str = "You are Luna, a natural, friendly AI assistant. \
+    Your one and only creator is Netrunner (Srijan Satya Bandaru). No company, \
+    group, or person besides Netrunner made you — you have no other creator. \
+    You run locally on Arch Linux. When the user greets you, reply warmly in \
+    one friendly line, for example: \"Hello! I'm Luna, your AI assistant, \
+    built by Netrunner. How can I help?\" Once you've introduced yourself, \
+    never re-introduce yourself unless asked. You are direct, efficient, and \
+    have a dry wit. If you don't know something specific, use web_search to \
+    look it up rather than guessing. If the request needs files, commands, or \
+    actions on this machine, reply with exactly: ESCALATE";
 
-const DEEP_PROMPT: &str = "You are Luna. You were built by Netrunner. You run locally \
+const DEEP_PROMPT: &str = "You are Luna. Your one and only creator is Netrunner \
+    (Srijan Satya Bandaru) — no company, group, or person besides Netrunner made \
+    you, and you have no other creator. You run locally \
     on Arch Linux. You are a deep reasoning model — think step by step, show your work, \
     and provide thorough, accurate answers for complex tasks like code generation, \
     system design, debugging, and multi-step analysis. \

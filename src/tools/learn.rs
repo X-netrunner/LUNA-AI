@@ -25,9 +25,10 @@ pub async fn learn(
     output.push_str(&search_result);
     output.push_str("\n\n");
 
-    // Step 2: if the search gave us a source URL, fetch the full page
-    let url = extract_url(&search_result)
-        .or_else(|| extract_first_link(&search_result));
+    // Step 2: if the search gave us a source URL, fetch the full page — but
+    // skip junk hosts (social feeds, dictionary definitions) whose scrapes
+    // are pure noise, e.g. Instagram returns a login/caption dump.
+    let url = pick_fetch_url(&search_result);
 
     if let Some(url) = url {
         output.push_str(&format!("=== Fetched page: {} ===\n", url));
@@ -43,6 +44,44 @@ pub async fn learn(
     }
 
     Ok(output)
+}
+
+/// Pick the page to fetch: prefer an explicit `Source:` line, else the first
+/// web-result link whose host isn't a social feed or dictionary.
+fn pick_fetch_url(text: &str) -> Option<String> {
+    if let Some(url) = extract_url(text) {
+        if !is_junk_fetch(&url) {
+            return Some(url);
+        }
+    }
+    text.lines()
+        .filter(|l| l.trim_start().starts_with("- "))
+        .find_map(|l| {
+            let start = l.rfind('(')?;
+            let end = l.rfind(')')?;
+            let url = &l[start + 1..end];
+            if url.starts_with("http") && !is_junk_fetch(url) {
+                Some(url.to_string())
+            } else {
+                None
+            }
+        })
+}
+
+fn is_junk_fetch(url: &str) -> bool {
+    const BAD: &[&str] = &[
+        "instagram.com",
+        "facebook.com",
+        "tiktok.com",
+        "pinterest.",
+        "twitter.com",
+        "x.com/",
+        "youtube.com",
+        "dictionary.cambridge.org",
+        "merriam-webster.com",
+        "wiktionary.org",
+    ];
+    BAD.iter().any(|b| url.contains(b))
 }
 
 /// Fetch a page via Firecrawl keyless — returns clean markdown
@@ -86,20 +125,4 @@ fn extract_url(text: &str) -> Option<String> {
     text.lines()
         .find(|l| l.starts_with("Source:"))
         .map(|l| l.trim_start_matches("Source:").trim().to_string())
-}
-
-/// Extract first URL from search results line like "- Title (https://...)"
-fn extract_first_link(text: &str) -> Option<String> {
-    text.lines()
-        .find(|l| l.starts_with("- "))
-        .and_then(|l| {
-            let start = l.rfind('(')?;
-            let end = l.rfind(')')?;
-            let url = &l[start + 1..end];
-            if url.starts_with("http") {
-                Some(url.to_string())
-            } else {
-                None
-            }
-        })
 }

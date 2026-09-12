@@ -206,6 +206,9 @@ fn is_meta_sentence(sentence: &str) -> bool {
         "the user asked",
         "the user wants",
         "the user isn't",
+        "the user said",
+        "wait,",
+        "but wait",
         "i should",
         "i need to",
         "i'll answer",
@@ -220,6 +223,10 @@ fn is_meta_sentence(sentence: &str) -> bool {
         "so let me",
         "let me",
         "but first",
+        "i think the",
+        "i think it",
+        "i guess",
+        "let's",
         // Control / formatting deliberation
         "check if",
         "make sure",
@@ -240,6 +247,16 @@ fn is_meta_sentence(sentence: &str) -> bool {
         "as luna",
         "in my role",
         "as the assistant",
+        // Drafting the reply ("mention the price, note if it's international")
+        "mention",
+        "i should mention",
+        "also mention",
+        "note that",
+        "maybe the",
+        "reply with",
+        "respond with",
+        "the price on",
+        "so the best",
     ];
     META.iter().any(|m| t.contains(m))
 }
@@ -322,7 +339,7 @@ impl OllamaClient {
             options: ChatOptions {
                 temperature: self.temperature,
                 num_predict: self.max_tokens,
-                num_ctx: 4096, // Ensure enough context for long prompts
+                num_ctx: 8192, // Ensure enough context for long prompts
                 think: (!self.enable_thinking).then_some(false),
             },
             tools: None,
@@ -438,7 +455,7 @@ impl OllamaClient {
             options: ChatOptions {
                 temperature: self.temperature,
                 num_predict: self.max_tokens,
-                num_ctx: 4096, // Ensure enough context for long prompts + tools
+                num_ctx: 8192, // Ensure enough context for long prompts + tools
                 think: (!self.enable_thinking).then_some(false),
             },
             tools,
@@ -612,5 +629,18 @@ mod tests {
         assert!(a.contains("Bengaluru is 28"), "answer lost: {:?}", a);
         assert!(!a.contains("I should"), "deliberation leaked: {}", a);
         assert!(!a.contains("tool"), "tool narration leaked: {}", a);
+    }
+
+    #[test]
+    fn thinking_as_answer_rejects_drafting_monologue() {
+        let t = "Mention the price on Amazon India, the features, and maybe the \
+                 AliExpress option as a cheaper alternative but note that it's \
+                 international. Wait, the user said \"in India\", so the best local \
+                 option is Amazon India";
+        assert!(
+            thinking_as_answer(t).is_empty(),
+            "drafting monologue leaked through: {:?}",
+            thinking_as_answer(t)
+        );
     }
 }

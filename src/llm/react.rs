@@ -49,17 +49,38 @@ impl<'a> ReactLoop<'a> {
         let Some(result) = last_tool else {
             return "I hit my iteration limit.".to_string();
         };
-        // Drop structural headers like "=== Search results ===" so the user
-        // sees the substance, not the tool's instrument panel.
+        // Drop structural headers ("=== Search results ===") and junk lines that
+        // leak from scraped pages (Instagram captions, storefront signs,
+        // dictionary rows) so the user sees substance, not noise.
         let cleaned: String = result
             .lines()
-            .filter(|l| !l.trim_start().starts_with('='))
+            .filter(|l| {
+                let t = l.trim();
+                let low = t.to_lowercase();
+                !t.is_empty()
+                    && !t.trim_start().starts_with('=')
+                    && !low.contains("instagram")
+                    && !low.contains("may be an image of")
+                    && !low.contains("liked by")
+                    && !low.contains("photos and videos")
+                    && !low.contains("get the app")
+                    && !low.contains("shop now")
+                    && !low.contains("video by")
+                    && !low.contains("sign in")
+                    && !low.contains("cookie")
+            })
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
             .join(" ");
+        // If the noise filter ate everything, fall back to the raw result.
+        let cleaned = if cleaned.trim().chars().count() < 20 {
+            truncate_control(&result)
+        } else {
+            cleaned
+        };
         format!(
             "Here's what I found:\n\n{}",
-            crate::util::truncate(&truncate_control(&cleaned), 500)
+            crate::util::truncate(&cleaned, 500)
         )
     }
 
@@ -109,8 +130,18 @@ impl<'a> ReactLoop<'a> {
 
             match response {
                 OllamaResponse::Text { text, streamed } => {
-                    // ── Empty response — retry with nudge ─────────────────
+                    // ── Empty response ──────────────────────────────────────
                     if text.trim().is_empty() {
+                        // The model came back mid-deliberation (empty content).
+                        // If a tool already returned real facts this turn, reply
+                        // from those directly — faster AND more accurate than a
+                        // retry nudge.
+                        if turn_messages.iter().any(|m| m.role == "tool") {
+                            tracing::debug!("Empty content after tool result — synthesizing answer");
+                            let fallback = self.synthesize_answer(&turn_messages);
+                            memory.push(Message::assistant(&fallback));
+                            return Ok((fallback, false));
+                        }
                         empty_retries += 1;
                         if empty_retries >= 2 {
                             // Give up after 2 empty retries
