@@ -26,7 +26,7 @@ model = "qwen2.5:7b-instruct-q4_K_M"
 temperature = 0.7
 max_tokens = 2048
 enable_thinking = true
-fast_model = "qwen3:4b"      # Small fast model for greetings & short factual questions — gets a SAFE web-search tool subset so it can look things up instead of saying "I don't know"
+fast_model = "qwen2.5:3b"   # Non-reasoning small model — instant replies, no hidden thinking block
 deep_model = "qwen2.5:7b-instruct-q4_K_M"   # Large model for code, reasoning, analysis (fits fully in 6GB VRAM)
                                  # Remove or comment out to disable the two-model split
 embedding_model = "nomic-embed-text"  # Semantic memory recall (RAG-lite).
@@ -128,6 +128,7 @@ input_mode = "wake_word"    # off | wake_word | both
 wake_word = "hello luna"
 wake_aliases = ["luna", "hey luna", "hello luna", "hay luna"]
 vad_silence_ms = 800
+voice_mode_idle_mins = 5    # "luna voice mode" auto-ends after this many min of silence (0 = never)
 sample_rate = 16000
 conversation_window_secs = 15   # TUI: keep listening without "luna" for N sec after a voice reply (0 = off)
 

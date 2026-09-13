@@ -66,14 +66,12 @@ fn build_fast_client(config: &LunaConfig) -> Option<OllamaClient> {
             &config.llm.base_url,
             model,
             config.llm.temperature,
-            // qwen3 emits a thinking block even with thinking off (when tools
-            // are present) — a small budget like 512 lets it burn the whole
-            // budget on thinking and return empty content. Give it room to
-            // chew and still emit the real answer.
-            config.llm.max_tokens.max(4096),
+            // Fast tier answers are short — cap the budget so a runaway
+            // generation never stalls the reply for tens of seconds.
+            config.llm.max_tokens.clamp(256, 1024),
         )
-        // The fast tier is for quick answers — but thinking must stay OFF so
-        // brief replies get generated as real content after the reasoning.
+        // The fast tier is for quick answers — thinking must stay OFF so
+        // brief replies are generated as real content immediately.
         .enable_thinking(false)
         .debug(config.logging.level == "debug")
         .term_output(!tui_quiet(config)),
@@ -711,7 +709,193 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
     Ok(())
 }
 
+// ── Hands-free (conversation window / voice mode) ─────────────────────────────
+
+/// An active hands-free listening window — either the follow-up conversation
+/// window (set after a wake-word session ends) or explicit "voice mode"
+/// (toggled by phrase, auto-ending after inactivity).
+struct Handsfree {
+    /// true = explicit "voice mode" (indefinite until exit phrase / idle);
+    /// false = conversation window that expires at `ending_at`.
+    voice: bool,
+    ending_at: Option<Instant>,
+    last_activity: Instant,
+    /// Held only for its Drop side-effect — dropping it (when handsfree is
+    /// cleared) shuts the listener task down.
+    #[allow(dead_code)]
+    tx: tokio::sync::mpsc::Sender<String>,
+    rx: tokio::sync::mpsc::Receiver<String>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum HandsfreeEnd {
+    Explicit,
+    Idle,
+    Timeout,
+}
+
+/// Spawn a background listener that streams every transcribed utterance.
+/// Returns its channel pair — dropping the sender shuts the task down.
+fn start_handsfree_listener(
+    config: &LunaConfig,
+    stt: &crate::stt::whisper::WhisperStt,
+) -> (
+    tokio::sync::mpsc::Sender<String>,
+    tokio::sync::mpsc::Receiver<String>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(4);
+    let tx_for_task = tx.clone();
+    let stt = stt.clone();
+    let sample_rate = config.audio.sample_rate;
+    let silence_ms = config.audio.vad_silence_ms;
+    tokio::spawn(async move {
+        loop {
+            match crate::audio::capture::listen_continuous(sample_rate, silence_ms, &stt).await {
+                Ok(text) if !text.trim().is_empty() => {
+                    if tx_for_task.send(text).await.is_err() {
+                        break; // main loop dropped the channel
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!("Hands-free listener error: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+    });
+    (tx, rx)
+}
+
+/// A wake-stripped command that starts hands-free voice mode. Exit phrases
+/// ("voice mode down/off") are rejected so a "turn it off" utterance can't
+/// bounce straight back into a new voice-mode session via the wake path.
+fn wake_toggles_voice_mode(inline: &str) -> bool {
+    voice_mode_enter_match(inline) && !voice_mode_exit_match(inline)
+}
+
+/// Does a wake-stripped command request hands-free voice mode?
+/// e.g. "luna voice mode", "luna voice activation", "luna hands free".
+fn voice_mode_enter_match(s: &str) -> bool {
+    let s = s.trim().to_lowercase();
+    [
+        "voice mode",
+        "voice-mode",
+        "hands free",
+        "hands-free",
+        "voice activation",
+    ]
+    .iter()
+    .any(|phrase| s.contains(phrase))
+}
+
+/// Does an utterance request turning voice mode back off?
+/// e.g. "luna voice mode down", "luna voice mode off", "stop voice mode".
+fn voice_mode_exit_match(s: &str) -> bool {
+    let s = s.trim().to_lowercase();
+    [
+        "voice mode off",
+        "voice mode down",
+        "voice mode stop",
+        "voice mode exit",
+        "voice mode end",
+        "turn off voice mode",
+        "turn voice mode off",
+        "stop voice mode",
+        "exit voice mode",
+        "end voice mode",
+        "hands free off",
+        "hands-free off",
+    ]
+    .iter()
+    .any(|phrase| s.contains(phrase))
+}
+
 // ── Hybrid loop ───────────────────────────────────────────────────────────────
+
+/// Route a single input through the correct model tier and print/speak the
+/// reply. Shared by the text, conversation-window, and voice-mode paths so a
+/// fix to answer quality applies everywhere once.
+async fn answer_input(
+    input: &str,
+    config: &LunaConfig,
+    memory: &mut Memory,
+    react: &ReactLoop<'_>,
+    fast_react: Option<&ReactLoop<'_>>,
+    deep_react: Option<&ReactLoop<'_>>,
+    system_prompt: &str,
+) {
+    let debug = config.logging.level == "debug";
+    let (mut active_react, mut effective_prompt, mut is_fast, mut is_deep): (
+        &ReactLoop,
+        String,
+        bool,
+        bool,
+    ) = match classify(input) {
+        QueryComplexity::Simple => {
+            if let Some(fr) = fast_react {
+                (fr, with_time_context(FAST_PROMPT.to_string()), true, false)
+            } else {
+                (react, system_prompt.to_string(), false, false)
+            }
+        }
+        QueryComplexity::Deep => {
+            if let Some(dr) = deep_react {
+                (dr, with_time_context(DEEP_PROMPT.to_string()), false, true)
+            } else {
+                (react, system_prompt.to_string(), false, false)
+            }
+        }
+        _ => (react, system_prompt.to_string(), false, false),
+    };
+    log_model_choice(input, is_fast, is_deep, config);
+    effective_prompt
+        .push_str(&memory_block_for(input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
+
+    for attempt in 1..=2 {
+        let mem_snapshot = memory.len();
+        let tag = if debug {
+            if is_fast {
+                "[fast] "
+            } else if is_deep {
+                "[deep] "
+            } else {
+                "[full] "
+            }
+        } else {
+            ""
+        };
+        print!("Luna{}: ", tag);
+        io::stdout().flush().ok();
+
+        match active_react.run(input, &mut *memory, &effective_prompt).await {
+            Ok((response, streamed)) => {
+                if is_fast && crate::llm::react::is_escalation_response(&response) && attempt < 2 {
+                    tracing::info!("Fast model escalated — re-running on full model");
+                    memory.truncate_to(mem_snapshot);
+                    active_react = react;
+                    is_fast = false;
+                    is_deep = false;
+                    effective_prompt = system_prompt.to_string();
+                    effective_prompt.push_str(&memory_block_for(input, config, 6).await);
+                    continue;
+                }
+                if !streamed {
+                    println!("{}", response);
+                }
+                if config.voice.mode != VoiceMode::Off {
+                    tts::speak(&response, &config.voice.mode, config).await.ok();
+                }
+                break;
+            }
+            Err(e) => {
+                eprintln!("\nLuna error: {}", e);
+                break;
+            }
+        }
+    }
+    println!();
+}
 
 async fn run_hybrid(config: &LunaConfig) -> Result<()> {
     tracing::info!("Starting Luna agent (hybrid mode)");
@@ -754,12 +938,12 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 
     let mut mode = RunMode::Hybrid;
 
-    // Conversation mode state — after a wake-word session ends, keep
-    // listening without wake word for `conversation_timeout_mins`.
+    // Hands-free state — either the follow-up conversation window (set after a
+    // wake-word session ends) or explicit voice mode (toggled with
+    // "luna voice mode" / "luna voice mode off", auto-ends after inactivity).
     let conversation_timeout = Duration::from_secs(config.audio.conversation_timeout_mins as u64 * 60);
-    let mut conversation_until: Option<Instant> = None;
-    let mut conversation_tx: Option<tokio::sync::mpsc::Sender<String>> = None;
-    let mut conversation_rx: Option<tokio::sync::mpsc::Receiver<String>> = None;
+    let voice_idle_timeout = Duration::from_secs(config.audio.voice_mode_idle_mins * 60);
+    let mut handsfree: Option<Handsfree> = None;
 
     // ── Stdin reader thread → channel ─────────────────────────────────────────
     // Uses rustyline on its own thread so ↑/↓ history works while the main
@@ -824,91 +1008,98 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 
     // ── Main event loop ───────────────────────────────────────────────────────
     loop {
-        // Check conversation mode channel first (non-blocking)
-        if let Some(rx) = &mut conversation_rx {
-            if let Ok(conv_text) = rx.try_recv() {
-                let input = conv_text.trim().to_string();
-                if !input.is_empty() && !looks_like_artifact(&input) {
-                    println!("  You: {}", input);
-                    let debug = config.logging.level == "debug";
-                    let (mut active_react, mut effective_prompt, mut is_fast, mut is_deep): (
-&ReactLoop,
-                        String,
-                        bool,
-                        bool,
-                    ) = match classify(&input) {
-                        QueryComplexity::Simple => {
-                            if let Some(fr) = fast_react.as_ref() {
-                                (fr, with_time_context(FAST_PROMPT.to_string()), true, false)
-                            } else {
-                                (&react, system_prompt.to_string(), false, false)
-                            }
-                        }
-                        QueryComplexity::Deep => {
-                            if let Some(dr) = deep_react.as_ref() {
-                                (dr, with_time_context(DEEP_PROMPT.to_string()), false, true)
-                            } else {
-                                (&react, system_prompt.to_string(), false, false)
-                            }
-                        }
-                        _ => (&react, system_prompt.to_string(), false, false),
-                    };
-                    log_model_choice(&input, is_fast, is_deep, config);
-                    effective_prompt
-                        .push_str(&memory_block_for(&input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
+        // Hands-free input first (conversation window OR voice mode). The
+        // wake-word select arm below is disabled while one is active so the
+        // same utterance is never answered twice.
+        if handsfree.is_some() {
+            let mut should_end: Option<HandsfreeEnd> = None;
 
-                    for attempt in 1..=2 {
-                        let mem_snapshot = memory.len();
-                        let tag = if debug {
-                            if is_fast { "[fast] " } else if is_deep { "[deep] " } else { "[full] " }
-                        } else {
-                            ""
-                        };
-                        print!("Luna{}: ", tag);
-                        io::stdout().flush().ok();
+            // Drain any transcribed utterances (non-blocking)
+            while let Some(text) = handsfree
+                .as_mut()
+                .and_then(|hf| hf.rx.try_recv().ok())
+            {
+                let text = text.trim().to_string();
+                if text.is_empty() || looks_like_artifact(&text) {
+                    continue;
+                }
+                let is_voice = handsfree.as_ref().is_some_and(|hf| hf.voice);
+                if is_voice && voice_mode_exit_match(&text.to_lowercase()) {
+                    println!(
+                        "  [Voice mode off — listening for \"{}\"]",
+                        config.audio.wake_word
+                    );
+                    tts::speak("Voice mode off.", &config.voice.mode, config).await.ok();
+                    should_end = Some(HandsfreeEnd::Explicit);
+                    break;
+                }
+                if let Some(hf) = handsfree.as_mut() {
+                    hf.last_activity = Instant::now();
+                }
+                // In voice mode, strip a trailing wake ("luna what's the time"
+                // still works); conversation window needs no stripping.
+                let input = if is_voice {
+                    crate::audio::capture::strip_wake_word(&text, &config.audio.wake_aliases)
+                        .unwrap_or_else(|| text.clone())
+                } else {
+                    text.clone()
+                };
+                if input.trim().is_empty() {
+                    continue;
+                }
+                println!("  You: {}", input);
+                answer_input(
+                    &input,
+                    config,
+                    &mut memory,
+                    &react,
+                    fast_react.as_ref(),
+                    deep_react.as_ref(),
+                    &system_prompt,
+                )
+                .await;
+            }
 
-                        match active_react.run(&input, &mut memory, &effective_prompt).await {
-                            Ok((response, streamed)) => {
-                                if is_fast && crate::llm::react::is_escalation_response(&response) && attempt < 2 {
-                                    tracing::info!("Fast model escalated — re-running on full model");
-                                    memory.truncate_to(mem_snapshot);
-                                    active_react = &react;
-                                    is_fast = false;
-                                    is_deep = false;
-                                    effective_prompt = system_prompt.to_string();
-                                    effective_prompt
-                                        .push_str(&memory_block_for(&input, config, 6).await);
-                                    continue;
-                                }
-                                if !streamed {
-                                    println!("{}", response);
-                                }
-                                if config.voice.mode != VoiceMode::Off {
-                                    tts::speak(&response, &config.voice.mode, config).await.ok();
-                                }
-                                break;
-                            }
-                            Err(e) => {
-                                eprintln!("\nLuna error: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                    println!();
+            // No utterance arrived this pass — check expiry / inactivity.
+            let expire = handsfree.as_ref().is_some_and(|hf| {
+                if hf.voice {
+                    config.audio.voice_mode_idle_mins > 0
+                        && hf.last_activity.elapsed() >= voice_idle_timeout
+                } else {
+                    hf.ending_at.is_some_and(|until| Instant::now() >= until)
                 }
-                // Check if conversation window expired
-                if let Some(until) = conversation_until {
-                    if Instant::now() >= until {
-                        println!(
-                            "  [Conversation mode ended — say \"{}\" to wake me again]",
-                            config.audio.wake_word
-                        );
-                        conversation_until = None;
-                        conversation_tx = None;
-                        conversation_rx = None;
-                    }
+            });
+            if should_end.is_none() && expire {
+                let was_voice = handsfree.as_ref().map(|hf| hf.voice).unwrap_or(false);
+                should_end = Some(if was_voice {
+                    HandsfreeEnd::Idle
+                } else {
+                    HandsfreeEnd::Timeout
+                });
+            }
+
+            match should_end {
+                Some(HandsfreeEnd::Explicit) => {
+                    handsfree = None;
+                    continue;
                 }
-                continue;
+                Some(HandsfreeEnd::Idle) => {
+                    println!(
+                        "  [Voice mode ended — {} min of inactivity. Say \"{}\" to wake me.]",
+                        config.audio.voice_mode_idle_mins, config.audio.wake_word
+                    );
+                    handsfree = None;
+                    continue;
+                }
+                Some(HandsfreeEnd::Timeout) => {
+                    println!(
+                        "  [Conversation mode ended — say \"{}\" to wake me again]",
+                        config.audio.wake_word
+                    );
+                    handsfree = None;
+                    continue;
+                }
+                None => {}
             }
         }
 
@@ -951,84 +1142,49 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                     continue;
                 }
 
-                let debug = config.logging.level == "debug";
-                let (mut active_react, mut effective_prompt, mut is_fast, mut is_deep): (
-                    &ReactLoop,
-                    String,
-                    bool,
-                    bool,
-                ) = match classify(&input) {
-                    QueryComplexity::Simple => {
-                        if let Some(fr) = fast_react.as_ref() {
-                            (fr, with_time_context(FAST_PROMPT.to_string()), true, false)
-                        } else {
-                            (&react, system_prompt.to_string(), false, false)
-                        }
-                    }
-                    QueryComplexity::Deep => {
-                        if let Some(dr) = deep_react.as_ref() {
-                            (dr, with_time_context(DEEP_PROMPT.to_string()), false, true)
-                        } else {
-                            (&react, system_prompt.to_string(), false, false)
-                        }
-                    }
-                    _ => (&react, system_prompt.to_string(), false, false),
-                };
-                log_model_choice(&input, is_fast, is_deep, config);
-                effective_prompt
-                    .push_str(&memory_block_for(&input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
-
-                for attempt in 1..=2 {
-                    let mem_snapshot = memory.len();
-                    let tag = if debug {
-                        if is_fast { "[fast] " } else if is_deep { "[deep] " } else { "[full] " }
-                    } else {
-                        ""
-                    };
-                    print!("Luna{}: ", tag);
-                    io::stdout().flush().ok();
-
-                    match active_react.run(&input, &mut memory, &effective_prompt).await {
-                        Ok((response, streamed)) => {
-                            if is_fast && crate::llm::react::is_escalation_response(&response) && attempt < 2 {
-                                tracing::info!("Fast model escalated — re-running on full model");
-                                memory.truncate_to(mem_snapshot);
-                                active_react = &react;
-                                is_fast = false;
-                                is_deep = false;
-                                effective_prompt = system_prompt.to_string();
-                                effective_prompt
-                                    .push_str(&memory_block_for(&input, config, 6).await);
-                                continue;
-                            }
-                            if !streamed {
-                                println!("{}", response);
-                            }
-                            if config.voice.mode != VoiceMode::Off {
-                                tts::speak(&response, &config.voice.mode, config).await.ok();
-                            }
-                            break;
-                        }
-                        Err(e) => {
-                            eprintln!("\nLuna error: {}", e);
-                            break;
-                        }
-                    }
-                }
-                println!();
+                answer_input(
+                    &input,
+                    config,
+                    &mut memory,
+                    &react,
+                    fast_react.as_ref(),
+                    deep_react.as_ref(),
+                    &system_prompt,
+                )
+                .await;
             }
 
             // ── Wake word fired ──────────────────────────────────────────────
             // The background task detected the wake word and sent the full
             // utterance here. Anything after the wake word becomes an inline
             // command; a bare wake word falls back to the "Yes?" prompt.
-            // We only act on it when not in pure text mode.
-            Some(wake_text) = wake_rx.recv(), if mode != RunMode::Text => {
+            // We only act on it when not in pure text mode — and never while a
+            // hands-free window (voice mode / conversation) is already listening.
+            Some(wake_text) = wake_rx.recv(), if mode != RunMode::Text && handsfree.is_none() => {
                 let inline = crate::audio::capture::strip_wake_word(
                     &wake_text,
                     &config.audio.wake_aliases,
                 )
                 .filter(|cmd| !cmd.trim().is_empty());
+
+                // Voice-mode toggle-in: "luna voice mode"
+                if let Some(cmd) = inline.as_deref() {
+                    if wake_toggles_voice_mode(cmd) {
+                        let (tx, rx) = start_handsfree_listener(config, &stt);
+                        println!(
+                            "  [Voice mode ON — hands-free. Say \"luna voice mode off\" to turn it off]"
+                        );
+                        tts::speak("Voice mode on.", &config.voice.mode, config).await.ok();
+                        handsfree = Some(Handsfree {
+                            voice: true,
+                            ending_at: None,
+                            last_activity: Instant::now(),
+                            tx,
+                            rx,
+                        });
+                        continue;
+                    }
+                }
 
                 match run_voice_session(
                     config, &stt, &mut memory, &react, &system_prompt, inline,
@@ -1043,44 +1199,19 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                         // If conversation_timeout_mins > 0, keep listening without
                         // wake word for that many minutes.
                         if config.audio.conversation_timeout_mins > 0
-                            && conversation_tx.is_none()
+                            && handsfree.is_none()
                         {
-                            conversation_until = Some(Instant::now() + conversation_timeout);
-                            let (tx, rx) = tokio::sync::mpsc::channel::<String>(4);
-                            let tx_for_task = tx.clone();
-                            conversation_tx = Some(tx);
-                            conversation_rx = Some(rx);
-                            let stt_conv = stt.clone();
-                            let sample_rate = config.audio.sample_rate;
-                            let silence_ms = config.audio.vad_silence_ms;
+                            let (tx, rx) = start_handsfree_listener(config, &stt);
                             println!(
                                 "  [Conversation mode — listening for {} min without \"{}\"]",
                                 config.audio.conversation_timeout_mins, config.audio.wake_word
                             );
-                            tokio::spawn(async move {
-                                loop {
-                                    match crate::audio::capture::listen_continuous(
-                                        sample_rate,
-                                        silence_ms,
-                                        &stt_conv,
-                                    )
-                                    .await
-                                    {
-                                        Ok(text) if !text.trim().is_empty() => {
-                                            if tx_for_task.send(text).await.is_err() {
-                                                break;
-                                            }
-                                        }
-                                        Ok(_) => {} // silence timeout, continue
-                                        Err(e) => {
-                                            tracing::debug!("Conversation listener error: {}", e);
-                                            tokio::time::sleep(
-                                                tokio::time::Duration::from_millis(200),
-                                            )
-                                            .await;
-                                        }
-                                    }
-                                }
+                            handsfree = Some(Handsfree {
+                                voice: false,
+                                ending_at: Some(Instant::now() + conversation_timeout),
+                                last_activity: Instant::now(),
+                                tx,
+                                rx,
                             });
                         }
                     }
@@ -1120,4 +1251,67 @@ fn looks_like_artifact(s: &str) -> bool {
         "and speak",
     ];
     hallucinations.iter().any(|h| t.contains(h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{voice_mode_enter_match, voice_mode_exit_match};
+
+    #[test]
+    fn voice_mode_enter_phrases() {
+        for p in [
+            "voice mode",
+            "voice mode on",
+            "start voice mode",
+            "hands free",
+            "hands-free",
+            "turn on voice activation",
+        ] {
+            assert!(voice_mode_enter_match(p), "enter should match: {p}");
+        }
+        for p in ["what time is it", "set a timer", "voice"] {
+            assert!(!voice_mode_enter_match(p), "enter should NOT match: {p}");
+        }
+    }
+
+    #[test]
+    fn voice_mode_exit_phrases() {
+        for p in [
+            "luna voice mode off",
+            "luna voice mode down",
+            "voice mode stop",
+            "voice mode exit",
+            "stop voice mode",
+            "turn off voice mode",
+            "hands free off",
+        ] {
+            assert!(voice_mode_exit_match(p), "exit should match: {p}");
+        }
+        for p in ["voice mode", "what time is it", "tell me about voice modes"] {
+            assert!(!voice_mode_exit_match(p), "exit should NOT match: {p}");
+        }
+    }
+
+    #[test]
+    fn enter_and_exit_are_distinct() {
+        use super::wake_toggles_voice_mode;
+        // "voice mode on" must ENTER but must NOT match exit.
+        assert!(voice_mode_enter_match("voice mode on"));
+        assert!(!voice_mode_exit_match("voice mode on"));
+        assert!(wake_toggles_voice_mode("voice mode on"));
+        // "voice mode down" must EXIT — and must never re-enter a session
+        // through the wake path (without the luna word it isn't a wake at all;
+        // with it, this guard stops the bounce-back).
+        assert!(voice_mode_exit_match("voice mode down"));
+        assert!(!wake_toggles_voice_mode("voice mode down"));
+        assert!(!wake_toggles_voice_mode("voice mode off"));
+    }
+
+    #[test]
+    fn leading_wake_does_not_block_exit_detection() {
+        use super::wake_toggles_voice_mode;
+        // A strip always removes the wake first, so the inline never carries it.
+        assert!(voice_mode_exit_match("luna voice mode down"));
+        assert!(!wake_toggles_voice_mode("voice mode down"));
+    }
 }

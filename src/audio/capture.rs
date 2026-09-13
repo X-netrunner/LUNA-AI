@@ -67,20 +67,74 @@ pub async fn listen_for_wake_word(
 }
 
 /// True if the (lowercased) text contains any wake alias. Single-word
-/// aliases like "luna" require a whole-word match so "lunatic"/"deluna"
-/// never trigger; multi-word aliases just need a substring match.
+/// aliases like "luna" are matched **tolerantly** — so Whisper's stutter
+/// variants ("luuna", "llunnnaaa") and dropped-letter variants ("una") still
+/// trigger — while "lunatic"/"deluna" never do (see `word_matches_wake`).
+/// Multi-word aliases just need a substring match.
 pub fn contains_wake_alias(lower: &str, wake_aliases: &[String]) -> bool {
     wake_aliases.iter().any(|alias| {
         let alias_lower = alias.to_lowercase();
         if alias_lower.split_whitespace().count() == 1 {
-            let word = alias_lower.trim();
+            let alias_word = alias_lower.trim();
             lower
                 .split(|c: char| !c.is_alphanumeric())
-                .any(|w| w == word)
+                .any(|word| !word.is_empty() && word_matches_wake(word, alias_word))
         } else {
             lower.contains(&alias_lower)
         }
     })
+}
+
+/// Does a transcribed word count as the wake word (single-word aliases)?
+/// Whisper frequently doubles letters ("luuna", "llunnnaaa") or drops one
+/// ("una", "lun"). Handle both without matching unrelated words:
+/// 1. Collapse repeated characters, so the stutter variants become exact.
+/// 2. For candidates that are STRICTLY SHORTER than the alias, allow a
+///    single-letter edit distance — this is how dropped-letter variants
+///    ("una", "lun") get caught. Requiring strictly-shorter keeps real
+///    words of equal or greater length ("tuna", "lunar", "data", "lunatic")
+///    from ever waking Luna.
+fn word_matches_wake(word: &str, alias_word: &str) -> bool {
+    let a = collapse_repeats(&word.to_lowercase());
+    let b = collapse_repeats(&alias_word.to_lowercase());
+    if a == b {
+        return true;
+    }
+    a.len() < b.len() && edit_distance(&a, &b) <= 1
+}
+
+/// Collapse runs of the same character: "llunnnaaa" -> "luna".
+fn collapse_repeats(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if !out.ends_with(c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Levenshtein edit distance between two strings (iterative, 2 rows).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 /// Strip the wake alias out of a transcribed utterance and return whatever
@@ -97,7 +151,7 @@ pub fn strip_wake_word(text: &str, wake_aliases: &[String]) -> Option<String> {
             let alias_words: Vec<&str> = alias_lower.split_whitespace().collect();
 
             if alias_words.len() == 1 {
-                if clean == alias_words[0] {
+                if clean == alias_words[0] || word_matches_wake(clean, alias_words[0]) {
                     return Some(words[i + 1..].join(" "));
                 }
             } else if i + alias_words.len() <= words.len()
@@ -334,6 +388,43 @@ mod tests {
         assert!(contains_wake_alias("hey luna", &a));
         assert!(!contains_wake_alias("lunatic moon", &a));
         assert!(!contains_wake_alias("deluna", &a));
+    }
+
+    #[test]
+    fn tolerates_whisper_stutter_variants() {
+        let a = aliases();
+        // Repeated letters (collapse -> exact match)
+        assert!(contains_wake_alias("llunnnaaa what's the time", &a));
+        assert!(contains_wake_alias("luuna", &a));
+        assert!(contains_wake_alias("hey luuunaa", &a));
+        // Dropped/misheard letter (edit distance 1)
+        assert!(contains_wake_alias("una what's the time", &a));
+        assert!(contains_wake_alias("lun what's the time", &a));
+        // Multi-word alias still works through the single-word fallback
+        assert!(contains_wake_alias("hey lluna", &a));
+    }
+
+    #[test]
+    fn rejects_other_words_close_to_luna() {
+        let a = aliases();
+        // "lunar" is 2 edits from "luna"; "tuna" is a real word
+        assert!(!contains_wake_alias("lunar module", &a));
+        assert!(!contains_wake_alias("did you eat tuna", &a));
+        assert!(!contains_wake_alias("data recovery", &a));
+    }
+
+    #[test]
+    fn strips_stuttered_wake_word() {
+        let a = aliases();
+        assert_eq!(
+            strip_wake_word("llunnnaaa what's the time", &a),
+            Some("what's the time".to_string())
+        );
+        assert_eq!(
+            strip_wake_word("una what's the time", &a),
+            Some("what's the time".to_string())
+        );
+        assert_eq!(strip_wake_word("luuna", &a), Some(String::new()));
     }
 
     #[test]

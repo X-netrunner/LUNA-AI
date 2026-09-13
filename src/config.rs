@@ -200,6 +200,9 @@ pub struct AudioConfig {
     /// After a wake-word response in TUI mode, keep listening without
     /// the wake word for this many seconds (0 = off).
     pub conversation_window_secs: u64,
+    /// "Voice mode" (hands-free) auto-returns to wake-word listening after
+    /// this many minutes of silence (0 = never).
+    pub voice_mode_idle_mins: u64,
 }
 
 impl Default for AudioConfig {
@@ -222,6 +225,7 @@ impl Default for AudioConfig {
             sample_rate: 16000,
             conversation_timeout_mins: 5,
             conversation_window_secs: 15,
+            voice_mode_idle_mins: 5,
         }
     }
 }

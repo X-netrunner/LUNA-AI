@@ -15,6 +15,7 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 - **Background daemon** — `luna --daemon` watches for RAM/CPU hogs, learns which apps you use daily, reclaims disk space safely, and can auto-end idle processes you approve by chat
 - **Voice I/O** — Whisper STT + Kokoro TTS (high quality, runs on CPU)
 - **Voice session mode** — say the wake word once, keep talking without repeating it until you say goodbye or go quiet
+- **Explicit voice mode** — say “luna voice mode” to enter hands-free chatting (no wake word needed); say “luna voice mode off/down” to return, or just go quiet for the configured `voice_mode_idle_mins` and it switches back automatically
 - **Inline wake-word commands** — say "luna what's the time" in one breath; Luna strips the wake word and runs the rest as a command
 - **Proactive monitoring** — background checks for low battery, low disk space, and pending package updates, with real desktop notifications (no LLM call, zero hallucination risk)
 - **Background daemon** — `luna --daemon` watches for RAM/CPU hogs, learns which apps you use daily, reclaims disk space safely, and can auto-end idle processes you approve by chat
@@ -52,7 +53,7 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 
 - Rust 1.75+
 - [Ollama](https://ollama.com) with a model pulled (default: `qwen2.5:7b-instruct-q4_K_M`)
-- `whisper-cli` (from the `whisper.cpp` AUR package) + `ggml-small.en.bin` and `ggml-silero-v6.2.0.bin` models for voice input
+- `whisper-cli` (from the `whisper.cpp` AUR package) + `ggml-medium.en.bin` and `ggml-silero-v6.2.0.bin` models for voice input
 - Python 3 + Kokoro ONNX for voice output (see Voice Setup below — no Piper needed)
 - `wl-copy` / `wl-paste` for clipboard (Wayland)
 - `curl` for web fetch and learning
@@ -80,7 +81,9 @@ sudo_password = ""          # set here or leave blank and enter at runtime
 [llm]
 model = "qwen2.5:7b-instruct-q4_K_M"
 base_url = "http://localhost:11434"
-fast_model = "qwen3:0.6b"   # optional, used for simple/conversational queries
+fast_model = "qwen2.5:3b"   # non-reasoning small model — instant replies, no hidden thinking
+deep_model = "qwen2.5:7b-instruct-q4_K_M"   # optional, for code/reasoning-heavy tasks
+embedding_model = "nomic-embed-text"          # local embedding model for semantic memory recall
 
 [voice]
 mode = "basic"               # basic | off
@@ -93,6 +96,7 @@ input_mode = "both"          # off | wake_word | both
 wake_word = "hey luna"
 wake_aliases = ["luna", "hey luna", "hello luna", "hay luna"]
 vad_silence_ms = 800
+voice_mode_idle_mins = 5    # "luna voice mode" auto-ends after this many min of silence (0 = never)
 
 [memory]
 context_window = 6
@@ -113,6 +117,9 @@ tavily_api_key = ""           # tavily.com (1000 free searches/month)
 gemini_api_key = ""           # aistudio.google.com
 # Or keep them OUT of this file entirely (see Secrets below):
 # gemini_api_key = "keyring:gemini"
+
+[logging]
+level = "debug"              # info | debug | trace — debug shows full tool/thinking output
 
 [daemon]
 enabled = true
@@ -143,10 +150,17 @@ Luna also chmods `luna.toml` to 600 every time it saves it.
 Run the watchdog standalone (no Ollama, no tty):
 
 ```bash
+cargo build --release
+install -Dm755 target/release/luna ~/.local/bin/luna        # one-time
 luna --daemon                                   # foreground
+mkdir -p ~/.config/systemd/user
 cp deploy/luna-daemon.service ~/.config/systemd/user/
+systemctl --user daemon-reload
 systemctl --user enable --now luna-daemon       # as a service
 ```
+
+If the daemon reports no notifications, confirm the service is actually
+running: `systemctl --user status luna-daemon`.
 
 Three jobs:
 
@@ -189,8 +203,8 @@ python3 -m venv --system-site-packages ~/.local/share/luna/tts_env
 
 # Download the Whisper model + Silero VAD model for voice input
 mkdir -p ~/.local/share/luna/models
-wget https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin \
-  -O ~/.local/share/luna/models/ggml-small.en.bin
+wget https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin \
+  -O ~/.local/share/luna/models/ggml-medium.en.bin
 wget https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-silero-v6.2.0.bin \
   -O ~/.local/share/luna/models/ggml-silero-v6.2.0.bin
 ```
@@ -244,7 +258,7 @@ main.rs
 │   ├── tracker.rs     — usage learning, daily-use classification, allowlist
 │   └── cleanup.rs     — safe disk hygiene (pacman cache, ~/.cache, trash, journals)
 ├── tts/
-│   └── piper.rs       — Kokoro TTS via Python subprocess
+│   └── mod.rs        — Kokoro TTS via Python subprocess
 ├── stt/
 │   └── whisper.rs     — Whisper STT via whisper-cli subprocess
 └── audio/
