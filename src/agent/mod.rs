@@ -283,6 +283,17 @@ const DEEP_PROMPT: &str = "You are Luna. Your one and only creator is Netrunner 
     If you need to run commands, search the web, or use tools, do so. \
     Be comprehensive but well-structured. Never guess — if uncertain, say so.";
 
+/// Injected into every tier's system prompt so the model can answer
+/// questions about its own capabilities instead of claiming it's a
+/// "text-based AI with no voice".
+const SELF_AWARENESS: &str = "\n\n### Capabilities\n\
+    - Luna is a voice-capable AI assistant running locally on Arch Linux (powered by Ollama models).\n\
+    - Voice input: activate by saying your wake word (e.g. \"luna\"); speech is transcribed via Whisper.\n\
+    - Hands-free voice mode: say \"luna voice mode\" to start, \"luna voice mode off\" to stop; auto-ends after configured idle time.\n\
+    - Text-to-speech output: replies are spoken aloud when TTS is enabled.\n\
+    - Tool use: web search, file and command actions on this machine (for deeper queries).\n\
+    - If asked about your capabilities, answer honestly: you have voice wake detection, hands-free voice mode, and text-to-speech.";
+
 /// Log which model tier was chosen for a given query, always visible
 /// in both TUI (debug panel) and terminal (stderr) modes.
 fn log_model_choice(input: &str, is_fast: bool, is_deep: bool, config: &LunaConfig) {
@@ -376,6 +387,9 @@ log_model_choice(input, is_fast, is_deep, config);
     effective_prompt.push_str(
         &memory_block_for(input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await,
     );
+    // Capabilities go last — the model follows the instruction right before
+    // the user message far better than a block buried mid-prompt.
+    effective_prompt.push_str(SELF_AWARENESS);
 
     for attempt in 1..=2 {
         let mem_snapshot = memory.len();
@@ -389,6 +403,7 @@ log_model_choice(input, is_fast, is_deep, config);
                     is_deep = false;
                     effective_prompt = system_prompt.clone();
                     effective_prompt.push_str(&memory_block_for(input, config, 6).await);
+                    effective_prompt.push_str(SELF_AWARENESS);
                     continue;
                 }
                 let model = if is_fast {
@@ -660,6 +675,9 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         log_model_choice(&input, is_fast, is_deep, config);
         effective_prompt
             .push_str(&memory_block_for(&input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
+        // Capabilities go last — right before the user message, where the
+        // model follows them best.
+        effective_prompt.push_str(SELF_AWARENESS);
 
         // Up to two attempts: a fast-model reply of "ESCALATE" rolls back
         // the exchange and retries once on the full model with tools.
@@ -683,6 +701,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                         is_deep = false;
                         effective_prompt = system_prompt.to_string();
                         effective_prompt.push_str(&memory_block_for(&input, config, 6).await);
+                        effective_prompt.push_str(SELF_AWARENESS);
                         continue;
                     }
                     if !streamed {
@@ -770,13 +789,13 @@ fn start_handsfree_listener(
 /// A wake-stripped command that starts hands-free voice mode. Exit phrases
 /// ("voice mode down/off") are rejected so a "turn it off" utterance can't
 /// bounce straight back into a new voice-mode session via the wake path.
-fn wake_toggles_voice_mode(inline: &str) -> bool {
+pub(crate) fn wake_toggles_voice_mode(inline: &str) -> bool {
     voice_mode_enter_match(inline) && !voice_mode_exit_match(inline)
 }
 
 /// Does a wake-stripped command request hands-free voice mode?
 /// e.g. "luna voice mode", "luna voice activation", "luna hands free".
-fn voice_mode_enter_match(s: &str) -> bool {
+pub(crate) fn voice_mode_enter_match(s: &str) -> bool {
     let s = s.trim().to_lowercase();
     [
         "voice mode",
@@ -791,7 +810,7 @@ fn voice_mode_enter_match(s: &str) -> bool {
 
 /// Does an utterance request turning voice mode back off?
 /// e.g. "luna voice mode down", "luna voice mode off", "stop voice mode".
-fn voice_mode_exit_match(s: &str) -> bool {
+pub(crate) fn voice_mode_exit_match(s: &str) -> bool {
     let s = s.trim().to_lowercase();
     [
         "voice mode off",
@@ -851,6 +870,9 @@ async fn answer_input(
     log_model_choice(input, is_fast, is_deep, config);
     effective_prompt
         .push_str(&memory_block_for(input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
+    // Capabilities go last — right before the user message, where the model
+    // follows them best.
+    effective_prompt.push_str(SELF_AWARENESS);
 
     for attempt in 1..=2 {
         let mem_snapshot = memory.len();
@@ -878,6 +900,7 @@ async fn answer_input(
                     is_deep = false;
                     effective_prompt = system_prompt.to_string();
                     effective_prompt.push_str(&memory_block_for(input, config, 6).await);
+                    effective_prompt.push_str(SELF_AWARENESS);
                     continue;
                 }
                 if !streamed {

@@ -14,7 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::{Frame, Terminal};
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -79,6 +79,11 @@ pub struct TuiApp {
     /// Unix-millis deadline until which the wake listener skips wake-word
     /// detection and accepts any speech (0 = no active window).
     window_deadline: Arc<AtomicU64>,
+    /// true = hands-free "voice mode" is active (TUI keeps accepting any
+    /// speech without the wake word until told to stop or idle runs out).
+    handsfree_active: Arc<AtomicBool>,
+    /// Unix-millis of the last hands-free utterance, for the idle auto-return.
+    last_voice_activity: Arc<AtomicU64>,
 }
 
 impl TuiApp {
@@ -108,6 +113,8 @@ impl TuiApp {
             rx,
             logs,
             window_deadline: Arc::new(AtomicU64::new(0)),
+            handsfree_active: Arc::new(AtomicBool::new(false)),
+            last_voice_activity: Arc::new(AtomicU64::new(millis_now())),
         })
     }
 
@@ -165,8 +172,32 @@ impl TuiApp {
             let window_deadline = Arc::clone(&self.window_deadline);
             let window_secs = self.config.audio.conversation_window_secs;
             let window_active = window_secs > 0;
+            let handsfree_active = Arc::clone(&self.handsfree_active);
             tokio::spawn(async move {
                 loop {
+                    // Hands-free "voice mode": accept any speech, no wake word.
+                    if handsfree_active.load(Ordering::Relaxed) {
+                        match crate::audio::capture::listen_continuous(
+                            sample_rate,
+                            silence_ms,
+                            &stt,
+                        )
+                        .await
+                        {
+                            Ok(text) if !text.trim().is_empty() => {
+                                if tx_voice.send(AppEvent::Voice(text)).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(_) => continue,
+                            Err(e) => {
+                                tracing::debug!("Hands-free listener error: {}", e);
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                            }
+                        }
+                        continue;
+                    }
+
                     // If a conversation window is open (user recently got a
                     // voice response), accept any speech without the wake word.
                     if window_active
@@ -228,6 +259,8 @@ impl TuiApp {
                 self.handle_app_event(ev);
             }
 
+            self.check_voice_mode_idle();
+
             terminal.draw(|f| self.ui(f))?;
             tokio::time::sleep(Duration::from_millis(16)).await;
         }
@@ -260,14 +293,62 @@ impl TuiApp {
                 }
             }
             AppEvent::Voice(text) => {
-                let t = text.trim();
-                if t.is_empty() {
+                let raw = text.trim();
+                if raw.is_empty() {
                     return;
                 }
-                // A wake-word or window utterance keeps the window extended.
+                // Strip leading wake word so "Luna, what's the time" shows as
+                // just "what's the time" and the command-matching functions
+                // get clean input.
+                let stripped = crate::audio::capture::strip_wake_word(
+                    raw,
+                    &self.config.audio.wake_aliases,
+                )
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| raw.to_string());
+                let lower = stripped.trim().to_lowercase();
+
+                // ── Hands-free voice mode active ─────────────────────────
+                if self.handsfree_active.load(Ordering::Relaxed) {
+                    // Exit phrase → leave voice mode immediately
+                    if crate::agent::voice_mode_exit_match(&lower) {
+                        self.handsfree_active.store(false, Ordering::Relaxed);
+                        self.messages.push(Msg {
+                            role: "assistant".into(),
+                            content: "Voice mode off.".into(),
+                            thinking: None,
+                        });
+                        self.speak_announce("Voice mode off.");
+                        return;
+                    }
+                    // Normal hands-free question: answer it and reset idle timer
+                    self.last_voice_activity.store(millis_now(), Ordering::Relaxed);
+                    self.add_user_message(&stripped);
+                    self.submit(stripped);
+                    return;
+                }
+
+                // ── Hands-free OFF: did this wake utterance toggle voice mode on?
+                if crate::agent::wake_toggles_voice_mode(&lower) {
+                    self.handsfree_active.store(true, Ordering::Relaxed);
+                    self.last_voice_activity.store(millis_now(), Ordering::Relaxed);
+                    let wake = self.config.audio.wake_word.clone();
+                    let msg = format!(
+                        "[Voice mode ON — hands-free. Say \"{wake} voice mode off\" to turn it off]"
+                    );
+                    self.messages.push(Msg {
+                        role: "assistant".into(),
+                        content: msg,
+                        thinking: None,
+                    });
+                    self.speak_announce("Voice mode on.");
+                    return;
+                }
+
+                // ── Normal wake utterance: answer and extend conversation window ──
                 self.refresh_conversation_window();
-                self.add_user_message(t);
-                self.submit(t.to_string());
+                self.add_user_message(&stripped);
+                self.submit(stripped);
             }
         }
     }
@@ -278,6 +359,48 @@ impl TuiApp {
         let secs = self.config.audio.conversation_window_secs;
         if secs > 0 {
             self.window_deadline.store(millis_now() + secs * 1000, Ordering::Relaxed);
+        }
+    }
+
+    /// Auto-exit hands-free voice mode after `voice_mode_idle_mins` of silence
+    /// (0 = never). Runs from the main draw loop.
+    fn check_voice_mode_idle(&mut self) {
+        if !self.handsfree_active.load(Ordering::Relaxed) {
+            return;
+        }
+        let idle_mins = self.config.audio.voice_mode_idle_mins;
+        if idle_mins == 0 {
+            return;
+        }
+        let last = self.last_voice_activity.load(Ordering::Relaxed);
+        let now = millis_now();
+        if now.saturating_sub(last) < idle_mins * 60 * 1000 {
+            return;
+        }
+        self.handsfree_active.store(false, Ordering::Relaxed);
+        let wake = self.config.audio.wake_word.clone();
+        let msg = format!(
+            "[Voice mode ended — {} min of inactivity. Say \"{wake}\" to wake me.]",
+            idle_mins
+        );
+        self.messages.push(Msg {
+            role: "assistant".into(),
+            content: msg,
+            thinking: None,
+        });
+        self.speak_announce("Voice mode ended due to inactivity.");
+    }
+
+    /// Fire-and-forget spoken announcement of a mode change, mirroring the
+    /// hybrid loop's TTS of "Voice mode on/off.".
+    fn speak_announce(&self, phrase: &str) {
+        if self.config.voice.mode != VoiceMode::Off {
+            let mode = self.config.voice.mode.clone();
+            let cfg = self.config.clone();
+            let phrase = phrase.to_string();
+            tokio::spawn(async move {
+                let _ = crate::tts::speak(&phrase, &mode, &cfg).await;
+            });
         }
     }
 
@@ -377,7 +500,56 @@ impl TuiApp {
     /// Spawn the routed async turn (fast/deep/full) — the UI stays responsive.
     /// The status bar shows the model that actually answered.
     fn submit(&mut self, user_input: String) {
-        let lower = user_input.trim().to_lowercase();
+        let trimmed = user_input.trim().to_string();
+        // Strip a leading wake word ("luna voice mode") for clean display and
+        // so the same command matchers used by the hybrid loop apply here.
+        let stripped = crate::audio::capture::strip_wake_word(
+            &trimmed,
+            &self.config.audio.wake_aliases,
+        )
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| trimmed.clone());
+        let lower = stripped.trim().to_lowercase();
+
+        // ── Hands-free voice mode toggles (self-aware built-in commands) ──
+        if crate::agent::voice_mode_enter_match(&lower)
+            && !crate::agent::voice_mode_exit_match(&lower)
+        {
+            if self.handsfree_active.load(Ordering::Relaxed) {
+                self.messages.push(Msg {
+                    role: "assistant".into(),
+                    content: "Already in voice mode.".into(),
+                    thinking: None,
+                });
+                return;
+            }
+            self.handsfree_active.store(true, Ordering::Relaxed);
+            self.last_voice_activity.store(millis_now(), Ordering::Relaxed);
+            let wake = self.config.audio.wake_word.clone();
+            let msg = format!(
+                "[Voice mode ON — hands-free. Say \"{wake} voice mode off\" to turn it off]"
+            );
+            self.messages.push(Msg {
+                role: "assistant".into(),
+                content: msg,
+                thinking: None,
+            });
+            self.speak_announce("Voice mode on.");
+            return;
+        }
+        if crate::agent::voice_mode_exit_match(&lower) {
+            if self.handsfree_active.load(Ordering::Relaxed) {
+                self.handsfree_active.store(false, Ordering::Relaxed);
+                self.messages.push(Msg {
+                    role: "assistant".into(),
+                    content: "Voice mode off.".into(),
+                    thinking: None,
+                });
+                self.speak_announce("Voice mode off.");
+            }
+            return;
+        }
+
         match lower.as_str() {
             "clear" => {
                 let _ = self.memory.clear();
@@ -402,7 +574,7 @@ impl TuiApp {
         let started = Instant::now();
 
         tokio::spawn(async move {
-            let result = crate::agent::run_routed_turn(&user_input, &mut memory, &config).await;
+            let result = crate::agent::run_routed_turn(&stripped, &mut memory, &config).await;
             let latency = started.elapsed();
             match result {
                 Ok(outcome) => {
