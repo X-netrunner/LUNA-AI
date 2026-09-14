@@ -85,19 +85,25 @@ function quietLogger() {
 }
 
 // ── Baileys socket (links via QR, reconnects, persists session) ───────────────
+// `giveUpAfter` (number of closed connections without ever opening) makes a
+// one-shot caller like `link` stop retrying and exit with a diagnostic instead
+// of hanging on a blank screen forever. `serve` keeps retrying indefinitely.
 
-function createSocket({ onQr, onOpen, onLoggedOut }) {
+function createSocket({ onQr, onOpen, onLoggedOut, giveUpAfter = null }) {
   let sock = null;
   let connecting = false;
+  let failures = 0;
 
   async function connect() {
     if (connecting) return;
     connecting = true;
+    console.log('Connecting to WhatsApp servers…');
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-    const version = await fetchLatestBaileysVersion();
+    // fetchLatestBaileysVersion returns { version: [major, minor, patch], isLatest }
+    const { version } = await fetchLatestBaileysVersion();
     sock = makeWASocket({
       auth: state,
-      version: version[0],
+      version,
       browser: ['Luna', 'Chrome', '23'],
       syncFullHistory: false,
       markOnlineOnConnect: false,
@@ -110,16 +116,29 @@ function createSocket({ onQr, onOpen, onLoggedOut }) {
       const { connection, lastDisconnect, qr } = update;
       if (qr && onQr) onQr(qr);
       if (connection === 'open') {
+        failures = 0;
         log('connected');
         if (onOpen) onOpen();
       } else if (connection === 'close') {
         connecting = false;
         const code = lastDisconnect?.error?.output?.statusCode;
-        log(`connection closed, statusCode=${code}`);
+        const reason = lastDisconnect?.error?.message || `statusCode=${code ?? 'unknown'}`;
+        log(`connection closed, ${reason}`);
         if (code === DisconnectReason.loggedOut) {
           try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch {}
           log('logged out — session cleared');
           if (onLoggedOut) onLoggedOut();
+        } else {
+          failures += 1;
+          if (giveUpAfter !== null && failures >= giveUpAfter) {
+            log(`giving up after ${failures} failed connections`);
+            console.error(
+              `\nCouldn't reach WhatsApp's servers (${reason}). ` +
+                `Your current network may be blocking WhatsApp.\n` +
+                `Try a phone hotspot or a different Wi-Fi, then run 'luna --whatsapp-link' again.`
+            );
+            process.exit(1);
+          }
         }
         setTimeout(connect, 3000); // reconnect after a pause
       }
@@ -209,6 +228,7 @@ if (cmd === 'link') {
       process.exit(0);
     },
     onLoggedOut: () => console.log('\nSession was logged out — scanning a fresh QR next.\n'),
+    giveUpAfter: 4, // don't hang blank if the network blocks WhatsApp
   });
 } else if (cmd === 'serve') {
   const cfg = loadConfig();
