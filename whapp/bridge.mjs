@@ -72,6 +72,18 @@ function toJid(raw) {
   return `${digits}@s.whatsapp.net`;
 }
 
+// Baileys expects a pino-style logger (with .child()); quietLogger mimics that
+// interface and swallows everything so it never clutters our own logs.
+function quietLogger() {
+  const noop = () => {};
+  const logger = {
+    level: 'silent',
+    trace: noop, debug: noop, info: noop, warn: noop, error: noop, fatal: noop,
+    child: () => logger,
+  };
+  return logger;
+}
+
 // ── Baileys socket (links via QR, reconnects, persists session) ───────────────
 
 function createSocket({ onQr, onOpen, onLoggedOut }) {
@@ -89,7 +101,7 @@ function createSocket({ onQr, onOpen, onLoggedOut }) {
       browser: ['Luna', 'Chrome', '23'],
       syncFullHistory: false,
       markOnlineOnConnect: false,
-      logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+      logger: quietLogger(),
     });
 
     sock.ev.on('creds.update', saveCreds);
