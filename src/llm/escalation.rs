@@ -130,6 +130,10 @@ pub fn classify(input: &str) -> QueryComplexity {
         // Learning summaries (memory_report territory)
         "what did you learn", "did you learn", "learn about me",
         "you know about me", "what have you learned about me",
+        // WhatsApp messaging (whatsapp_send — only the full model has it)
+        "whatsapp", "whats app", "send whatsapp", "wa message",
+        "text ", "text me", "text myself", "text my phone",
+        "send a text", "sms ", "message me", "message him", "message her",
     ];
     if tool_signals.iter().any(|s| lower.contains(s)) {
         return QueryComplexity::Complex;
@@ -171,6 +175,19 @@ mod tests {
         assert!(is_full("well do it"));
         assert!(is_full("go ahead and do it"));
         assert!(is_full("proceed"));
+    }
+
+    #[test]
+    fn whatsapp_queries_route_to_full_model() {
+        for q in [
+            "text myself on whatsapp",
+            "send a whatsapp message",
+            "message her on whatsapp",
+            "just text \"hi this is luna\" to 9148069879",
+            "whatsapp my friend that i'll be late",
+        ] {
+            assert!(is_full(q), "{q:?} must not go to the fast model");
+        }
     }
 
     #[test]
