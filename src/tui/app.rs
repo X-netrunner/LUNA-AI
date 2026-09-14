@@ -12,7 +12,10 @@ use crossterm::terminal::{
 };
 use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -58,6 +61,13 @@ enum Focus {
     Debug,
 }
 
+/// While `key_prompt` is Some, the chat input is replaced by a masked prompt
+/// asking for the secret for a `--set-key <name>` typed in chat.
+struct KeyPrompt {
+    name: String,
+    secret: String,
+}
+
 pub struct TuiApp {
     config: LunaConfig,
     memory: Memory,
@@ -89,6 +99,8 @@ pub struct TuiApp {
     last_voice_activity: Arc<AtomicU64>,
     /// First-run setup screen (active until the user finishes/dismisses it).
     onboarding: Option<Onboarding>,
+    /// Active masked prompt for a chat-typed `--set-key <name>` (None = none).
+    key_prompt: Option<KeyPrompt>,
 }
 
 impl TuiApp {
@@ -126,6 +138,7 @@ impl TuiApp {
             handsfree_active: Arc::new(AtomicBool::new(false)),
             last_voice_activity: Arc::new(AtomicU64::new(millis_now())),
             onboarding,
+            key_prompt: None,
         })
     }
 
@@ -361,23 +374,33 @@ impl TuiApp {
                 self.add_user_message(&stripped);
                 self.submit(stripped);
             }
-            AppEvent::OnboardingLog(line) => {
-                if let Some(onb) = &mut self.onboarding {
-                    onb.log(&line);
-                }
-            }
+            AppEvent::OnboardingLog(line) => self.app_emit(&line),
             AppEvent::SpotifyAuthed => {
                 // The refresh token lives in the keyring; point config at it.
                 self.config.spotify.refresh_token =
                     Some("keyring:spotify_refresh".to_string());
-                if let Err(e) = self.config.save() {
-                    if let Some(onb) = &mut self.onboarding {
-                        onb.log(&format!("✗ {e}"));
-                    }
-                } else if let Some(onb) = &mut self.onboarding {
-                    onb.log("✓ Spotify authorized. Say \"play my liked songs\" anytime.");
+                match self.config.save() {
+                    Ok(()) => self.app_emit("✓ Spotify authorized. Say \"play my liked songs\" anytime."),
+                    Err(e) => self.app_emit(&format!("✗ {e}")),
                 }
             }
+        }
+    }
+
+    /// Show a setup/progress line: in the onboarding panel when it's open,
+    /// otherwise as a chat message.
+    fn app_emit(&mut self, line: &str) {
+        if self.onboarding.as_ref().map(Onboarding::is_active).unwrap_or(false) {
+            if let Some(onb) = &mut self.onboarding {
+                onb.log(line);
+            }
+        } else {
+            self.messages.push(Msg {
+                role: "assistant".into(),
+                content: line.to_string(),
+                thinking: None,
+            });
+            self.chat_scroll = 0;
         }
     }
 
@@ -436,6 +459,12 @@ impl TuiApp {
         // First-run setup screen steals the keyboard until dismissed.
         if self.onboarding.as_ref().map(Onboarding::is_active).unwrap_or(false) {
             self.handle_onboarding_key(key);
+            return;
+        }
+
+        // Masked --set-key prompt steals the keyboard while it's open.
+        if self.key_prompt.is_some() {
+            self.handle_key_prompt(key);
             return;
         }
 
@@ -614,7 +643,7 @@ impl TuiApp {
         }
     }
 
-    /// Save an entered secret to the keyring and point config at it.
+    /// Save an entered secret (onboarding flow) to the keyring and config.
     fn commit_secret(&mut self) {
         let (keyring_name, label) = {
             let Some(onb) = &mut self.onboarding else { return };
@@ -636,43 +665,98 @@ impl TuiApp {
             .as_mut()
             .map(|o| o.take_secret())
             .unwrap_or_default();
-        if secret.is_empty() {
-            if let Some(onb) = &mut self.onboarding {
-                onb.log("✗ empty secret — nothing stored (Esc cancels any time)");
+        self.store_secret(&keyring_name, secret)
+            .map(|_| {
+                if let Some(onb) = &mut self.onboarding {
+                    onb.log(&format!("✓ stored {}", label));
+                }
+            })
+            .unwrap_or_else(|e| {
+                if let Some(onb) = &mut self.onboarding {
+                    onb.log(&format!("✗ {}: {}", label, e));
+                }
+            });
+    }
+
+    /// Keys while a chat-typed `--set-key <name>` masked prompt is open.
+    fn handle_key_prompt(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('c') | KeyCode::Char('d') => self.should_quit = true,
+                _ => {}
             }
             return;
         }
-
-        match crate::config::keyring_set(&keyring_name, &secret) {
-            Ok(()) => {
-                let ref_str = format!("keyring:{}", keyring_name);
-                match keyring_name.as_str() {
-                    "tavily" => self.config.search.tavily_api_key = Some(ref_str),
-                    "gemini" => self.config.search.gemini_api_key = Some(ref_str),
-                    "todoist" => self.config.todoist.api_token = Some(ref_str),
-                    "spotify_id" => self.config.spotify.client_id = Some(ref_str),
-                    "spotify_secret" => self.config.spotify.client_secret = Some(ref_str),
-                    _ => {}
-                }
-                match self.config.save() {
+        match key.code {
+            KeyCode::Enter => {
+                let KeyPrompt { name, secret } = self.key_prompt.take().unwrap();
+                let name2 = name.clone();
+                match self.store_secret(&name, secret) {
                     Ok(()) => {
-                        if let Some(onb) = &mut self.onboarding {
-                            onb.log(&format!("✓ stored {}", label));
-                        }
+                        self.messages.push(Msg {
+                            role: "assistant".into(),
+                            content: format!(
+                                "[✓ Stored luna/{0} — referenced as keyring:{0} in luna.toml]",
+                                name2
+                            ),
+                            thinking: None,
+                        });
+                        self.status = String::from("Ready");
                     }
                     Err(e) => {
-                        if let Some(onb) = &mut self.onboarding {
-                            onb.log(&format!("✗ saved to keyring but config write failed: {e}"));
-                        }
+                        self.messages.push(Msg {
+                            role: "assistant".into(),
+                            content: format!("[✗ Could not store {}: {}]", name2, e),
+                            thinking: None,
+                        });
                     }
                 }
+                self.chat_scroll = 0;
             }
-            Err(e) => {
-                if let Some(onb) = &mut self.onboarding {
-                    onb.log(&format!("✗ could not store {}: {}", label, e));
+            KeyCode::Esc => {
+                self.key_prompt = None;
+                self.messages.push(Msg {
+                    role: "assistant".into(),
+                    content: "[Cancelled — nothing stored]".into(),
+                    thinking: None,
+                });
+                self.status = String::from("Ready");
+            }
+            KeyCode::Backspace => {
+                if let Some(kp) = &mut self.key_prompt {
+                    kp.secret.pop();
                 }
             }
+            KeyCode::Char(c) => {
+                if let Some(kp) = &mut self.key_prompt {
+                    kp.secret.push(c);
+                }
+            }
+            _ => {}
         }
+    }
+
+    /// Keyring-set + config-ref wiring shared by the onboarding screen and the
+    /// chat `--set-key` prompt. Known names update the matching config leaf and
+    /// persist; unknown names are stored in the keyring alone (and can be
+    /// referenced manually later).
+    fn store_secret(&mut self, name: &str, secret: String) -> anyhow::Result<()> {
+        if secret.is_empty() {
+            anyhow::bail!("empty secret — nothing stored");
+        }
+        crate::config::keyring_set(name, &secret)?;
+        match name {
+            "tavily" => self.config.search.tavily_api_key = Some(format!("keyring:{}", name)),
+            "gemini" => self.config.search.gemini_api_key = Some(format!("keyring:{}", name)),
+            "todoist" => self.config.todoist.api_token = Some(format!("keyring:{}", name)),
+            "spotify_id" => self.config.spotify.client_id = Some(format!("keyring:{}", name)),
+            "spotify_secret" => {
+                self.config.spotify.client_secret = Some(format!("keyring:{}", name))
+            }
+            _ => {}
+        }
+        self.config.save()?;
+        Ok(())
     }
 
     /// Kick off the one-time Spotify device authorization in the background,
@@ -684,15 +768,14 @@ impl TuiApp {
         ) {
             (Some(a), Some(b)) if !a.trim().is_empty() && !b.trim().is_empty() => (a, b),
             _ => {
-                if let Some(onb) = &mut self.onboarding {
-                    onb.log("Set both Spotify keys first (two rows above).");
-                }
+                self.app_emit(
+                    "Set both Spotify keys first with `--set-key spotify_id` and \
+                     `--set-key spotify_secret`.",
+                );
                 return;
             }
         };
-        if let Some(onb) = &mut self.onboarding {
-            onb.log("Starting Spotify authorization — a URL + code will appear below.");
-        }
+        self.app_emit("Starting Spotify authorization — a URL + code will appear below.");
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let _ = tx.send(AppEvent::OnboardingLog(
@@ -733,6 +816,71 @@ impl TuiApp {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| trimmed.clone());
         let lower = stripped.trim().to_lowercase();
+
+        // ── CLI-style flags typed into chat are handled here, exactly like
+        // ── their shell counterparts (luna --set-key / --spotify-auth / --setup).
+        let tokens: Vec<&str> = stripped.split_whitespace().collect();
+        if !tokens.is_empty() {
+            match tokens[0] {
+                "--set-key" => {
+                    match tokens.get(1) {
+                        Some(name) if tokens.len() == 2 => {
+                            self.messages.push(Msg {
+                                role: "user".into(),
+                                content: stripped.clone(),
+                                thinking: None,
+                            });
+                            self.messages.push(Msg {
+                                role: "assistant".into(),
+                                content: format!(
+                                    "Paste the secret for `{}` (typed hidden) [Enter] save  [Esc] cancel",
+                                    name
+                                ),
+                                thinking: None,
+                            });
+                            self.key_prompt = Some(KeyPrompt {
+                                name: name.to_string(),
+                                secret: String::new(),
+                            });
+                            self.status = String::from("Entering secret…");
+                            self.chat_scroll = 0;
+                        }
+                        _ => {
+                            self.messages.push(Msg {
+                                role: "assistant".into(),
+                                content:
+                                    "[Usage: --set-key <name> — e.g. `--set-key tavily`]".into(),
+                                thinking: None,
+                            });
+                            self.chat_scroll = 0;
+                        }
+                    }
+                    return;
+                }
+                "--spotify-auth" => {
+                    self.messages.push(Msg {
+                        role: "user".into(),
+                        content: stripped.clone(),
+                        thinking: None,
+                    });
+                    self.start_spotify_auth();
+                    self.chat_scroll = 0;
+                    return;
+                }
+                "--setup" => {
+                    self.messages.push(Msg {
+                        role: "user".into(),
+                        content: stripped.clone(),
+                        thinking: None,
+                    });
+                    self.onboarding = Some(Onboarding::new());
+                    self.status = String::from("Setup screen");
+                    self.chat_scroll = 0;
+                    return;
+                }
+                _ => {}
+            }
+        }
 
         // ── Hands-free voice mode toggles (self-aware built-in commands) ──
         if crate::agent::voice_mode_enter_match(&lower)
@@ -896,6 +1044,43 @@ impl TuiApp {
         // Input line
         let input = InputLine::new(&self.input);
         f.render_widget(input, outer[2]);
+
+        // Masked --set-key prompt overlay (hides the secret while typing).
+        if let Some(kp) = &self.key_prompt {
+            let pop_w = (size.width.saturating_mul(3) / 4).clamp(30, 64);
+            let pop_h = 6;
+            let pop = Rect::new(
+                size.x + size.width.saturating_sub(pop_w) / 2,
+                outer[0].y + outer[1].height.saturating_sub(pop_h) / 2,
+                pop_w,
+                pop_h,
+            );
+            f.render_widget(Clear, pop);
+            let title = format!(" --set-key {} — secret hidden ", kp.name);
+            let masked = if kp.secret.is_empty() {
+                Span::from("Type the secret (hidden)…")
+            } else {
+                Span::styled(
+                    "•".repeat(kp.secret.len()),
+                    Style::default().fg(Color::Cyan),
+                )
+            };
+            let paragraph = Paragraph::new(Vec::from([
+                Line::from(Span::styled(
+                    title,
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(masked),
+                Line::from(" "),
+                Line::from(format!(
+                    "{} chars · [Enter] save · [Esc] cancel",
+                    kp.secret.len()
+                )),
+            ]))
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
+            f.render_widget(paragraph, pop);
+        }
 
         // Cursor
         if let Some(cursor_area) = InputLine::cursor_area(outer[2], self.cursor_pos, &self.input) {
