@@ -632,8 +632,7 @@ impl TuiApp {
             crate::tui::onboarding::Action::SetTavily
             | crate::tui::onboarding::Action::SetGemini
             | crate::tui::onboarding::Action::SetTodoist
-            | crate::tui::onboarding::Action::SetSpotifyId
-            | crate::tui::onboarding::Action::SetSpotifySecret => {
+            | crate::tui::onboarding::Action::SetSpotifyId => {
                 if let Some(onb) = &mut self.onboarding {
                     onb.begin_secret(idx);
                 }
@@ -750,39 +749,29 @@ impl TuiApp {
             "gemini" => self.config.search.gemini_api_key = Some(format!("keyring:{}", name)),
             "todoist" => self.config.todoist.api_token = Some(format!("keyring:{}", name)),
             "spotify_id" => self.config.spotify.client_id = Some(format!("keyring:{}", name)),
-            "spotify_secret" => {
-                self.config.spotify.client_secret = Some(format!("keyring:{}", name))
-            }
             _ => {}
         }
         self.config.save()?;
         Ok(())
     }
 
-    /// Kick off the one-time Spotify device authorization in the background,
+    /// Kick off the one-time Spotify PKCE authorization in the background,
     /// streaming its progress into the onboarding panel.
     fn start_spotify_auth(&mut self) {
-        let (id, secret) = match (
-            self.config.spotify.client_id.clone(),
-            self.config.spotify.client_secret.clone(),
-        ) {
-            (Some(a), Some(b)) if !a.trim().is_empty() && !b.trim().is_empty() => (a, b),
+        let id = match &self.config.spotify.client_id {
+            Some(a) if !a.trim().is_empty() => a.clone(),
             _ => {
                 self.app_emit(
-                    "Set both Spotify keys first with `--set-key spotify_id` and \
-                     `--set-key spotify_secret`.",
+                    "Store your Spotify client id first with `--set-key spotify_id`.",
                 );
                 return;
             }
         };
-        self.app_emit("Starting Spotify authorization — a URL + code will appear below.");
+        self.app_emit("Starting Spotify authorization — a browser tab will open.");
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let _ = tx.send(AppEvent::OnboardingLog(
-                "Contacting Spotify…".to_string(),
-            ));
             let result =
-                crate::tools::spotify::authorize_with(&id, &secret, |line| {
+                crate::tools::spotify::authorize_with(&id, |line| {
                     let _ = tx.send(AppEvent::OnboardingLog(format!("  {line}")));
                 })
                 .await;

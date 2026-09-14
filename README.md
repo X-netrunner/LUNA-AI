@@ -107,7 +107,7 @@ api_token = ""                # get one at todoist.com/app/settings/integrations
 
 [spotify]
 client_id = "keyring:spotify_id"
-client_secret = "keyring:spotify_secret"
+# PKCE flow needs no client secret — only the client id above.
 
 [proactive]
 enabled = true
@@ -241,24 +241,25 @@ Luna can control your Spotify over the Web API: play your Liked Songs,
 playlists, artists, albums, search, and transport control. Playback needs a
 **Premium** account (play endpoints are 403 on free tiers).
 
-1. Go to `developer.spotify.com/dashboard` and create an app (any name).
-2. Store the Client ID and Secret in the keyring:
+1. Go to `developer.spotify.com/dashboard`, create an app (any name), and add
+   `http://127.0.0.1:8888/callback` as a **Redirect URI**.
+2. Store the Client ID in the keyring (auth uses PKCE — **no client secret
+   needed**, just the id):
    ```bash
    luna --set-key spotify_id
-   luna --set-key spotify_secret
    ```
-3. Point `luna.toml` at them:
+3. Point `luna.toml` at it:
    ```toml
    [spotify]
    client_id = "keyring:spotify_id"
-   client_secret = "keyring:spotify_secret"
    ```
 4. Authorize once:
    ```bash
    luna --spotify-auth
    ```
-   Open the printed URL, approve, and the refresh token is stored in the
-   keyring while `luna.toml` is updated with `refresh_token = "keyring:spotify_refresh"`.
+   A browser tab opens to approve access; Luna catches the redirect on
+   `127.0.0.1:8888`, and the refresh token is stored in the keyring while
+   `luna.toml` is updated with `refresh_token = "keyring:spotify_refresh"`.
 5. Keep a Spotify client playing on a device signed in to the same account
    (desktop/mobile/web player all work).
 

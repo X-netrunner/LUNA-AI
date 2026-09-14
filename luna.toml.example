@@ -59,12 +59,11 @@ api_token = "your_token_here"
 # Requires Spotify Premium and a Spotify app at developer.spotify.com/dashboard.
 # Setup:
 #   luna --set-key spotify_id
-#   luna --set-key spotify_secret
-#   luna --spotify-auth          # one-time browser approval
+#   luna --spotify-auth          # one-time browser approval (opens a browser tab)
+# Auth uses PKCE, so no client secret is needed — just the client id above.
 # The refresh token is written to luna.toml automatically as keyring:spotify_refresh.
 [spotify]
 client_id = "keyring:spotify_id"
-client_secret = "keyring:spotify_secret"
 
 [proactive]
 enabled = true

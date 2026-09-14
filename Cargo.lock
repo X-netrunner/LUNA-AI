@@ -1607,6 +1607,7 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "toml",
  "toml_edit 0.22.27",

@@ -85,19 +85,14 @@ pub fn integrations(config: &LunaConfig) -> Vec<Integration<'static>> {
             hint: "app at developer.spotify.com/dashboard",
             keyring_name: Some("spotify_id"),
         },
-        Integration {
-            name: "Spotify (music) — client secret",
-            configured: s(&config.spotify.client_secret),
-            hint: "same app — revealed once on creation",
-            keyring_name: Some("spotify_secret"),
-        },
     ]
 }
 
-/// "spotify auth" entry qualifies once both client id and secret are set.
+/// "spotify auth" entry qualifies once the client id is set. The PKCE flow
+/// needs no client secret, only the id.
 pub fn spotify_auth_ready(config: &LunaConfig) -> bool {
     let s = |v: &Option<String>| !v.as_deref().map(str::trim).unwrap_or("").is_empty();
-    s(&config.spotify.client_id) && s(&config.spotify.client_secret)
+    s(&config.spotify.client_id)
 }
 
 /// Text-mode one-shot guide (printed at startup on fresh devices, and by the
@@ -131,8 +126,8 @@ pub fn guide_text(config: &LunaConfig) -> String {
     out.push_str("    - \"what can you do\"          lists every tool I have\n");
     out.push_str("    - luna --tui                  interactive setup screen\n\n");
     if !spotify_auth_ready(config) {
-        out.push_str("  Tip: set both Spotify keys, then run `luna --spotify-auth` to\n");
-        out.push_str("  play your liked songs, playlists and more.\n\n");
+        out.push_str("  Tip: store your Spotify client id, then run `luna --spotify-auth`\n");
+        out.push_str("  to play your liked songs, playlists and more.\n\n");
     }
     out.push_str("  Say \"ok forget it\" or press Ctrl-C to just start chatting.\n");
     out.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");

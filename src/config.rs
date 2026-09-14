@@ -267,8 +267,8 @@ pub struct SpotifyConfig {
     /// Store it with `luna --set-key spotify_id` and reference it as
     /// `keyring:spotify_id`. Leave unset to disable Spotify tools.
     pub client_id: Option<String>,
-    /// Spotify OAuth client secret — `luna --set-key spotify_secret`,
-    /// referenced as `keyring:spotify_secret`.
+    /// Optional. The OAuth flow uses PKCE and does NOT need a client secret;
+    /// kept only for backward compatibility with older configs.
     pub client_secret: Option<String>,
     /// The refresh token is stored in the OS keyring (`luna --spotify-auth`
     /// writes it) — never put it in luna.toml.

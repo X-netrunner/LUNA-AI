@@ -25,7 +25,6 @@ pub enum Action {
     SetGemini,
     SetTodoist,
     SetSpotifyId,
-    SetSpotifySecret,
     SpotifyAuth,
     Finish,
 }
@@ -138,13 +137,6 @@ impl Onboarding {
                 enabled: true,
             },
             ActionRow {
-                id: Action::SetSpotifySecret,
-                label: "Spotify — client secret".into(),
-                done: s(&config.spotify.client_secret),
-                hint: "shown once when the Spotify app is created".into(),
-                enabled: true,
-            },
-            ActionRow {
                 id: Action::SpotifyAuth,
                 label: "Spotify — authorize luna (one-time)".into(),
                 done: s(&config.spotify.refresh_token),
@@ -170,7 +162,6 @@ pub fn action_keyring_name(id: Action) -> Option<&'static str> {
         Action::SetGemini => Some("gemini"),
         Action::SetTodoist => Some("todoist"),
         Action::SetSpotifyId => Some("spotify_id"),
-        Action::SetSpotifySecret => Some("spotify_secret"),
         Action::SpotifyAuth | Action::Finish => None,
     }
 }
@@ -239,7 +230,7 @@ pub fn render(onb: &Onboarding, f: &mut Frame, config: &LunaConfig, area: Rect) 
             spans.push(Span::styled("  ✓", Style::default().fg(Color::Green)));
         } else if !row.enabled {
             spans.push(Span::styled(
-                format!("  (needs the two Spotify keys above)  {}", row.hint),
+                format!("  (set the Spotify client id above first)  {}", row.hint),
                 Style::default().fg(Color::DarkGray),
             ));
         } else {
@@ -312,19 +303,14 @@ mod tests {
     }
 
     #[test]
-    fn spotify_auth_gated_until_both_keys() {
+    fn spotify_auth_gated_until_client_id() {
         let o = Onboarding::new();
         let rows = o.actions(&LunaConfig::default());
         let auth = rows.iter().find(|r| r.id == Action::SpotifyAuth).unwrap();
-        assert!(!auth.enabled, "needs both keys");
+        assert!(!auth.enabled, "needs client id");
 
         let mut cfg = LunaConfig::default();
         cfg.spotify.client_id = Some("id".into());
-        let rows = o.actions(&cfg);
-        let auth = rows.iter().find(|r| r.id == Action::SpotifyAuth).unwrap();
-        assert!(!auth.enabled);
-
-        cfg.spotify.client_secret = Some("secret".into());
         let rows = o.actions(&cfg);
         let auth = rows.iter().find(|r| r.id == Action::SpotifyAuth).unwrap();
         assert!(auth.enabled);
@@ -346,7 +332,7 @@ mod tests {
     #[test]
     fn keyring_names_map() {
         assert_eq!(action_keyring_name(Action::SetTavily), Some("tavily"));
-        assert_eq!(action_keyring_name(Action::SetSpotifySecret), Some("spotify_secret"));
+        assert_eq!(action_keyring_name(Action::SetSpotifyId), Some("spotify_id"));
         assert_eq!(action_keyring_name(Action::SpotifyAuth), None);
         assert_eq!(action_keyring_name(Action::Finish), None);
     }

@@ -59,6 +59,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # instead of plaintext in luna.toml
 keyring = { version = "3", features = ["sync-secret-service"] }
 base64 = "0.22"     # Spotify Basic-auth header for OAuth token requests
+sha2 = "0.10"       # PKCE S256 code_challenge for Spotify OAuth
 ratatui = "0.30.2"
 crossterm = "0.29.0"
 
