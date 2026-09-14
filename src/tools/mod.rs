@@ -564,11 +564,14 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 name: "spotify".into(),
                 description: "Control the user's Spotify account via the Spotify Web API: play their \
                               Liked Songs, playlists, artists, albums, search tracks, and transport \
-                              control. Requires the user's Spotify (Premium) linked via \
-                              `luna --spotify-auth`. Use for 'play my liked songs', 'shuffle my liked \
-                              songs', 'play my <playlist>', 'play <song name>', 'next track', \
-                              'what's playing on spotify'. If this fails with a device/authorization \
-                              error, tell the user what to fix.".into(),
+                              control. The user's account is ALREADY authorized — do NOT run \
+                              `luna --spotify-auth` or invent luna flags (there is no \
+                              --spotify-username command). Use for 'play my liked songs', 'shuffle my \
+                              liked songs', 'play my <playlist>', 'play <song name>', 'next track', \
+                              'what's playing on spotify', and questions like 'what is my spotify \
+                              username/account name' (action 'me'), 'how many playlists do i have' \
+                              / 'list my playlists' (action 'playlists'). If a call returns an \
+                              authorization error, tell the user to run `luna --spotify-auth`.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -576,12 +579,14 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                             "type": "string",
                             "enum": ["now", "pause", "resume", "next", "previous", "shuffle",
                                      "play_liked", "search", "play_track", "play_playlist",
-                                     "play_artist", "play_album", "devices"],
+                                     "play_artist", "play_album", "devices", "me", "playlists"],
                             "description": "What to do: now=what's playing, pause/resume/next/previous=transport, \
                                            shuffle (set 'on' true/false), play_liked=play the user's Liked Songs \
                                            (set 'shuffle' true to shuffle), search=find tracks, \
                                            play_track/play_playlist/play_artist/play_album=play by name \
-                                           (name goes in 'query' or 'playlist'), devices=list available devices"
+                                           (name goes in 'query' or 'playlist'), devices=list available devices, \
+                                           me=the account's username/display name/email/plan, \
+                                           playlists=list the user's playlists with track counts"
                         },
                         "query": {
                             "type": "string",

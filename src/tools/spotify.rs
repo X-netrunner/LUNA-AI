@@ -498,10 +498,12 @@ pub async fn run(
         "play_artist" => play_artist(&client, args, config).await,
         "play_album" => play_album(&client, args, config).await,
         "devices" => devices(&client, config).await,
+        "me" => me(&client, config).await,
+        "playlists" => playlists(&client, config).await,
         other => Err(anyhow!(
             "Unknown spotify action '{}'. Valid: now, pause, resume, next, previous, \
              shuffle, play_liked, search, play_track, play_playlist, play_artist, \
-             play_album, devices",
+             play_album, devices, me, playlists",
             other
         )),
     }
@@ -719,6 +721,51 @@ async fn play_album(client: &Client, args: &Value, config: &LunaConfig) -> Resul
     let uri = a["uri"].as_str().unwrap_or("");
     play(client, Some(uri), None, config).await?;
     Ok(format!("Playing \"{}\" by {}.", name, artist))
+}
+
+async fn playlists(client: &Client, config: &LunaConfig) -> Result<String> {
+    let v = api_send(
+        client,
+        "GET",
+        "/me/playlists",
+        Some(&[("limit", "50")]),
+        None,
+        config,
+    )
+    .await?;
+    let list = v["items"].as_array().cloned().unwrap_or_default();
+    if list.is_empty() {
+        return Ok("You have no playlists.".to_string());
+    }
+    let mut lines: Vec<String> = list
+        .iter()
+        .filter_map(|p| {
+            let name = p["name"].as_str()?;
+            let n = p["tracks"]["total"].as_i64().unwrap_or(0);
+            Some(format!("- {} ({} tracks)", name, n))
+        })
+        .collect();
+    let total = v["total"].as_i64().unwrap_or(lines.len() as i64);
+    lines.insert(0, format!("You have {} playlists:", total));
+    Ok(lines.join("\n"))
+}
+
+async fn me(client: &Client, config: &LunaConfig) -> Result<String> {
+    let v = api_send(client, "GET", "/me", None, None, config).await?;
+    let display = v["display_name"].as_str().unwrap_or("?");
+    let id = v["id"].as_str().unwrap_or("?");
+    let country = v["country"].as_str().unwrap_or("?");
+    let product = v["product"].as_str().unwrap_or("?");
+    let email = v["email"].as_str().unwrap_or("");
+    let email_part = if email.is_empty() {
+        String::new()
+    } else {
+        format!(", email {}", email)
+    };
+    Ok(format!(
+        "Spotify account: {} (id {}) — country {}, plan {}{}.",
+        display, id, country, product, email_part
+    ))
 }
 
 async fn devices(client: &Client, config: &LunaConfig) -> Result<String> {
