@@ -33,15 +33,31 @@ pub fn missing_reason() -> Option<String> {
     None
 }
 
-fn read_token() -> Result<String> {
+fn read_config() -> Result<Value> {
     let cfg = data_dir().join("config.json");
     let raw =
         std::fs::read_to_string(&cfg).context("read ~/.local/share/whapp/config.json")?;
     let v: Value = serde_json::from_str(&raw).context("parse whapp config.json")?;
-    v["token"]
-        .as_str()
+    if v["token"].as_str().is_none() {
+        return Err(anyhow!("no token in {}", cfg.display()));
+    }
+    Ok(v)
+}
+
+fn read_token() -> Result<String> {
+    read_config()?
+        .get("token")
+        .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| anyhow!("no token in {}", cfg.display()))
+        .ok_or_else(|| anyhow!("no token in whapp config.json"))
+}
+
+fn my_phone() -> Option<String> {
+    read_config()
+        .ok()?
+        .get("my_phone")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn base_url(explicit: Option<&str>) -> String {
@@ -58,16 +74,76 @@ fn resolved_base(explicit: Option<&str>) -> String {
     }
 }
 
+/// Turn whatever the user said into a number the bridge can use:
+///   "myself" / "me"      → the phone number of the linked account
+///   "15551234567"/"+919..." → used as-is
+///   "mom", "alice", ...   → looked up in the WhatsApp contacts via the bridge
+async fn resolve_recipient(
+    to: &str,
+    base: &str,
+    token: &str,
+) -> Result<String> {
+    let t = to.trim().to_string();
+    let low = t.to_lowercase();
+
+    if low == "myself" || low == "me" || low == "my number" || low == "my phone" {
+        if let Some(p) = my_phone() {
+            return Ok(p);
+        }
+        bail!(
+            "I can resolve 'myself' once the bridge has seen your number — it records it right \
+             after linking. Ask again in a moment, or give me the full number once."
+        );
+    }
+
+    // A bare number (optionally prefixed with +) passes straight through.
+    if t.chars().all(|c| c.is_ascii_digit()) || t.starts_with('+') {
+        return Ok(t);
+    }
+
+    // Anything else is a name: look it up in the bridge's contact list.
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{base}/resolve"))
+        .bearer_auth(token)
+        .query(&[("name", &t)])
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await
+        .context("WhatsApp bridge is offline — is luna-whapp running?")?;
+    let status = res.status();
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    if status == reqwest::StatusCode::NOT_FOUND {
+        let err = v["error"].as_str().unwrap_or("contact not found");
+        bail!(
+            "{err} — either say a number, or have them message you once so I can find them in contacts."
+        );
+    }
+    if let Some(phone) = v["matches"]
+        .as_array()
+        .and_then(|m| m.first())
+        .and_then(|m| m["phone"].as_str())
+    {
+        return Ok(phone.to_string());
+    }
+    bail!(
+        "no WhatsApp contact matching \"{t}\". Use the full number once, or have them message you so I can save them."
+    );
+}
+
 /// Send a WhatsApp message through the local bridge.
 pub async fn send(to: &str, text: &str, explicit_base: Option<&str>) -> Result<String> {
     if let Some(reason) = missing_reason() {
         bail!("Can't send: {reason}. Run `luna --whatsapp-link` once to pair your WhatsApp.");
     }
+    let token = read_token()?;
+    let base = resolved_base(explicit_base);
+    let recipient = resolve_recipient(to, &base, &token).await?;
     let client = reqwest::Client::new();
     let res = client
-        .post(format!("{}/send", resolved_base(explicit_base)))
-        .bearer_auth(read_token()?)
-        .json(&json!({ "to": to, "text": text }))
+        .post(format!("{base}/send"))
+        .bearer_auth(&token)
+        .json(&json!({ "to": recipient, "text": text }))
         .timeout(std::time::Duration::from_secs(45))
         .send()
         .await
@@ -75,7 +151,7 @@ pub async fn send(to: &str, text: &str, explicit_base: Option<&str>) -> Result<S
     let status_code = res.status();
     let v: Value = res.json().await.unwrap_or(Value::Null);
     match v["ok"].as_bool() {
-        Some(true) => Ok(format!("Message sent to {to} on WhatsApp ({text_len} chars).", text_len = text.trim().chars().count())),
+        Some(true) => Ok(format!("Message sent to {recipient} on WhatsApp ({text_len} chars).", text_len = text.trim().chars().count())),
         _ => {
             let err = v["error"].as_str().unwrap_or("unknown bridge error");
             if status_code == reqwest::StatusCode::SERVICE_UNAVAILABLE {
@@ -105,7 +181,10 @@ pub async fn status(explicit_base: Option<&str>) -> Result<String> {
             let v: Value = res.json().await.unwrap_or(Value::Null);
             let connected = v["connected"].as_bool().unwrap_or(false);
             Ok(if connected {
-                format!("WhatsApp bridge is up and linked (health endpoint at {base}/health).")
+                let who = my_phone()
+                    .map(|p| format!(" (your number: +{p})"))
+                    .unwrap_or_default();
+                format!("WhatsApp bridge is up and linked{who}.")
             } else {
                 format!("WhatsApp bridge is running but not linked — run `luna --whatsapp-link` and scan the QR.")
             })

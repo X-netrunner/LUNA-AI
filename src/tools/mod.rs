@@ -696,12 +696,15 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 name: "whatsapp_send".into(),
                 description: "Send a WhatsApp message using the user's own account through the local \
                               bridge (linked once via 'luna --whatsapp-link'). Use for 'whatsapp ...', \
-                              'send a whatsapp to ...', 'message ... on whatsapp'. Parameters: action=send \
-                              with 'to' as the full international number, digits only (e.g. 15551234567) — \
-                              do NOT invent a number if the user didn't give one, ask first; 'text' is the \
-                              message body. action=status reports whether the bridge is up and linked. If \
-                              the bridge is offline, tell the user to run 'luna --whatsapp-link' or check \
-                              luna-whapp.service.".into(),
+                              'text myself ...', 'send a whatsapp to ...', 'message ... on whatsapp'. \
+                              Parameters: action=send with 'text' as the message body and 'to' as the \
+                              recipient, which may be: the full international number digits only (e.g. \
+                              15551234567), 'myself'/'me' for the user's own number, OR a contact name \
+                              like 'mom' (resolved from their WhatsApp contacts — if it isn't found, \
+                              tell the user and ask for the number). Never invent a recipient; if the \
+                              user didn't specify one, ask. action=status reports whether the bridge \
+                              is up and linked and shows your own number. If the bridge is offline, \
+                              tell the user to run 'luna --whatsapp-link' or check luna-whapp.service.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

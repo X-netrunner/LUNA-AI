@@ -50,7 +50,7 @@ function log(...parts) {
 }
 
 function loadConfig() {
-  let cfg = { port: 7373, token: null };
+  let cfg = { port: 7373, token: null, my_phone: null };
   try {
     cfg = { ...cfg, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) };
   } catch {}
@@ -62,6 +62,14 @@ function loadConfig() {
   return cfg;
 }
 
+function saveConfig(patch) {
+  let cfg = { port: 7373, token: null, my_phone: null };
+  try { cfg = { ...cfg, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) }; } catch {}
+  cfg = { ...cfg, ...patch };
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+  return cfg;
+}
+
 function toJid(raw) {
   const digits = String(raw).replace(/\D/g, '');
   if (digits.length < 11 || digits.length > 15) {
@@ -70,6 +78,27 @@ function toJid(raw) {
     );
   }
   return `${digits}@s.whatsapp.net`;
+}
+
+function extractPhone(jid) {
+  if (!jid) return null;
+  const m = jid.match(/^(\d+)/);
+  return m ? m[1] : null;
+}
+
+// Search the aggregated contacts map for a name (case-insensitive substring
+// match). Returns [{ jid, phone, name }] (max 5).
+function resolveContact(contactsMap, name) {
+  if (!contactsMap || !name) return [];
+  const q = name.toLowerCase();
+  return [...contactsMap.values()]
+    .filter((c) => c.name && c.name.toLowerCase().includes(q))
+    .slice(0, 5)
+    .map((c) => ({
+      jid: c.id,
+      phone: extractPhone(c.id),
+      name: c.name,
+    }));
 }
 
 // Baileys expects a pino-style logger (with .child()); quietLogger mimics that
@@ -84,15 +113,50 @@ function quietLogger() {
   return logger;
 }
 
+const CONTACTS_PATH = path.join(DATA_DIR, 'contacts.json');
+
+function loadContacts() {
+  try {
+    return JSON.parse(fs.readFileSync(CONTACTS_PATH, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+function persistContacts(contacts) {
+  try {
+    fs.writeFileSync(CONTACTS_PATH, JSON.stringify(contacts, null, 2) + '\n');
+  } catch {}
+}
+
 // ── Baileys socket (links via QR, reconnects, persists session) ───────────────
 // `giveUpAfter` (number of closed connections without ever opening) makes a
 // one-shot caller like `link` stop retrying and exit with a diagnostic instead
 // of hanging on a blank screen forever. `serve` keeps retrying indefinitely.
 
-function createSocket({ onQr, onOpen, onLoggedOut, giveUpAfter = null }) {
+function createSocket({ onQr, onOpen, onLoggedOut, onContacts, giveUpAfter = null }) {
   let sock = null;
   let connecting = false;
   let failures = 0;
+  // id (jid) → { id, name } aggregated from WhatsApp's contacts.upsert /
+  // contacts.update pushes (their version of the contact book) so name-based
+  // sends work without Baileys' removed in-memory store.
+  const contacts = new Map(loadContacts().map((c) => [c.id, c]));
+
+  function mergeContacts(incoming) {
+    let changed = false;
+    for (const c of incoming) {
+      const prev = contacts.get(c.id) || {};
+      const name = c.name || c.notify || prev.name || prev.notify;
+      if (!name) continue;
+      contacts.set(c.id, { id: c.id, name });
+      changed = true;
+    }
+    if (changed) {
+      persistContacts([...contacts.values()]);
+      if (onContacts) onContacts(contacts.size);
+    }
+  }
 
   async function connect() {
     if (connecting) return;
@@ -111,13 +175,20 @@ function createSocket({ onQr, onOpen, onLoggedOut, giveUpAfter = null }) {
     });
 
     sock.ev.on('creds.update', saveCreds);
-
+    sock.ev.on('contacts.upsert', mergeContacts);
+    sock.ev.on('contacts.update', mergeContacts);
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
       if (qr && onQr) onQr(qr);
       if (connection === 'open') {
         failures = 0;
         log('connected');
+        // Persist the logged-in user's phone so Luna can resolve 'myself' later.
+        const phone = extractPhone(sock?.user?.id);
+        if (phone) {
+          log(`logged-in phone: ${phone}`);
+          saveConfig({ my_phone: phone });
+        }
         if (onOpen) onOpen();
       } else if (connection === 'close') {
         connecting = false;
@@ -146,12 +217,12 @@ function createSocket({ onQr, onOpen, onLoggedOut, giveUpAfter = null }) {
   }
 
   connect();
-  return { get: () => sock };
+  return { get: () => sock, contacts: () => contacts };
 }
 
 // ── HTTP API ──────────────────────────────────────────────────────────────────
 
-function startHttp(getSocket, cfg) {
+function startHttp({ get: getSocket, contacts: getContacts }, cfg) {
   const server = http.createServer(async (req, res) => {
     const send = (code, body) => {
       res.writeHead(code, { 'Content-Type': 'application/json' });
@@ -171,10 +242,42 @@ function startHttp(getSocket, cfg) {
         connected: !!sock?.user,
         loggedIn: !!sock?.user,
         port: cfg.port,
+        my_phone: cfg.my_phone || null,
+      });
+    }
+
+    if (req.url === '/me' && req.method === 'GET') {
+      const sock = getSocket();
+      if (!sock?.user) return send(503, { ok: false, error: 'bridge not linked' });
+      return send(200, {
+        ok: true,
+        phone: extractPhone(sock.user.id),
+        jid: sock.user.id,
+        name: sock.user.name || null,
       });
     }
 
     if (!okToken) return send(401, { ok: false, error: 'unauthorized' });
+
+    if (req.url === '/resolve' && req.method === 'GET') {
+      const sock = getSocket();
+      if (!sock?.user) return send(503, { ok: false, error: 'bridge not linked' });
+      const name = new URL(req.url, 'http://localhost').searchParams.get('name') || '';
+      const contactsMap = getContacts();
+      if (contactsMap.size === 0) {
+        return send(404, {
+          ok: false,
+          error:
+            "no contacts indexed yet — WhatsApp only pushes them on a device link or when they message you. " +
+            "Re-pair once from the terminal (luna --whatsapp-link) to backfill your contact book now.",
+        });
+      }
+      const results = resolveContact(contactsMap, name);
+      if (results.length === 0) {
+        return send(404, { ok: false, error: `no contact named "${name}" matched` });
+      }
+      return send(200, { ok: true, matches: results });
+    }
 
     if (req.url === '/send' && req.method === 'POST') {
       let body = '';
@@ -232,14 +335,15 @@ if (cmd === 'link') {
   });
 } else if (cmd === 'serve') {
   const cfg = loadConfig();
-  const { get } = createSocket({
+  const ctx = createSocket({
     onQr: (qr) => {
       console.log('\nNot linked yet — scan this QR in WhatsApp → Linked devices:\n');
       QRCode.generate(qr, { small: true });
     },
     onLoggedOut: () => console.log('\nLogged out — a fresh QR will appear, rescan to relink.\n'),
+    onContacts: (n) => log(`contacts indexed: ${n}`),
   });
-  startHttp(get, cfg);
+  startHttp(ctx, cfg);
   console.log(`Luna WhatsApp bridge listening on 127.0.0.1:${cfg.port} (health: /health)`);
 } else if (cmd === 'status') {
   const cfg = loadConfig();
