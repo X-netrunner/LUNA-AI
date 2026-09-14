@@ -102,18 +102,22 @@ fn random_hex(n: usize) -> Result<String> {
 
 /// Open the user's default browser (best effort). Returns whether it was
 /// spawned; the caller prints the URL so it can be opened manually otherwise.
-async fn open_browser(url: &str) -> bool {
+///
+/// Fire-and-forget: we never wait for the browser (or its `xdg-open` shim) to
+/// exit — xdg-open can linger for as long as the browser runs, and blocking on
+/// it would delay (or skip) binding the loopback callback listener.
+fn open_browser(url: &str) -> bool {
     for cmd in ["xdg-open", "gio", "open"] {
-        if let Ok(status) = tokio::process::Command::new(cmd)
+        if let Ok(child) = std::process::Command::new(cmd)
             .arg(url)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .await
+            .spawn()
         {
-            if status.success() {
-                return true;
-            }
+            // Detach: don't reap/wait; when this short-lived flow exits the
+            // browser child is reparented to init.
+            std::mem::forget(child);
+            return true;
         }
     }
     false
@@ -145,82 +149,95 @@ where
         challenge
     );
 
-    emit("Opening your browser — approve Luna's access to Spotify…");
-    if !open_browser(&url).await {
-        emit(&format!("Couldn't open a browser automatically. Open this URL manually:\n  {}", url));
-    }
-
-    // Catch the redirect. Loopback + ephemeral + state-pinned; Spotify codes
-    // expire in ~10 minutes.
+    // Bind the loopback callback BEFORE inviting the browser to redirect there,
+    // so a slow/lingering xdg-open can never cost us the authorization code.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8888")
         .await
         .context("Could not bind 127.0.0.1:8888 for the OAuth callback — is another process using that port?")?;
+
+    emit("Opening your browser — approve Luna's access to Spotify…");
+    if !open_browser(&url) {
+        emit(&format!("Couldn't open a browser automatically. Open this URL manually:\n  {}", url));
+    }
     emit("Waiting for you to approve in the browser…");
-    let (mut sock, _addr) = match tokio::time::timeout(
-        Duration::from_secs(300),
-        listener.accept(),
-    )
-    .await
-    {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => anyhow::bail!("Callback accept failed: {e}"),
-        Err(_) => anyhow::bail!("Timed out waiting for Spotify authorization (5 min)"),
-    };
+
+    // Keep accepting until a genuine callback arrives (a stray probe or the
+    // browser's favicon request is answered and ignored, not fatal). Loopback,
+    // ephemeral, state-pinned; Spotify codes expire in ~10 minutes.
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let mut code: Option<String> = None;
+    let mut cb_state: Option<String> = None;
+    while code.is_none() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("Timed out waiting for Spotify authorization (5 min)");
+        }
+        let (mut sock, _addr) = match tokio::time::timeout(remaining, listener.accept()).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => anyhow::bail!("Callback accept failed: {e}"),
+            Err(_) => anyhow::bail!("Timed out waiting for Spotify authorization (5 min)"),
+        };
 
     // Read the request head up to the blank line.
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut head = Vec::new();
-    let mut buf = [0u8; 512];
-    let mut total = 0usize;
-    loop {
-        let n = sock.read(&mut buf).await.context("read callback request")?;
-        if n == 0 {
-            break;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut head = Vec::new();
+        let mut buf = [0u8; 512];
+        let mut total = 0usize;
+        loop {
+            let n = sock.read(&mut buf).await.context("read callback request")?;
+            if n == 0 {
+                break;
+            }
+            head.extend_from_slice(&buf[..n]);
+            total += n;
+            if head.windows(4).any(|w| w == b"\r\n\r\n") || total > 16384 {
+                break;
+            }
         }
-        head.extend_from_slice(&buf[..n]);
-        total += n;
-        if head.windows(4).any(|w| w == b"\r\n\r\n") || total > 16384 {
-            break;
+
+        let head_str = String::from_utf8_lossy(&head);
+        let query = head_str
+            .split_whitespace()
+            .nth(1)
+            .and_then(|p| p.split('?').nth(1))
+            .unwrap_or("");
+
+        let params: Vec<(String, String)> = query
+            .split('&')
+            .filter_map(|pair| {
+                let (k, v) = pair.split_once('=')?;
+                Some((k.to_string(), urldecode(v)))
+            })
+            .collect();
+        code = params
+            .iter()
+            .find(|(k, _)| k == "code")
+            .map(|(_, v)| v.clone());
+        cb_state = params
+            .iter()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.clone());
+
+        if code.is_none() {
+            // Not the real callback (probe, favicon fetch, manual visit) —
+            // answer and keep waiting for the actual redirect.
+            let _ = sock.write_all(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 46\r\nConnection: close\r\n\r\nNot the Spotify callback. Check your Luna window.",
+            ).await;
+            let _ = sock.shutdown().await;
+            continue;
         }
-    }
 
-    let head_str = String::from_utf8_lossy(&head);
-    let query = head_str
-        .split_whitespace()
-        .nth(1)
-        .and_then(|p| p.split('?').nth(1))
-        .unwrap_or("");
-
-    let params: Vec<(String, String)> = query
-        .split('&')
-        .filter_map(|pair| {
-            let (k, v) = pair.split_once('=')?;
-            Some((k.to_string(), urldecode(v)))
-        })
-        .collect();
-    let code = params
-        .iter()
-        .find(|(k, _)| k == "code")
-        .map(|(_, v)| v.clone());
-    let cb_state = params
-        .iter()
-        .find(|(k, _)| k == "state")
-        .map(|(_, v)| v.clone());
-
-    if code.is_none() {
         let _ = sock.write_all(
-            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 46\r\nConnection: close\r\n\r\nNo authorization code in the callback URL.",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 55\r\nConnection: close\r\n\r\nSpotify authorized. You can close this tab and return to Luna.",
         ).await;
-        anyhow::bail!("Spotify redirected without an authorization code.");
+        let _ = sock.shutdown().await;
+        break;
     }
+
     if cb_state.as_deref() != Some(&state) {
         anyhow::bail!("OAuth state mismatch — possible CSRF, aborting.");
     }
-
-    let _ = sock.write_all(
-        b"HTTP/1.1 200 OK\r\nContent-Length: 55\r\nConnection: close\r\n\r\nSpotify authorized. You can close this tab and return to Luna.",
-    ).await;
-    let _ = sock.shutdown().await;
 
     emit("Authorization received — swapping code for tokens…");
 
