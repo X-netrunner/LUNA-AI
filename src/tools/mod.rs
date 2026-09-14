@@ -15,6 +15,7 @@ pub mod backup;
 pub mod spotify;
 pub mod todoist;
 pub mod whatsapp;
+pub mod sysmode;
 pub mod web;
 
 use crate::llm::ollama::{ToolCall, ToolDef, ToolFunction};
@@ -693,6 +694,48 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         ToolDef {
             r#type: "function".into(),
             function: ToolFunction {
+                name: "sysmode".into(),
+                description: "Luna's interface to the 'sysmode' hardening-profile switcher \
+                              (normally installed at /usr/local/bin/sysmode). Actions: \
+                              action=status reports the current security profile and firewall/\
+                              kernel state (works without root); action=check (or health) runs \
+                              a full self-test of the whole setup — recon-deceiver honeypot, IDS \
+                              log analyst, Cowrie SSH honeypot, tcpdump MAC scanner, decoy wifi, \
+                              dnscrypt-proxy, auditd, sshd state, decoy listening ports, and \
+                              log freshness — so you can say 'is the honeypot working?' or 'test \
+                              if everything is working'; action=switch with 'mode' in \
+                              {secure, cyber, stealth, lockdown} to change the profile — 'stealth' \
+                              accepts optional 'hotspot' true/false to broadcast a decoy WiFi AP \
+                              (requires [agent] sudo_password); action=reapply re-forces the \
+                              current profile (root); action=logs pulls honeypot/IDS attack logs \
+                              (works without root). If the tool is not installed, say so plainly \
+                              and tell the user to install sysmode or set [sysmode] bin.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["status", "check", "switch", "reapply", "logs"],
+                            "description": "what to do with sysmode"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["secure", "cyber", "stealth", "lockdown"],
+                            "description": "profile to switch to (only for action=switch)"
+                        },
+                        "hotspot": {
+                            "type": "boolean",
+                            "description": "stealth only: true to broadcast a decoy WiFi AP matching the spoofed hostname, false to skip"
+                        }
+                    },
+                    "required": ["action"]
+                }),
+            },
+        },
+
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
                 name: "whatsapp_send".into(),
                 description: "Interact with the user's own WhatsApp via the local bridge (linked \
                               once via 'luna --whatsapp-link'). SEND-ONLY: it cannot read incoming \
@@ -1292,6 +1335,57 @@ echo "STATUS=$STATUS"
                     }
                 }
                 _ => Ok(crate::tools::backup::status().await?),
+            }
+        }
+
+        "sysmode" => {
+            let scfg = &config.sysmode;
+            if !scfg.enabled {
+                Ok("sysmode support is disabled in config ([sysmode] enabled = false). \
+                    Tell the user to re-enable it in luna.toml if they want it."
+                    .into())
+            } else {
+                let action = args["action"].as_str().unwrap_or("status");
+                match action {
+                    "switch" => {
+                        let mode = args["mode"].as_str().unwrap_or("");
+                        if mode.is_empty() {
+                            Ok("The profile to switch to was missing. Ask the user which \
+                                one: secure, cyber, stealth, or lockdown."
+                                .into())
+                        } else {
+                            let hotspot = args.get("hotspot").and_then(|v| v.as_bool());
+                            match crate::tools::sysmode::switch_mode(scfg, mode, hotspot, sudo_pass)
+                                .await
+                            {
+                                Ok(out) => Ok(out),
+                                Err(e) => Ok(format!(
+                                    "Couldn't switch to the {mode} profile: {e:#}"
+                                )),
+                            }
+                        }
+                    }
+                    "status" => match crate::tools::sysmode::status(scfg).await {
+                        Ok(out) => Ok(out),
+                        Err(e) => Ok(format!("Couldn't read sysmode status: {e:#}")),
+                    },
+                    "check" | "health" => match crate::tools::sysmode::health_check(scfg).await {
+                        Ok(out) => Ok(out),
+                        Err(e) => Ok(format!("Couldn't run the sysmode health check: {e:#}")),
+                    },
+                    "logs" => match crate::tools::sysmode::logs(scfg).await {
+                        Ok(out) => Ok(out),
+                        Err(e) => Ok(format!("Couldn't read sysmode logs: {e:#}")),
+                    },
+                    "reapply" => match crate::tools::sysmode::reapply(scfg, sudo_pass).await {
+                        Ok(out) => Ok(out),
+                        Err(e) => Ok(format!("Couldn't re-apply the sysmode profile: {e:#}")),
+                    },
+                    _ => Ok(format!(
+                        "Unknown sysmode action '{action}'. Valid actions: status, check, \
+                         switch, reapply, logs."
+                    )),
+                }
             }
         }
 

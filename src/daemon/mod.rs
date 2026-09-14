@@ -160,24 +160,9 @@ pub async fn run(config: LunaConfig) -> Result<()> {
                 tracing::warn!("Disk cycle failed: {}", e);
             }
         }
-
-        // ── 6. Orphaned packages ─────────────────────────────────────────
-        if let Ok(n) = sh("pacman -Qtdq 2>/dev/null | wc -l").await {            if let Ok(count) = n.trim().parse::<u32>() {
-                if count > 0 {
-                    static ONCE: std::sync::atomic::AtomicBool =
-                        std::sync::atomic::AtomicBool::new(false);
-                    if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        notify(
-                            "Luna daemon",
-                            &format!(
-                                "{} orphaned package(s) found. Tell me 'remove orphans' to clean them.",
-                                count
-                            ),
-                        )
-                        .await;
-                    }
-                }
-            }
+// ── 6. Orphaned packages (grace-period auto-removal) ─────────────
+        if let Err(e) = cleanup::orphans_cycle(&config).await {
+            tracing::warn!("Orphaned-package check failed: {}", e);
         }
 
         // ── 7. Monthly shell-history learning ────────────────────────────
@@ -462,4 +447,23 @@ fn job_done(name: &str) {
         .map(|d| d.as_secs().to_string())
         .unwrap_or_default();
     let _ = std::fs::write(&path, now);
+}
+
+/// Days since the marker was last stamped (None if it has never been stamped).
+fn job_marker_age(name: &str) -> Option<u64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last: u64 = std::fs::read_to_string(job_marker_path(name))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(now.saturating_sub(last) / 86400)
+}
+
+/// Forget a job marker so its window starts fresh.
+fn job_forget(name: &str) {
+    let _ = std::fs::remove_file(job_marker_path(name));
 }

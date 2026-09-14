@@ -196,3 +196,139 @@ async fn size_of(path: &str) -> u64 {
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
 }
+
+// ── Orphaned packages (pacman -Qdtq) ─────────────────────────────────────────
+// With orphan_cleanup_days = 0 the daemon only notifies once per run. With a
+// positive value it stamps a "first seen" marker the day orphans appear and
+// auto-removes them (via sudo pacman -Rns) once that window elapses, then
+// forgets the marker so a later batch gets its own grace period. Packages in
+// [daemon] orphan_keep are never touched.
+
+pub(crate) async fn orphans_cycle(config: &LunaConfig) -> Result<()> {
+    // Collect orphans and drop everything on the keep-list.
+    let raw = sh("pacman -Qtdq 2>/dev/null").await.unwrap_or_default();
+    let mut orphans: Vec<String> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    orphans.retain(|p| !config.daemon.orphan_keep.iter().any(|k| k == p));
+    orphans.sort();
+
+    if orphans.is_empty() {
+        super::job_forget("orphans");
+        return Ok(());
+    }
+
+    let n = orphans.len();
+    let grace = config.daemon.orphan_cleanup_days;
+
+    let list = |pkgs: &[String]| pkgs.join(" ");
+    let prompt = |pkgs: &[String]| {
+        format!(
+            "{} orphaned package(s) found: {}. Say 'sudo pacman -Rns --noconfirm {}' to remove them.",
+            n,
+            list(pkgs),
+            list(pkgs)
+        )
+    };
+
+    // Notify-only mode: report once per daemon run, touch nothing.
+    if grace == 0 {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static ONCE: AtomicBool = AtomicBool::new(false);
+        if !ONCE.swap(true, Ordering::Relaxed) {
+            super::notify("Luna daemon", &prompt(&orphans)).await;
+        }
+        return Ok(());
+    }
+
+    // Grace mode: give the user time to intervene before auto-cleaning.
+    match super::job_marker_age("orphans") {
+        None => {
+            super::job_done("orphans");
+            super::notify(
+                "Luna daemon",
+                &format!(
+                    "{} orphaned package(s) found. They will be auto-removed in {} days — \
+                     set [daemon] orphan_cleanup_days = 0 to only be notified, or add any \
+                     you want to keep to orphan_keep.\n{}",
+                    n,
+                    grace,
+                    prompt(&orphans)
+                ),
+            )
+            .await;
+        }
+        Some(age) if (age as u32) < grace => {
+            // Still inside the grace window — wait.
+        }
+        Some(_) => {
+            match config.agent.sudo_password.as_deref() {
+                Some(pass) => {
+                    let safe = pass.replace('\'', "'\\''");
+                    let cmd = format!(
+                        "echo '{}' | sudo -S pacman -Rns --noconfirm {} >/dev/null 2>&1; echo RC=$?",
+                        safe,
+                        list(&orphans)
+                    );
+                    match sh(&cmd).await {
+                        Ok(out) if out.trim().ends_with("RC=0") => {
+                            super::job_forget("orphans");
+                            super::notify(
+                                "Luna daemon",
+                                &format!(
+                                    "Auto-removed {} orphaned package(s): {}",
+                                    n,
+                                    list(&orphans)
+                                ),
+                            )
+                            .await;
+                        }
+                        Ok(out) => {
+                            let rc = out.trim().rsplit("RC=").next().unwrap_or("?");
+                            super::notify(
+                                "Luna daemon",
+                                &format!(
+                                    "Tried to auto-remove {} orphaned package(s) but pacman \
+                                     exited with status {rc} — check manually.\n{}",
+                                    n,
+                                    prompt(&orphans)
+                                ),
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            super::notify(
+                                "Luna daemon",
+                                &format!(
+                                    "Tried to auto-remove {} orphaned package(s) but the \
+                                     removal command failed: {}",
+                                    n,
+                                    e
+                                ),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                None => {
+                    super::notify(
+                        "Luna daemon",
+                        &format!(
+                            "{} orphaned package(s) are due for automatic removal, but no sudo \
+                             password is configured. Add [agent] sudo_password to luna.toml \
+                             (ironically the same requirement as the WhatsApp bridge).\n{}",
+                            n,
+                            prompt(&orphans)
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}

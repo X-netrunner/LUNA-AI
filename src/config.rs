@@ -47,6 +47,9 @@ pub struct LunaConfig {
 
     #[serde(default)]
     pub whatsapp: WhatsAppConfig,
+
+    #[serde(default)]
+    pub sysmode: SysmodeConfig,
 }
 
 // ── Agent behaviour ───────────────────────────────────────────────────────────
@@ -367,6 +370,12 @@ pub struct DaemonConfig {
     pub journal_vacuum_days: u32,
     /// Keep this many package versions in the pacman cache (needs sudo)
     pub pacman_cache_keep: u32,
+    /// Auto-remove orphaned packages (pacman -Qdtq) once they've been
+    /// detected for this many days. 0 = never remove — only notify.
+    pub orphan_cleanup_days: u32,
+    /// Orphaned packages to never auto-remove (exact package names)
+    #[serde(default)]
+    pub orphan_keep: Vec<String>,
     /// Only notify about cleanups worth at least this much (MB)
     pub min_notify_mb: u64,
     // ── Process usage learning ──
@@ -421,6 +430,8 @@ impl Default for DaemonConfig {
             trash_max_age_days: 14,
             journal_vacuum_days: 30,
             pacman_cache_keep: 2,
+            orphan_cleanup_days: 7,
+            orphan_keep: Vec::new(),
             min_notify_mb: 500,
             learning_enabled: true,
             daily_use_days_per_week: 5,
@@ -462,6 +473,28 @@ impl Default for WhatsAppConfig {
         Self {
             enabled: true,
             base_url: "http://127.0.0.1:7373".into(),
+        }
+    }
+}
+
+// ── sysmode hardening-profile switcher ───────────────────────────────────────
+// Points Luna at the user's `sysmode` CLI (typically /usr/local/bin/sysmode)
+// so Luna can switch profiles, pull attack logs, and run a functional self-test
+// of the recon-deceiver, IDS, honeypot and decoy components.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SysmodeConfig {
+    /// Whether the sysmode tool is available
+    pub enabled: bool,
+    /// Path / command name of the sysmode script
+    pub bin: String,
+}
+
+impl Default for SysmodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bin: "sysmode".into(),
         }
     }
 }

@@ -134,6 +134,20 @@ pub fn classify(input: &str) -> QueryComplexity {
         "whatsapp", "whats app", "send whatsapp", "wa message",
         "text ", "text me", "text myself", "text my phone",
         "send a text", "sms ", "message me", "message him", "message her",
+        // sysmode hardening / decoy-honeypot awareness — Luna must answer
+        // "is the honeypot running?", "switch to lockdown", "is everything
+        // working?" with real tool output, not the fast model's guesses.
+        "sysmode", "system mode", "system profile", "switch profile",
+        "change mode", "switch to ", "current profile", "security profile",
+        "honeypot", "honeypots", "cowrie", "decoy", "recon-deceiver",
+        "recon receiver", "intrusion", "attacker", "intrusions", "attacks",
+        "hardening", "fortress", "lockdown", "security mode",
+        "stealth mode", "secure mode", "cyber mode",
+        "is everything working", "everything is working", "everything working",
+        "working properly", "is it working", "is it running",
+        "make sure everything", "test everything", "test if everything",
+        "check if everything", "check everything", "health check",
+        "is the system", "is everything", "is the alarm",
     ];
     if tool_signals.iter().any(|s| lower.contains(s)) {
         return QueryComplexity::Complex;
@@ -185,6 +199,24 @@ mod tests {
             "message her on whatsapp",
             "just text \"hi this is luna\" to 9148069879",
             "whatsapp my friend that i'll be late",
+        ] {
+            assert!(is_full(q), "{q:?} must not go to the fast model");
+        }
+    }
+
+    #[test]
+    fn sysmode_queries_route_to_full_model() {
+        for q in [
+            "is the honeypot running?",
+            "is the honeypot working properly?",
+            "test if everything is working",
+            "check that everything is working",
+            "switch to stealth mode",
+            "switch to lockdown",
+            "is the system secure?",
+            "what security mode am i in",
+            "check sysmode status",
+            "run a health check on the setup",
         ] {
             assert!(is_full(q), "{q:?} must not go to the fast model");
         }

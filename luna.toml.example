@@ -133,6 +133,15 @@ notify_hours = 1
 enabled = true
 # base_url = "http://127.0.0.1:7373"
 
+# ── sysmode hardening-profile switcher ───────────────────────────────────────
+# Lets Luna switch system security profiles (secure / cyber / stealth /
+# lockdown), pull honeypot/IDS attack logs, and run a self-test of the whole
+# setup ("is the honeypot working?", "test if everything works"). Points at the
+# sysmode CLI — usually already on PATH or at /usr/local/bin/sysmode.
+[sysmode]
+enabled = true
+# bin = "sysmode"
+
 # Disk hygiene: pacman cache, ~/.cache, trash, journals.
 # cleanup_mode:
 #   notify = only report reclaimable space (default, safe)
@@ -144,6 +153,11 @@ trash_max_age_days = 14        # empty trash items older than this
 journal_vacuum_days = 30       # journalctl --vacuum-time (needs sudo)
 pacman_cache_keep = 2          # paccache -rkN (needs sudo)
 min_notify_mb = 500            # only report cleanups worth this much
+
+# Orphaned packages (pacman -Qdtq): auto-remove them once they've been detected
+# this many days. 0 = never remove — only notify. Add exact names to keep.
+orphan_cleanup_days = 7
+# orphan_keep = ["some-orphan-package"]
 
 [voice]
 mode = "basic"              # basic | off
