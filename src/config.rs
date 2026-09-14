@@ -384,6 +384,13 @@ pub struct DaemonConfig {
     pub history_learn_days: u32,
     /// How often (days) Luna re-indexes projects/scripts/configs (0 = off)
     pub index_learn_days: u32,
+    /// Every N days Luna runs the safety check (pacman -Syu, ClamAV, rkhunter,
+    /// UFW, Lynis, monthly AIDE, backup). 0 = off. The script light/full scan
+    /// logic applies. Runs detached so the watchdog never stalls.
+    pub safety_check_days: u32,
+    /// Every N days Luna backs up the home directory to /dev/sda1 at
+    /// /mnt/backup/arch-backup/ (only while the drive is connected). 0 = off.
+    pub backup_days: u32,
     /// Send an "I'm alive" desktop notification every N hours while the
     /// daemon runs (0 = off). The notification includes uptime, cycles,
     /// auto-kills and how much Luna knows.
@@ -428,6 +435,8 @@ impl Default for DaemonConfig {
             .collect(),
             history_learn_days: 30,
             index_learn_days: 30,
+            safety_check_days: 7,
+            backup_days: 7,
             notify_hours: 0,
         }
     }

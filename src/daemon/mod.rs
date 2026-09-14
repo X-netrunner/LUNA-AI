@@ -209,6 +209,44 @@ pub async fn run(config: LunaConfig) -> Result<()> {
             });
         }
 
+        // ── 9. Weekly safety check (detached — ClamAV + pacman -Syu can
+        // take up to an hour; never stall the watchdog) ────────────────────
+        if config.daemon.safety_check_days > 0 {
+            let due = job_due("safety_check", config.daemon.safety_check_days);
+            let running = crate::tools::safety::is_running();
+            if due && !running {
+                let sudo = config.agent.sudo_password.clone();
+                tokio::spawn(async move {
+                    match crate::tools::safety::run("light", sudo.as_deref(), false).await {
+                        Ok(summary) => {
+                            tracing::info!("Safety check: {}", summary);
+                            job_done("safety_check");
+                            notify("Luna daemon — Safety Check", &summary).await;
+                        }
+                        Err(e) => tracing::warn!("Safety check failed: {}", e),
+                    }
+                });
+            }
+        }
+
+        // ── 10. Weekly backup (/dev/sda1 only — skipped while unplugged) ──
+        if config.daemon.backup_days > 0
+            && job_due("backup", config.daemon.backup_days)
+            && std::path::Path::new("/dev/sda1").exists()
+        {
+            let sudo = config.agent.sudo_password.clone();
+            tokio::spawn(async move {
+                match crate::tools::backup::run(sudo.as_deref()).await {
+                    Ok(summary) => {
+                        tracing::info!("Backup: {}", summary);
+                        job_done("backup");
+                        notify("Luna daemon — Backup", &summary).await;
+                    }
+                    Err(e) => tracing::warn!("Backup failed: {}", e),
+                }
+            });
+        }
+
         tracker.save_if_dirty();
         prev_jiffies.retain(|pid, _| procs.iter().any(|p| p.pid == *pid));
         cycles += 1;
@@ -385,4 +423,43 @@ fn fmt_uptime(d: Duration) -> String {
     } else {
         format!("{}m", mins.max(1))
     }
+}
+
+// ── Marker-gated jobs (safety check, backup) ─────────────────────────────────
+
+/// Path of a job marker in ~/.local/share/luna/last_<name>.
+fn job_marker_path(name: &str) -> std::path::PathBuf {
+    crate::memory::workflow::marker_dir().join(format!("last_{}", name))
+}
+
+/// True when `days` have passed since the marker was last written (or it has never run).
+fn job_due(name: &str, days: u32) -> bool {
+    if days == 0 {
+        return false;
+    }
+    let path = job_marker_path(name);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(ts) = std::fs::read_to_string(&path) {
+        let last: u64 = ts.trim().parse().unwrap_or(0);
+        if now.saturating_sub(last) < days as u64 * 86400 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Stamp a job marker so its window restarts.
+fn job_done(name: &str) {
+    let path = job_marker_path(name);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default();
+    let _ = std::fs::write(&path, now);
 }

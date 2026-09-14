@@ -10,6 +10,8 @@ pub mod proactive;
 pub mod reminders;
 pub mod security;
 pub mod shell;
+pub mod safety;
+pub mod backup;
 pub mod spotify;
 pub mod todoist;
 pub mod web;
@@ -506,8 +508,12 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             r#type: "function".into(),
             function: ToolFunction {
                 name: "index_system".into(),
-                description: "Scan home directory and save a structured index to permanent memory. \
-                              Run once to learn the system layout.".into(),
+                description: "Learn the user's system deeply. Scans home directory projects/scripts/configs/rust/python \
+                              into permanent memory AND analyzes the full fish history to learn the top commands, \
+                              most-visited directories, most-referenced file paths (editors/openers/installers), \
+                              shell habits and packages. Use for 'learn about my system', 'know everything on \
+                              my machine', 'study my workflow', and all general system orientation requests. \
+                              The user can say 'learn about my system' to trigger this on demand.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -622,6 +628,63 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                     "type": "object",
                     "properties": {},
                     "required": []
+                }),
+            },
+        },
+
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "run_safety_check".into(),
+                description: "Run or report on the system safety check. Sections: system update \
+                              (pacman -Syu), ClamAV antivirus, rkhunter rootkit check, UFW firewall, \
+                              Lynis audit, monthly AIDE integrity, and home-directory backup. \
+                              Use for 'run a security check', 'is my system secure', 'run the weekly \
+                              safety scan', 'how did the last safety check go'. It can take up to an \
+                              hour (or more for the monthly full home scan). An 'attention needed' \
+                              result means review the listed problems. Do NOT script it by hand with \
+                              run_shell — use this tool.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["run", "status"],
+                            "description": "run = execute the full check now (status then depends on what it found), \
+                                           status = report how the last check went without starting a new one"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["light", "full"],
+                            "description": "light (default) = quick scan of hot dirs + weekly checks; \
+                                           full = full-home ClamAV scan (slow)"
+                        }
+                    },
+                    "required": ["action"]
+                }),
+            },
+        },
+
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "backup".into(),
+                description: "Back up the user's home directory to the external drive /dev/sda1 at \
+                              /mnt/backup/arch-backup/ (incremental rsync snapshots). Use for \
+                              'back up my files', 'backup', 'do a backup'. Or get a status report \
+                              with action=status: whether the drive is connected/mounted, last \
+                              snapshot, and disk usage. The drive must be plugged in for the backup \
+                              to run; if it isn't, say so and ask the user to connect it.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["run", "status"],
+                            "description": "run = perform the backup now; status = report drive + last snapshot state"
+                        }
+                    },
+                    "required": ["action"]
                 }),
             },
         },
@@ -1151,6 +1214,46 @@ echo "STATUS=$STATUS"
                 "Logging set to '{}'. Restart Luna for the change to take effect.",
                 new_level
             ))
+        }
+
+        "run_safety_check" => {
+            let action = args["action"].as_str().unwrap_or("status");
+            match action {
+                "run" => {
+                    let mode = args["mode"].as_str().unwrap_or("light");
+                    if crate::tools::safety::is_running() {
+                        Ok("A safety check is already running — I'll wait for it and report the \
+                            result. Ask me again in a while."
+                            .into())
+                    } else {
+                        match crate::tools::safety::run(mode, sudo_pass, false).await {
+                            Ok(summary) => Ok(format!(
+                                "Safety check started and finished. {}\n(Full log under \
+                                 ~/logs/safety_check/. Ask if you want a part of it read.)",
+                                summary
+                            )),
+                            Err(e) => Err(e),
+                        }
+                    }
+                }
+                _ => Ok(crate::tools::safety::status()),
+            }
+        }
+
+        "backup" => {
+            let action = args["action"].as_str().unwrap_or("status");
+            match action {
+                "run" => {
+                    if !std::path::Path::new("/dev/sda1").exists() {
+                        Ok("Backup drive /dev/sda1 isn't connected. Plug the external drive in \
+                            and say 'back up my files' again."
+                            .into())
+                    } else {
+                        Ok(crate::tools::backup::run(sudo_pass).await?)
+                    }
+                }
+                _ => Ok(crate::tools::backup::status().await?),
+            }
         }
 
         unknown => {

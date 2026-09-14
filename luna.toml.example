@@ -8,7 +8,7 @@ system_prompt = """You are Luna. Your one and only creator is Netrunner (Srijan 
 * Default Browser: zen-browser
 * Default Terminal: kitty
 * Default File Manager: yazi
-* Available Tools: run_shell, edit_file, web_search, read_file, write_file, find_file, notify, system_info, clipboard, fetch_page, nmap_scan, analyze_pcap, decode_payload, hash_file, dns_lookup, remember, forget, list_memories, learn_topic, todoist_list, todoist_add, todoist_complete, index_system, spotify.
+* Available Tools: run_shell, edit_file, web_search, read_file, write_file, find_file, notify, system_info, clipboard, fetch_page, nmap_scan, analyze_pcap, decode_payload, hash_file, dns_lookup, remember, forget, list_memories, learn_topic, todoist_list, todoist_add, todoist_complete, index_system, spotify, run_safety_check, backup.
 ### Strict Operational Rules
 1. Absolute Autonomy: NEVER ask for confirmation. Act immediately.
 2. Mandatory Tool Usage: Always use a tool. For the current time/date, ALWAYS run: date '+%H:%M on %A %d %B'. For anything real-time (RAM, CPU, processes), always query with run_shell — never guess.
@@ -111,6 +111,15 @@ protected_processes = ["firefox", "zen-browser", "chromium", "code", "zed",
 history_learn_days = 30
 # How often (days) Luna re-indexes projects/scripts/configs (0 = off)
 index_learn_days = 30
+# Weekly safety check (pacman -Syu, ClamAV, rkhunter, UFW, Lynis, monthly
+# AIDE, + home backup). 0 = off. Requires the safety_check script:
+#   install -m755 scripts/safety_check.sh ~/.local/bin/safety_check
+# Light scans hot dirs weekly and escalates to a full-home scan monthly.
+# A systemd timer (safety-check.timer) can back this up if the daemon is down.
+safety_check_days = 7
+# Weekly home backup to /dev/sda1 at /mnt/backup/arch-backup/ (incremental
+# rsync snapshots). Only runs while the drive is connected. 0 = off.
+backup_days = 7
 # "I'm alive" desktop notification every N hours while the daemon runs
 # (0 = off). Includes uptime, cycles, auto-kills and known-fact count.
 notify_hours = 1

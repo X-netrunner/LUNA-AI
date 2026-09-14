@@ -10,7 +10,9 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 - **Dual memory with semantic recall** — permanent facts are embedded locally (nomic-embed-text via Ollama) and only the ones relevant to your current question get injected; if the embedding model is missing, Luna falls back to the full dump
 - **Self-correcting model escalation** — the fast model says "ESCALATE" when a query needs tools, and the full model transparently takes over
 - **Real reminders** — "remind me in 20 minutes" fires as a desktop notification even with chat closed (daemon polls `reminders.json` and wakes early for them)
-- **Self-learning** — the daemon periodically distills your fish history into workflow facts and re-indexes your projects/scripts/configs into permanent memory, monthly by default
+- **Self-learning** — the daemon periodically distills your fish history into workflow facts (top commands, most-visited directories, most-edited files) and re-indexes your projects/scripts/configs into permanent memory, monthly by default; "learn about my system" runs it on demand
+- **Safety check** — weekly `run_safety_check` runs pacman -Syu, ClamAV, rkhunter, UFW, Lynis and monthly AIDE, with a light scan of hot dirs that escalates to a full-home antivirus scan monthly; the daemon runs it detached and a systemd timer can back it up when the daemon is down
+- **Incremental backups** — the weekly `backup` tool snapshots the home directory to `/dev/sda1` at `/mnt/backup/arch-backup/` via hardlink-incremental rsync (only new changes cost space) while the drive is plugged in
 - **Shell history context** — recent fish commands are injected into every session prompt
 - **Background daemon** — `luna --daemon` watches for RAM/CPU hogs, learns which apps you use daily, reclaims disk space safely, and can auto-end idle processes you approve by chat
 - **Voice I/O** — Whisper STT + Kokoro TTS (high quality, runs on CPU)
@@ -46,7 +48,9 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 | `remember` / `forget` / `list_memories` | Manage permanent memory |
 | `memory_report` | What Luna has permanently learned (workflow, system index, stats) |
 | `set_reminder` / `list_reminders` / `cancel_reminder` | Scheduled reminders that fire even when chat is closed |
-| `index_system` | Scan the home directory and save a structured map to permanent memory (also runs monthly via daemon) |
+| `index_system` | Deeply learn the system — maps home projects/scripts/configs AND analyzes fish history (top commands, directories, files) into permanent memory (also runs periodically via daemon); "learn about my system" triggers it |
+| `run_safety_check` | Run the weekly safety check (pacman -Syu, ClamAV, rkhunter, UFW, Lynis, AIDE, backup) or report on the last run |
+| `backup` | Incremental home-directory backup to /dev/sda1 (/mnt/backup/arch-backup) or a status report |
 | `todoist_list` / `todoist_add` / `todoist_complete` | Manage Todoist tasks (requires an API token) |
 | `spotify` | Control Spotify via the Web API: liked songs, playlists, search, transport (requires Premium + one-time OAuth) |
 
