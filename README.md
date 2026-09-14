@@ -48,6 +48,7 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 | `set_reminder` / `list_reminders` / `cancel_reminder` | Scheduled reminders that fire even when chat is closed |
 | `index_system` | Scan the home directory and save a structured map to permanent memory (also runs monthly via daemon) |
 | `todoist_list` / `todoist_add` / `todoist_complete` | Manage Todoist tasks (requires an API token) |
+| `spotify` | Control Spotify via the Web API: liked songs, playlists, search, transport (requires Premium + one-time OAuth) |
 
 ## Requirements
 
@@ -103,6 +104,10 @@ context_window = 6
 
 [todoist]
 api_token = ""                # get one at todoist.com/app/settings/integrations
+
+[spotify]
+client_id = "keyring:spotify_id"
+client_secret = "keyring:spotify_secret"
 
 [proactive]
 enabled = true
@@ -229,6 +234,38 @@ aplay /tmp/test.wav
    store it with `luna --set-key todoist` and set
    `api_token = "keyring:todoist"`
 3. Never commit this token — `luna.toml` should always be gitignored
+
+## Spotify Setup (optional — requires Spotify Premium)
+
+Luna can control your Spotify over the Web API: play your Liked Songs,
+playlists, artists, albums, search, and transport control. Playback needs a
+**Premium** account (play endpoints are 403 on free tiers).
+
+1. Go to `developer.spotify.com/dashboard` and create an app (any name).
+2. Store the Client ID and Secret in the keyring:
+   ```bash
+   luna --set-key spotify_id
+   luna --set-key spotify_secret
+   ```
+3. Point `luna.toml` at them:
+   ```toml
+   [spotify]
+   client_id = "keyring:spotify_id"
+   client_secret = "keyring:spotify_secret"
+   ```
+4. Authorize once:
+   ```bash
+   luna --spotify-auth
+   ```
+   Open the printed URL, approve, and the refresh token is stored in the
+   keyring while `luna.toml` is updated with `refresh_token = "keyring:spotify_refresh"`.
+5. Keep a Spotify client playing on a device signed in to the same account
+   (desktop/mobile/web player all work).
+
+Say things like: *"play my liked songs shuffled", "play my gym playlist",
+"play bohemian rhapsody", "what's playing on spotify", "next track".*
+If no device is active, Luna picks one automatically. If this errors, just
+re-run `luna --spotify-auth`.
 
 ## Architecture
 

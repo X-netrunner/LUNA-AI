@@ -58,6 +58,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # OS keyring (freedesktop Secret Service) — stores API keys encrypted
 # instead of plaintext in luna.toml
 keyring = { version = "3", features = ["sync-secret-service"] }
+base64 = "0.22"     # Spotify Basic-auth header for OAuth token requests
 ratatui = "0.30.2"
 crossterm = "0.29.0"
 

@@ -10,6 +10,7 @@ pub mod proactive;
 pub mod reminders;
 pub mod security;
 pub mod shell;
+pub mod spotify;
 pub mod todoist;
 pub mod web;
 
@@ -560,11 +561,58 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         ToolDef {
             r#type: "function".into(),
             function: ToolFunction {
+                name: "spotify".into(),
+                description: "Control the user's Spotify account via the Spotify Web API: play their \
+                              Liked Songs, playlists, artists, albums, search tracks, and transport \
+                              control. Requires the user's Spotify (Premium) linked via \
+                              `luna --spotify-auth`. Use for 'play my liked songs', 'shuffle my liked \
+                              songs', 'play my <playlist>', 'play <song name>', 'next track', \
+                              'what's playing on spotify'. If this fails with a device/authorization \
+                              error, tell the user what to fix.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["now", "pause", "resume", "next", "previous", "shuffle",
+                                     "play_liked", "search", "play_track", "play_playlist",
+                                     "play_artist", "play_album", "devices"],
+                            "description": "What to do: now=what's playing, pause/resume/next/previous=transport, \
+                                           shuffle (set 'on' true/false), play_liked=play the user's Liked Songs \
+                                           (set 'shuffle' true to shuffle), search=find tracks, \
+                                           play_track/play_playlist/play_artist/play_album=play by name \
+                                           (name goes in 'query' or 'playlist'), devices=list available devices"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Search text for search/play_track/play_artist/play_album (e.g. 'bohemian rhapsody')"
+                        },
+                        "playlist": {
+                            "type": "string",
+                            "description": "Playlist name for play_playlist (matched by keyword, e.g. 'gym')"
+                        },
+                        "on": {
+                            "type": "boolean",
+                            "description": "For shuffle: true = shuffle on, false = off"
+                        },
+                        "shuffle": {
+                            "type": "boolean",
+                            "description": "For play_liked: true to shuffle your Liked Songs"
+                        }
+                    },
+                    "required": ["action"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
                 name: "media_info".into(),
                 description: "Get what's currently playing on the system (Spotify, MPV, \
                              browser, etc.) via D-Bus MPRIS. Returns song title, artist, \
                              album, and playback status. Use for 'what song is playing' \
-                             or 'what am I listening to'.".into(),
+                             or 'what am I listening to'. For Spotify-specific control \
+                             use the 'spotify' tool instead.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {},
@@ -834,6 +882,11 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
                 .ok_or_else(|| anyhow::anyhow!("Todoist not configured"))?;
             let task = args["task"].as_str().unwrap_or("");
             crate::tools::todoist::complete_task(token, task).await
+        }
+
+        "spotify" => {
+            let action = args["action"].as_str().unwrap_or("");
+            crate::tools::spotify::run(action, args, config).await
         }
 
         "list_memories" => {

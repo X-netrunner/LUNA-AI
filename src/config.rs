@@ -31,6 +31,9 @@ pub struct LunaConfig {
     pub todoist: TodoistConfig,
 
     #[serde(default)]
+    pub spotify: SpotifyConfig,
+
+    #[serde(default)]
     pub proactive: ProactiveConfig,
 
     #[serde(default)]
@@ -257,6 +260,21 @@ pub struct TodoistConfig {
     pub api_token: Option<String>,
 }
 
+// ── Spotify integration ───────────────────────────────────────────────────────
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct SpotifyConfig {
+    /// Spotify OAuth client ID — create an app at developer.spotify.com
+    /// Store it with `luna --set-key spotify_id` and reference it as
+    /// `keyring:spotify_id`. Leave unset to disable Spotify tools.
+    pub client_id: Option<String>,
+    /// Spotify OAuth client secret — `luna --set-key spotify_secret`,
+    /// referenced as `keyring:spotify_secret`.
+    pub client_secret: Option<String>,
+    /// The refresh token is stored in the OS keyring (`luna --spotify-auth`
+    /// writes it) — never put it in luna.toml.
+    pub refresh_token: Option<String>,
+}
+
 // ── Proactive background monitoring ───────────────────────────────────────────
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProactiveConfig {
@@ -445,6 +463,9 @@ impl LunaConfig {
         self.search.tavily_api_key = resolve_secret_ref(self.search.tavily_api_key.take());
         self.search.gemini_api_key = resolve_secret_ref(self.search.gemini_api_key.take());
         self.todoist.api_token = resolve_secret_ref(self.todoist.api_token.take());
+        self.spotify.client_id = resolve_secret_ref(self.spotify.client_id.take());
+        self.spotify.client_secret = resolve_secret_ref(self.spotify.client_secret.take());
+        self.spotify.refresh_token = resolve_secret_ref(self.spotify.refresh_token.take());
     }
 
     pub fn save(&self) -> Result<()> {

@@ -61,6 +61,13 @@ struct Args {
     /// Print a stored keyring secret to stdout (for verification).
     #[arg(long, value_name = "NAME")]
     get_key: Option<String>,
+
+    /// One-time Spotify OAuth setup: prints a URL + code to approve in the
+    /// browser, then stores the refresh token in the keyring and writes
+    /// `[spotify] refresh_token` into luna.toml. Requires client id/secret
+    /// stored first (`luna --set-key spotify_id`, `luna --set-key spotify_secret`).
+    #[arg(long)]
+    spotify_auth: bool,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -152,6 +159,37 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+    }
+
+    // ── One-time Spotify OAuth (exits after authorizing) ─────────────────────
+    if args.spotify_auth {
+        let client_id = config
+            .spotify
+            .client_id
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[spotify] client_id not set — store it first:\n  \
+                     luna --set-key spotify_id\n  \
+                     luna --set-key spotify_secret\n  \
+                     then add a [spotify] section to luna.toml."
+                )
+            })?;
+        let client_secret = config
+            .spotify
+            .client_secret
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("[spotify] client_secret not set"))?;
+
+        tracing::info!("Starting Spotify device authorization flow");
+        // The token is stored in the keyring inside authorize().
+        let _refresh = crate::tools::spotify::authorize(client_id, client_secret).await?;
+
+        // Point luna.toml at the stored keyring token and persist it.
+        config.spotify.refresh_token = Some("keyring:spotify_refresh".to_string());
+        config.save()?;
+        println!("\nSpotify authorized. You can now say things like \"luna, play my liked songs\".");
+        return Ok(());
     }
 
     // Apply CLI overrides on top of file config

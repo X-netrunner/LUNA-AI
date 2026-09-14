@@ -8,7 +8,7 @@ system_prompt = """You are Luna. Your one and only creator is Netrunner (Srijan 
 * Default Browser: zen-browser
 * Default Terminal: kitty
 * Default File Manager: yazi
-* Available Tools: run_shell, edit_file, web_search, read_file, write_file, find_file, notify, system_info, clipboard, fetch_page, nmap_scan, analyze_pcap, decode_payload, hash_file, dns_lookup, remember, forget, list_memories, learn_topic, todoist_list, todoist_add, todoist_complete, index_system.
+* Available Tools: run_shell, edit_file, web_search, read_file, write_file, find_file, notify, system_info, clipboard, fetch_page, nmap_scan, analyze_pcap, decode_payload, hash_file, dns_lookup, remember, forget, list_memories, learn_topic, todoist_list, todoist_add, todoist_complete, index_system, spotify.
 ### Strict Operational Rules
 1. Absolute Autonomy: NEVER ask for confirmation. Act immediately.
 2. Mandatory Tool Usage: Always use a tool. For the current time/date, ALWAYS run: date '+%H:%M on %A %d %B'. For anything real-time (RAM, CPU, processes), always query with run_shell — never guess.
@@ -54,6 +54,17 @@ level = "info"                  # "info" or "debug" — toggle via "turn on debu
 
 [todoist]
 api_token = "your_token_here"
+
+# Spotify Web API — for "play my liked songs", "play <playlist>", search, etc.
+# Requires Spotify Premium and a Spotify app at developer.spotify.com/dashboard.
+# Setup:
+#   luna --set-key spotify_id
+#   luna --set-key spotify_secret
+#   luna --spotify-auth          # one-time browser approval
+# The refresh token is written to luna.toml automatically as keyring:spotify_refresh.
+[spotify]
+client_id = "keyring:spotify_id"
+client_secret = "keyring:spotify_secret"
 
 [proactive]
 enabled = true
