@@ -694,24 +694,25 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             r#type: "function".into(),
             function: ToolFunction {
                 name: "whatsapp_send".into(),
-                description: "Send a WhatsApp message using the user's own account through the local \
-                              bridge (linked once via 'luna --whatsapp-link'). Use for 'whatsapp ...', \
-                              'text myself ...', 'send a whatsapp to ...', 'message ... on whatsapp'. \
-                              Parameters: action=send with 'text' as the message body and 'to' as the \
-                              recipient, which may be: the full international number digits only (e.g. \
-                              15551234567), 'myself'/'me' for the user's own number, OR a contact name \
-                              like 'mom' (resolved from their WhatsApp contacts — if it isn't found, \
-                              tell the user and ask for the number). Never invent a recipient; if the \
-                              user didn't specify one, ask. action=status reports whether the bridge \
-                              is up and linked and shows your own number. If the bridge is offline, \
-                              tell the user to run 'luna --whatsapp-link' or check luna-whapp.service.".into(),
+                description: "Interact with the user's own WhatsApp via the local bridge (linked \
+                              once via 'luna --whatsapp-link'). SEND-ONLY: it cannot read incoming \
+                              messages, chats, or unread counts — say so plainly if asked. \
+                              Actions: action=send with 'to' (full number digits-only like \
+                              15551234567, OR 'myself'/'me' for the user's own number, OR a \
+                              contact name like 'mom' — resolved from WhatsApp contacts) and \
+                              'text' (the message body); action=lookup with 'to' as a name to \
+                              report that contact's number WITHOUT sending (use for 'what's X's \
+                              whatsapp number'); action=status reports whether the bridge is up/\
+                              linked and the user's own number. Never invent a recipient — if the \
+                              user didn't provide one, ask. If the bridge is offline, tell the \
+                              user to run 'luna --whatsapp-link' or check luna-whapp.service.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["send", "status"],
-                            "description": "send = deliver a message (needs to + text); status = check the bridge is up and linked"
+                            "enum": ["send", "lookup", "status"],
+                            "description": "send = deliver a message (needs to + text); lookup = report a contact's number by name without sending; status = check the bridge is up and linked"
                         },
                         "to": {
                             "type": "string",
@@ -1307,13 +1308,22 @@ echo "STATUS=$STATUS"
                         let to = args["to"].as_str().unwrap_or("");
                         let text = args["text"].as_str().unwrap_or("").trim();
                         if to.is_empty() {
-                            Ok("The number was missing. Ask the user for it (full number, digits \
-                                only, e.g. 15551234567) and don't guess."
+                            Ok("The recipient was missing. Ask the user for it (full number, \
+                                digits only, e.g. 15551234567, or a contact name like 'mom') \
+                                and don't guess."
                                 .into())
                         } else if text.is_empty() {
                             Ok("The message text was empty. Ask the user what to say.".into())
                         } else {
                             crate::tools::whatsapp::send(to, text, base).await
+                        }
+                    }
+                    "lookup" => {
+                        let to = args["to"].as_str().unwrap_or("");
+                        if to.is_empty() {
+                            Ok("The name to look up was missing. Ask the user for it.".into())
+                        } else {
+                            crate::tools::whatsapp::lookup(to, base).await
                         }
                     }
                     _ => crate::tools::whatsapp::status(base).await,

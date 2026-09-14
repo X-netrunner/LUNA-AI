@@ -131,6 +131,42 @@ async fn resolve_recipient(
     );
 }
 
+/// Look up a contact by name and report number(s) without sending anything.
+pub async fn lookup(name: &str, explicit_base: Option<&str>) -> Result<String> {
+    let base = resolved_base(explicit_base);
+    let token = read_token()?;
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{base}/resolve"))
+        .bearer_auth(&token)
+        .query(&[("name", name)])
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await
+        .context("WhatsApp bridge is offline — is luna-whapp running?")?;
+    let status = res.status();
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    if let Some(matches) = v["matches"].as_array() {
+        if !matches.is_empty() {
+            let lines: Vec<String> = matches
+                .iter()
+                .map(|m| {
+                    let n = m["name"].as_str().unwrap_or(name);
+                    let p = m["phone"].as_str().unwrap_or("?");
+                    format!("- {n}: +{p}")
+                })
+                .collect();
+            return Ok(format!("Contacts matching \"{name}\":\n{}", lines.join("\n")));
+        }
+    }
+    let err = v["error"].as_str().unwrap_or("no contact found");
+    let _ = status;
+    Ok(format!(
+        "{err} — still no contact named \"{name}\". Have them message you once (or re-link to \
+         backfill the contact book), then I'll know their number without being told it."
+    ))
+}
+
 /// Send a WhatsApp message through the local bridge.
 pub async fn send(to: &str, text: &str, explicit_base: Option<&str>) -> Result<String> {
     if let Some(reason) = missing_reason() {
