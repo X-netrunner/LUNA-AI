@@ -3,6 +3,7 @@
 use crate::config::{LunaConfig, VoiceMode};
 use crate::memory::Memory;
 use crate::tui::log::LogBuffer;
+use crate::tui::onboarding::Onboarding;
 use crate::tui::widgets::{ChatHistory, DebugPanel, InputLine, StatusBar};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -32,6 +33,8 @@ enum AppEvent {
     Response(Msg, Duration, Memory, String),
     Metrics,
     Voice(String),
+    OnboardingLog(String),
+    SpotifyAuthed,
 }
 
 #[derive(Debug, Clone)]
@@ -84,10 +87,17 @@ pub struct TuiApp {
     handsfree_active: Arc<AtomicBool>,
     /// Unix-millis of the last hands-free utterance, for the idle auto-return.
     last_voice_activity: Arc<AtomicU64>,
+    /// First-run setup screen (active until the user finishes/dismisses it).
+    onboarding: Option<Onboarding>,
 }
 
 impl TuiApp {
-    pub fn new(config: LunaConfig, logs: LogBuffer) -> Result<Self> {
+    pub fn with_setup(config: LunaConfig, logs: LogBuffer, force_setup: bool) -> Result<Self> {
+        let onboarding = if force_setup || crate::first_run::needs_onboarding(&config) {
+            Some(Onboarding::new())
+        } else {
+            None
+        };
         let memory = Memory::new(config.memory.context_window, &config.memory.history_path)?;
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -115,6 +125,7 @@ impl TuiApp {
             window_deadline: Arc::new(AtomicU64::new(0)),
             handsfree_active: Arc::new(AtomicBool::new(false)),
             last_voice_activity: Arc::new(AtomicU64::new(millis_now())),
+            onboarding,
         })
     }
 
@@ -350,6 +361,23 @@ impl TuiApp {
                 self.add_user_message(&stripped);
                 self.submit(stripped);
             }
+            AppEvent::OnboardingLog(line) => {
+                if let Some(onb) = &mut self.onboarding {
+                    onb.log(&line);
+                }
+            }
+            AppEvent::SpotifyAuthed => {
+                // The refresh token lives in the keyring; point config at it.
+                self.config.spotify.refresh_token =
+                    Some("keyring:spotify_refresh".to_string());
+                if let Err(e) = self.config.save() {
+                    if let Some(onb) = &mut self.onboarding {
+                        onb.log(&format!("✗ {e}"));
+                    }
+                } else if let Some(onb) = &mut self.onboarding {
+                    onb.log("✓ Spotify authorized. Say \"play my liked songs\" anytime.");
+                }
+            }
         }
     }
 
@@ -405,6 +433,12 @@ impl TuiApp {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        // First-run setup screen steals the keyboard until dismissed.
+        if self.onboarding.as_ref().map(Onboarding::is_active).unwrap_or(false) {
+            self.handle_onboarding_key(key);
+            return;
+        }
+
         match (key.modifiers, key.code) {
             (_, KeyCode::Char('c')) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.input.is_empty() {
@@ -495,6 +529,195 @@ impl TuiApp {
             thinking: None,
         });
         self.chat_scroll = 0;
+    }
+
+    /// Keys while the first-run setup screen is active. While editing a secret,
+    /// every keystroke goes to the hidden buffer; otherwise Up/Down/Enter/Finish.
+    fn handle_onboarding_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('c') | KeyCode::Char('d') => self.should_quit = true,
+                _ => {}
+            }
+            return;
+        }
+
+        let editing = self
+            .onboarding
+            .as_ref()
+            .and_then(|o| o.editing.map(|i| i == o.cursor))
+            .unwrap_or(false);
+
+        if editing {
+            match key.code {
+                KeyCode::Enter => self.commit_secret(),
+                KeyCode::Esc => {
+                    if let Some(onb) = &mut self.onboarding {
+                        onb.cancel_secret();
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(onb) = &mut self.onboarding {
+                        onb.pop_char();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(onb) = &mut self.onboarding {
+                        onb.append_char(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Up => {
+                if let Some(onb) = &mut self.onboarding {
+                    onb.cursor_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(onb) = &mut self.onboarding {
+                    let n = onb.actions(&self.config).len();
+                    onb.cursor_down(n);
+                }
+            }
+            KeyCode::Enter => self.activate_onboarding_row(),
+            KeyCode::Esc => self.finish_onboarding(),
+            KeyCode::Char('q') => self.finish_onboarding(),
+            _ => {}
+        }
+    }
+
+    fn activate_onboarding_row(&mut self) {
+        let (idx, id) = {
+            let Some(onb) = &mut self.onboarding else { return };
+            let rows = onb.actions(&self.config);
+            let idx = onb.cursor.min(rows.len().saturating_sub(1));
+            (idx, rows.get(idx).map(|r| r.id))
+        };
+        let Some(id) = id else { return };
+
+        match id {
+            crate::tui::onboarding::Action::SetTavily
+            | crate::tui::onboarding::Action::SetGemini
+            | crate::tui::onboarding::Action::SetTodoist
+            | crate::tui::onboarding::Action::SetSpotifyId
+            | crate::tui::onboarding::Action::SetSpotifySecret => {
+                if let Some(onb) = &mut self.onboarding {
+                    onb.begin_secret(idx);
+                }
+            }
+            crate::tui::onboarding::Action::SpotifyAuth => self.start_spotify_auth(),
+            crate::tui::onboarding::Action::Finish => self.finish_onboarding(),
+        }
+    }
+
+    /// Save an entered secret to the keyring and point config at it.
+    fn commit_secret(&mut self) {
+        let (keyring_name, label) = {
+            let Some(onb) = &mut self.onboarding else { return };
+            let rows = onb.actions(&self.config);
+            let Some(row) = rows.get(onb.cursor) else {
+                onb.cancel_secret();
+                return;
+            };
+            let Some(name) = crate::tui::onboarding::action_keyring_name(row.id) else {
+                onb.cancel_secret();
+                return;
+            };
+            (name.to_string(), row.label.clone())
+        };
+
+        // Pull the secret out BEFORE touching config so the borrow is clean.
+        let secret = self
+            .onboarding
+            .as_mut()
+            .map(|o| o.take_secret())
+            .unwrap_or_default();
+        if secret.is_empty() {
+            if let Some(onb) = &mut self.onboarding {
+                onb.log("✗ empty secret — nothing stored (Esc cancels any time)");
+            }
+            return;
+        }
+
+        match crate::config::keyring_set(&keyring_name, &secret) {
+            Ok(()) => {
+                let ref_str = format!("keyring:{}", keyring_name);
+                match keyring_name.as_str() {
+                    "tavily" => self.config.search.tavily_api_key = Some(ref_str),
+                    "gemini" => self.config.search.gemini_api_key = Some(ref_str),
+                    "todoist" => self.config.todoist.api_token = Some(ref_str),
+                    "spotify_id" => self.config.spotify.client_id = Some(ref_str),
+                    "spotify_secret" => self.config.spotify.client_secret = Some(ref_str),
+                    _ => {}
+                }
+                match self.config.save() {
+                    Ok(()) => {
+                        if let Some(onb) = &mut self.onboarding {
+                            onb.log(&format!("✓ stored {}", label));
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(onb) = &mut self.onboarding {
+                            onb.log(&format!("✗ saved to keyring but config write failed: {e}"));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if let Some(onb) = &mut self.onboarding {
+                    onb.log(&format!("✗ could not store {}: {}", label, e));
+                }
+            }
+        }
+    }
+
+    /// Kick off the one-time Spotify device authorization in the background,
+    /// streaming its progress into the onboarding panel.
+    fn start_spotify_auth(&mut self) {
+        let (id, secret) = match (
+            self.config.spotify.client_id.clone(),
+            self.config.spotify.client_secret.clone(),
+        ) {
+            (Some(a), Some(b)) if !a.trim().is_empty() && !b.trim().is_empty() => (a, b),
+            _ => {
+                if let Some(onb) = &mut self.onboarding {
+                    onb.log("Set both Spotify keys first (two rows above).");
+                }
+                return;
+            }
+        };
+        if let Some(onb) = &mut self.onboarding {
+            onb.log("Starting Spotify authorization — a URL + code will appear below.");
+        }
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(AppEvent::OnboardingLog(
+                "Contacting Spotify…".to_string(),
+            ));
+            let result =
+                crate::tools::spotify::authorize_with(&id, &secret, |line| {
+                    let _ = tx.send(AppEvent::OnboardingLog(format!("  {line}")));
+                })
+                .await;
+            match result {
+                Ok(_) => {
+                    let _ = tx.send(AppEvent::SpotifyAuthed);
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::OnboardingLog(format!("✗ {e}")));
+                }
+            }
+        });
+    }
+
+    fn finish_onboarding(&mut self) {
+        let _ = crate::first_run::mark_done();
+        self.onboarding = None;
+        self.status = String::from("Ready");
     }
 
     /// Spawn the routed async turn (fast/deep/full) — the UI stays responsive.
@@ -615,6 +838,18 @@ impl TuiApp {
 
     fn ui(&mut self, f: &mut Frame) {
         let size = f.area();
+
+        // First-run setup screen replaces the whole layout until finished.
+        if self
+            .onboarding
+            .as_ref()
+            .map(Onboarding::is_active)
+            .unwrap_or(false)
+        {
+            let (onb, cfg) = (self.onboarding.as_ref().unwrap(), &self.config);
+            crate::tui::onboarding::render(onb, f, cfg, size);
+            return;
+        }
 
         // ── Layout: status on top, then chat+debug side by side, input below
         let outer = Layout::default()

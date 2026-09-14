@@ -577,6 +577,10 @@ async fn run_voice_session(
 pub async fn run_text(config: &LunaConfig) -> Result<()> {
     tracing::info!("Starting Luna agent (text mode)");
 
+    if crate::first_run::needs_onboarding(config) {
+        println!("{}", crate::first_run::guide_text(config));
+    }
+
     let client = build_client(config);
     let fast_client = build_fast_client(config);
     let deep_client = build_deep_client(config);
@@ -923,6 +927,10 @@ async fn answer_input(
 async fn run_hybrid(config: &LunaConfig) -> Result<()> {
     tracing::info!("Starting Luna agent (hybrid mode)");
 
+    if crate::first_run::needs_onboarding(config) {
+        println!("{}", crate::first_run::guide_text(config));
+    }
+
     let client = build_client(config);
     let fast_client = build_fast_client(config);
     let mut memory = Memory::new(config.memory.context_window, &config.memory.history_path)?;
@@ -1247,9 +1255,13 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
 }
 
 // ── TUI mode ──────────────────────────────────────────────────────────────────
-pub async fn run_tui(config: &LunaConfig, log: crate::tui::LogBuffer) -> Result<()> {
+pub async fn run_tui(
+    config: &LunaConfig,
+    log: crate::tui::LogBuffer,
+    force_setup: bool,
+) -> Result<()> {
     tracing::info!("Starting Luna agent (TUI mode)");
-    crate::tui::run_tui(config.clone(), log).await
+    crate::tui::run_tui(config.clone(), log, force_setup).await
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

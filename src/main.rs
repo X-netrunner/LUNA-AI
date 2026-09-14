@@ -10,6 +10,7 @@ mod agent;
 mod audio;
 mod config;
 mod daemon;
+mod first_run;
 mod llm;
 mod memory;
 mod stt;
@@ -68,6 +69,11 @@ struct Args {
     /// stored first (`luna --set-key spotify_id`, `luna --set-key spotify_secret`).
     #[arg(long)]
     spotify_auth: bool,
+
+    /// Show the first-time setup screen (TUI) or guide (text) — including on
+    /// machines that are already configured.
+    #[arg(long)]
+    setup: bool,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -192,6 +198,13 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ── Forced setup guide (text modes) ───────────────────────────────────────
+    // TUI shows the interactive screen instead (below); daemon never shows it.
+    if args.setup && !args.tui && !args.daemon {
+        print!("{}", crate::first_run::guide_text(&config));
+        return Ok(());
+    }
+
     // Apply CLI overrides on top of file config
     if let Some(voice_str) = args.voice {
         config.voice.mode = match voice_str.as_str() {
@@ -236,7 +249,7 @@ async fn main() -> Result<()> {
         tracing::info!("TUI mode — using Ratatui interface");
         config.audio.input_mode = crate::config::InputMode::Tui;
         if let Some(log) = tui_log {
-            agent::run_tui(&config, log).await?;
+            agent::run_tui(&config, log, args.setup).await?;
         } else {
             // Shouldn't happen — TUI always builds a log buffer at startup.
             anyhow::bail!("TUI log buffer missing");

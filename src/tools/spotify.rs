@@ -73,6 +73,15 @@ fn basic_auth(client_id: &str, client_secret: &str) -> String {
 /// Run the OAuth Device Flow: print a verification URL + code, poll until the
 /// user approves, then store the refresh token in the keyring and return it.
 pub async fn authorize(client_id: &str, client_secret: &str) -> Result<String> {
+    authorize_with(client_id, client_secret, |line| println!("{}", line)).await
+}
+
+/// Same as [`authorize`] but lets the caller decide where each step's message
+/// goes (CLI prints to stdout; the TUI setup screen feeds it to a panel).
+pub async fn authorize_with<F>(client_id: &str, client_secret: &str, mut emit: F) -> Result<String>
+where
+    F: FnMut(&str),
+{
     let client = Client::new();
     let auth = basic_auth(client_id, client_secret);
 
@@ -91,12 +100,10 @@ pub async fn authorize(client_id: &str, client_secret: &str) -> Result<String> {
         .context("Failed to parse device-code response")?;
 
     if let Some(url) = resp.verification_uri_complete {
-        println!("\n  Open in your browser and approve:\n  {}\n", url);
+        emit(&format!("Open in your browser and approve: {}", url));
     } else {
-        println!(
-            "\n  1. Open {} in your browser\n  2. Enter code: {}\n",
-            resp.verification_uri, resp.user_code
-        );
+        emit(&format!("Open {} in your browser", resp.verification_uri));
+        emit(&format!("Enter code: {}", resp.user_code));
     }
 
     let deadline = Instant::now() + Duration::from_secs(resp.expires_in);
