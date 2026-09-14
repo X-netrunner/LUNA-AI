@@ -14,6 +14,7 @@ pub mod safety;
 pub mod backup;
 pub mod spotify;
 pub mod todoist;
+pub mod whatsapp;
 pub mod web;
 
 use crate::llm::ollama::{ToolCall, ToolDef, ToolFunction};
@@ -688,6 +689,40 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 }),
             },
         },
+
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "whatsapp_send".into(),
+                description: "Send a WhatsApp message using the user's own account through the local \
+                              bridge (linked once via 'luna --whatsapp-link'). Use for 'whatsapp ...', \
+                              'send a whatsapp to ...', 'message ... on whatsapp'. Parameters: action=send \
+                              with 'to' as the full international number, digits only (e.g. 15551234567) — \
+                              do NOT invent a number if the user didn't give one, ask first; 'text' is the \
+                              message body. action=status reports whether the bridge is up and linked. If \
+                              the bridge is offline, tell the user to run 'luna --whatsapp-link' or check \
+                              luna-whapp.service.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["send", "status"],
+                            "description": "send = deliver a message (needs to + text); status = check the bridge is up and linked"
+                        },
+                        "to": {
+                            "type": "string",
+                            "description": "full international phone number, digits only (e.g. 15551234567)"
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "the message body to deliver"
+                        }
+                    },
+                    "required": ["action"]
+                }),
+            },
+        },
     ]
 }
 
@@ -1253,6 +1288,33 @@ echo "STATUS=$STATUS"
                     }
                 }
                 _ => Ok(crate::tools::backup::status().await?),
+            }
+        }
+
+        "whatsapp_send" => {
+            if !config.whatsapp.enabled {
+                Ok("WhatsApp is disabled in config ([whatsapp] enabled = false). Tell the user to \
+                    re-enable it in luna.toml if they want to use it."
+                    .into())
+            } else {
+                let base = Some(config.whatsapp.base_url.as_str());
+                let action = args["action"].as_str().unwrap_or("status");
+                match action {
+                    "send" => {
+                        let to = args["to"].as_str().unwrap_or("");
+                        let text = args["text"].as_str().unwrap_or("").trim();
+                        if to.is_empty() {
+                            Ok("The number was missing. Ask the user for it (full number, digits \
+                                only, e.g. 15551234567) and don't guess."
+                                .into())
+                        } else if text.is_empty() {
+                            Ok("The message text was empty. Ask the user what to say.".into())
+                        } else {
+                            crate::tools::whatsapp::send(to, text, base).await
+                        }
+                    }
+                    _ => crate::tools::whatsapp::status(base).await,
+                }
             }
         }
 

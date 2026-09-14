@@ -13,6 +13,7 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 - **Self-learning** — the daemon periodically distills your fish history into workflow facts (top commands, most-visited directories, most-edited files) and re-indexes your projects/scripts/configs into permanent memory, monthly by default; "learn about my system" runs it on demand
 - **Safety check** — weekly `run_safety_check` runs pacman -Syu, ClamAV, rkhunter, UFW, Lynis and monthly AIDE, with a light scan of hot dirs that escalates to a full-home antivirus scan monthly; the daemon runs it detached and a systemd timer can back it up when the daemon is down
 - **Incremental backups** — the weekly `backup` tool snapshots the home directory to `/dev/sda1` at `/mnt/backup/arch-backup/` via hardlink-incremental rsync (only new changes cost space) while the drive is plugged in
+- **WhatsApp messaging** — `luna --whatsapp-link` pairs your account once over QR (like WhatsApp Web) and the `whatsapp_send` tool lets Luna send messages through your own account
 - **Shell history context** — recent fish commands are injected into every session prompt
 - **Background daemon** — `luna --daemon` watches for RAM/CPU hogs, learns which apps you use daily, reclaims disk space safely, and can auto-end idle processes you approve by chat
 - **Voice I/O** — Whisper STT + Kokoro TTS (high quality, runs on CPU)
@@ -51,6 +52,7 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 | `index_system` | Deeply learn the system — maps home projects/scripts/configs AND analyzes fish history (top commands, directories, files) into permanent memory (also runs periodically via daemon); "learn about my system" triggers it |
 | `run_safety_check` | Run the weekly safety check (pacman -Syu, ClamAV, rkhunter, UFW, Lynis, AIDE, backup) or report on the last run |
 | `backup` | Incremental home-directory backup to /dev/sda1 (/mnt/backup/arch-backup) or a status report |
+| `whatsapp_send` | Send WhatsApp messages through your own linked account (pair once with `luna --whatsapp-link`) |
 | `todoist_list` / `todoist_add` / `todoist_complete` | Manage Todoist tasks (requires an API token) |
 | `spotify` | Control Spotify via the Web API: liked songs, playlists, search, transport (requires Premium + one-time OAuth) |
 

@@ -75,6 +75,12 @@ struct Args {
     #[arg(long)]
     spotify_auth: bool,
 
+    /// One-time WhatsApp linking: installs the local bridge, shows a QR code
+    /// to scan with the phone (WhatsApp → Linked devices), and starts the
+    /// always-on luna-whapp.service.
+    #[arg(long)]
+    whatsapp_link: bool,
+
     /// Show the first-time setup screen (TUI) or guide (text) — including on
     /// machines that are already configured.
     #[arg(long)]
@@ -199,6 +205,12 @@ async fn main() -> Result<()> {
         config.spotify.refresh_token = Some("keyring:spotify_refresh".to_string());
         config.save()?;
         println!("\nSpotify authorized. You can now say things like \"luna, play my liked songs\".");
+        return Ok(());
+    }
+
+    // ── One-time WhatsApp linking (exits after the QR is scanned) ────────────
+    if args.whatsapp_link {
+        crate::tools::whatsapp::install_and_link().await?;
         return Ok(());
     }
 

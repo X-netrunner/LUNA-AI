@@ -124,6 +124,15 @@ backup_days = 7
 # (0 = off). Includes uptime, cycles, auto-kills and known-fact count.
 notify_hours = 1
 
+# ── WhatsApp bridge (luna-whapp) ─────────────────────────────────────────────
+# Lets Luna send WhatsApp messages through your own account via a local
+# Baileys bridge. Pair it once:  luna --whatsapp-link  (scans a QR with your
+# phone), which also starts the always-on luna-whapp.service. The bridge
+# listens only on 127.0.0.1 (token in ~/.local/share/whapp/config.json).
+[whatsapp]
+enabled = true
+# base_url = "http://127.0.0.1:7373"
+
 # Disk hygiene: pacman cache, ~/.cache, trash, journals.
 # cleanup_mode:
 #   notify = only report reclaimable space (default, safe)

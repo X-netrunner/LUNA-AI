@@ -1,0 +1,29 @@
+# Luna WhatsApp bridge — systemd *user* service
+#
+# Runs whapp/bridge.mjs in serve mode: keeps the linked WhatsApp socket
+# connected and exposes POST /send on 127.0.0.1:7373 (token in
+# ~/.local/share/whapp/config.json). Installed/started automatically by
+# `luna --whatsapp-link`.
+#
+# Install (if not done by --whatsapp-link):
+#   cp deploy/luna-whapp.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now luna-whapp
+#
+# Logs:
+#   journalctl --user -u luna-whapp -f   (bridge lifecycle also in
+#                                          ~/.local/share/whapp/bridge.log)
+
+[Unit]
+Description=Luna WhatsApp bridge (Baileys session + localhost /send API)
+Wants=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node %h/.local/share/whapp/bridge.mjs serve
+Restart=on-failure
+RestartSec=5
+Environment=WHAPP_LOG=%h/.local/share/whapp/bridge.log
+
+[Install]
+WantedBy=default.target

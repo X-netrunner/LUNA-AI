@@ -44,6 +44,9 @@ pub struct LunaConfig {
 
     #[serde(default)]
     pub daemon: DaemonConfig,
+
+    #[serde(default)]
+    pub whatsapp: WhatsAppConfig,
 }
 
 // ── Agent behaviour ───────────────────────────────────────────────────────────
@@ -438,6 +441,27 @@ impl Default for DaemonConfig {
             safety_check_days: 7,
             backup_days: 7,
             notify_hours: 0,
+        }
+    }
+}
+
+// ── WhatsApp bridge (luna-whapp) ──────────────────────────────────────────────
+// Points Luna at the local Baileys bridge's HTTP API. The bridge (a standalone
+// Node service) holds the linked session; Luna only POSTs to localhost.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct WhatsAppConfig {
+    /// Whether the whatsapp_send tool is usable at all
+    pub enabled: bool,
+    /// Endpoint of the local bridge, e.g. http://127.0.0.1:7373
+    pub base_url: String,
+}
+
+impl Default for WhatsAppConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_url: "http://127.0.0.1:7373".into(),
         }
     }
 }
