@@ -18,6 +18,10 @@ pub struct ReactLoop<'a> {
     /// Empty = no tools: the loop still supports freeform `name {json}` text
     /// calls, but no native function-calling is enabled.
     tools: Vec<crate::llm::ollama::ToolDef>,
+    /// Knowledge-recall budget for per-turn prompt enrichment (fast=3,
+    /// deep=10, full=6). How many semantically-relevant memory facts get
+    /// pulled in on top of the skills and profile blocks.
+    recall_k: u8,
     /// Loaded once at startup — tools must NOT reload config per call
     /// (that would redo keyring lookups and log noise every turn).
     config: crate::config::LunaConfig,
@@ -30,7 +34,53 @@ impl<'a> ReactLoop<'a> {
         tools: Vec<crate::llm::ollama::ToolDef>,
         config: &crate::config::LunaConfig,
     ) -> Self {
-        Self { client, max_iterations, tools, config: config.clone() }
+        Self {
+            client,
+            max_iterations,
+            tools,
+            recall_k: 6,
+            config: config.clone(),
+        }
+    }
+
+    /// Set the semantic-recall budget (top-k memory facts per turn).
+    pub fn with_recall_k(mut self, k: u8) -> Self {
+        self.recall_k = k.max(1);
+        self
+    }
+
+    /// Append the dynamic learning block (recalled memory, recalled skills,
+    /// user profile, and — when due — the memory/skill nudges) to the caller's
+    /// system prompt, keeping it BEHIND the capabilities block so prompt
+    /// adherence is unaffected. A loop that carries `create_skill` in its
+    /// toolset gets the full skill-review nudge; others only the memory nudge.
+    async fn enrich(&self, system_prompt: &str, input: &str) -> String {
+        let nudge = crate::agent::learning::note_turn(&self.config);
+        let has_skills = self.tools.iter().any(|t| t.function.name == "create_skill");
+        let block = crate::agent::learning::learning_block_for(
+            input,
+            &self.config,
+            self.recall_k as usize,
+            nudge,
+            has_skills,
+        )
+        .await;
+
+        let cap_marker = "\n\n### Capabilities";
+        if let Some(idx) = system_prompt.find(cap_marker) {
+            let mut s = String::with_capacity(system_prompt.len() + block.len());
+            s.push_str(&system_prompt[..idx]);
+            s.push_str(&block);
+            s.push_str(&system_prompt[idx..]);
+            s
+        } else {
+            format!(
+                "{}{}{}",
+                system_prompt,
+                block,
+                crate::agent::learning::SELF_AWARENESS
+            )
+        }
     }
 
     /// True when the TUI is rendering — tool progress must go through
@@ -84,7 +134,19 @@ impl<'a> ReactLoop<'a> {
         )
     }
 
+    /// Run one user turn. The prompt is enriched first (memory/skills/profile/
+    /// nudges via `enrich`), then the ReAct loop takes over.
     pub async fn run(
+        &self,
+        user_input: &str,
+        memory: &mut Memory,
+        system_prompt: &str,
+    ) -> Result<(String, bool)> {
+        let effective = self.enrich(system_prompt, user_input).await;
+        self.run_loop(user_input, memory, &effective).await
+    }
+
+    async fn run_loop(
         &self,
         user_input: &str,
         memory: &mut Memory,
@@ -124,7 +186,11 @@ impl<'a> ReactLoop<'a> {
 
             tracing::debug!(
                 "model output {}: {}",
-                if !self.tools.is_empty() { "(tools)" } else { "(text)" },
+                if !self.tools.is_empty() {
+                    "(tools)"
+                } else {
+                    "(text)"
+                },
                 crate::util::truncate(&truncate_control(&text_of(&response)), 600)
             );
 
@@ -137,7 +203,9 @@ impl<'a> ReactLoop<'a> {
                         // from those directly — faster AND more accurate than a
                         // retry nudge.
                         if turn_messages.iter().any(|m| m.role == "tool") {
-                            tracing::debug!("Empty content after tool result — synthesizing answer");
+                            tracing::debug!(
+                                "Empty content after tool result — synthesizing answer"
+                            );
                             let fallback = self.synthesize_answer(&turn_messages);
                             memory.push(Message::assistant(&fallback));
                             return Ok((fallback, false));
@@ -164,8 +232,7 @@ impl<'a> ReactLoop<'a> {
 
                         // Identical-repeat guard — same call twice in a turn is
                         // a loop, not a second request.
-                        let sig =
-                            format!("{} {}", tool_name, tool_call.function.arguments);
+                        let sig = format!("{} {}", tool_name, tool_call.function.arguments);
                         if used_calls.contains(&sig) {
                             tracing::warn!(
                                 "Freeform tool '{}' repeated with identical args — breaking loop",
@@ -180,7 +247,11 @@ impl<'a> ReactLoop<'a> {
                         let tool_result = match tools::execute(&tool_call, &self.config).await {
                             Ok(o) => {
                                 if self.tui() {
-                                    tracing::info!("Tool {} succeeded: {}", tool_name, crate::util::truncate(&o, 120));
+                                    tracing::info!(
+                                        "Tool {} succeeded: {}",
+                                        tool_name,
+                                        crate::util::truncate(&o, 120)
+                                    );
                                     print_sources(&tool_name, &o, true);
                                 } else {
                                     print!("\n[Luna → {}] ", tool_name);
@@ -226,8 +297,7 @@ impl<'a> ReactLoop<'a> {
 
                         // Identical-repeat guard — the model called this exact
                         // tool+args before; answer from the results instead.
-                        let sig =
-                            format!("{} {}", tool_name, tool_call.function.arguments);
+                        let sig = format!("{} {}", tool_name, tool_call.function.arguments);
                         if used_calls.contains(&sig) {
                             tracing::warn!(
                                 "Tool '{}' repeated with identical args — breaking loop",
@@ -242,7 +312,11 @@ impl<'a> ReactLoop<'a> {
                         let tool_result = match tools::execute(tool_call, &self.config).await {
                             Ok(o) => {
                                 if self.tui() {
-                                    tracing::info!("Tool {} succeeded: {}", tool_name, crate::util::truncate(&o, 120));
+                                    tracing::info!(
+                                        "Tool {} succeeded: {}",
+                                        tool_name,
+                                        crate::util::truncate(&o, 120)
+                                    );
                                     print_sources(&tool_name, &o, true);
                                 } else {
                                     print!("\n[Luna → {}] ", tool_name);
@@ -459,7 +533,10 @@ fn parse_json_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> {
                 if depth == 0 {
                     let args: serde_json::Value = serde_json::from_str(&obj[..=i]).ok()?;
                     return Some(ToolCall {
-                        function: ToolCallFunction { name: name.to_string(), arguments: args },
+                        function: ToolCallFunction {
+                            name: name.to_string(),
+                            arguments: args,
+                        },
                     });
                 }
             }
@@ -476,7 +553,9 @@ mod tests {
     #[test]
     fn detects_escalation_as_standalone_word() {
         assert!(is_escalation_response("ESCALATE"));
-        assert!(is_escalation_response("Hi there, built by Netrunner! ESCALATE"));
+        assert!(is_escalation_response(
+            "Hi there, built by Netrunner! ESCALATE"
+        ));
         assert!(!is_escalation_response("escalate"));
         assert!(!is_escalation_response("I'll escalate this to the team."));
         assert!(!is_escalation_response(""));
@@ -487,7 +566,9 @@ mod tests {
     fn detects_refusal_and_uncertainty() {
         // The general safety net: a fast model that confesses ignorance
         // must escalate even without the literal ESCALATE token.
-        assert!(is_escalation_response("I don't know about *Bleach the Anime*."));
+        assert!(is_escalation_response(
+            "I don't know about *Bleach the Anime*."
+        ));
         assert!(is_escalation_response("I don't know"));
         assert!(is_escalation_response("I'm not sure how to answer that."));
         assert!(is_escalation_response("I cannot answer this question."));
@@ -541,10 +622,12 @@ mod tests {
 
     #[test]
     fn still_parses_classic_patterns() {
-        let call = parse_freeform_tool_call(r#"[tool_call: run_shell({"command": "ls"})]"#).unwrap();
+        let call =
+            parse_freeform_tool_call(r#"[tool_call: run_shell({"command": "ls"})]"#).unwrap();
         assert_eq!(call.function.name, "run_shell");
         let call =
-            parse_freeform_tool_call(r#"Called tool: run_shell with args {"command": "ls"}"#).unwrap();
+            parse_freeform_tool_call(r#"Called tool: run_shell with args {"command": "ls"}"#)
+                .unwrap();
         assert_eq!(call.function.name, "run_shell");
         let call = parse_freeform_tool_call("<|tool_call|>run_shell<|/tool_call|>").unwrap();
         assert_eq!(call.function.name, "run_shell");

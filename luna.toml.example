@@ -177,3 +177,10 @@ conversation_window_secs = 15   # TUI: keep listening without "luna" for N sec a
 [memory]
 context_window = 6
 history_path = "/home/YOUR_USERNAME/.local/share/luna/history.json"
+
+# Self-learning cadence: every N user turns Luna reviews the recent conversation
+# and persists durable details via remember, and saves repeatable procedures as
+# skills (create_skill). Skills + past conversations are stored under
+# ~/.local/share/luna/ (skills/, conversations.jsonl, sessions.jsonl).
+# 0 disables the periodic review (learning still works via explicit requests).
+nudge_interval = 10

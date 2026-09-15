@@ -1,5 +1,7 @@
 //! agent/mod.rs — The main agent loop
 
+pub mod learning;
+
 use crate::config::{LunaConfig, VoiceMode};
 use crate::llm::escalation::{classify, QueryComplexity};
 use crate::llm::ollama::OllamaClient;
@@ -31,7 +33,8 @@ fn make_editor() -> RlEditor {
         .max_history_size(500)
         .map(|b| b.build())
         .unwrap_or_else(|_| RlConfig::default());
-    let mut rl = RlEditor::with_config(cfg).unwrap_or_else(|_| Editor::<(), FileHistory>::new().unwrap());
+    let mut rl =
+        RlEditor::with_config(cfg).unwrap_or_else(|_| Editor::<(), FileHistory>::new().unwrap());
     if let Some(path) = input_history_path() {
         if path.exists() {
             let _ = rl.load_history(&path); // ignore — empty history is fine
@@ -50,7 +53,6 @@ fn save_editor_history(rl: &mut RlEditor) {
 }
 
 // ── Shared setup ──────────────────────────────────────────────────────────────
-
 
 /// TUI renders its own screen — the Ollama client must never print tokens
 /// or thinking blocks directly to stdout/stderr in that mode.
@@ -183,7 +185,7 @@ fn cli_flag_reply(input: &str) -> Option<String> {
 
 /// Build an enriched system prompt that includes shell history context.
 /// Permanent-memory facts are NOT baked in here — they are recalled
-/// per-query by `memory_block_for` so only relevant facts get injected.
+/// per-query by the ReAct loop's per-turn learning block.
 pub fn build_system_prompt(config: &LunaConfig) -> String {
     let history = load_shell_history();
     let history_block = if !history.is_empty() {
@@ -214,7 +216,10 @@ pub fn build_system_prompt(config: &LunaConfig) -> String {
         }
     );
 
-    format!("{}{}{}", config.agent.system_prompt, time_context, history_block)
+    format!(
+        "{}{}{}",
+        config.agent.system_prompt, time_context, history_block
+    )
 }
 
 /// Append the live clock context to any tier prompt (full/deep/fast) so the
@@ -233,32 +238,6 @@ fn with_time_context(prompt: String) -> String {
         }
     );
     format!("{}{}", prompt, time_context)
-}
-
-/// Per-turn memory injection: top-k facts semantically similar to the
-/// query (RAG-lite), falling back to the full dump when embeddings are
-/// unavailable. Covers BOTH models — even simple fast-path queries now
-/// see relevant personal facts.
-async fn memory_block_for(input: &str, config: &LunaConfig, k: usize) -> String {
-    let Ok(pm) = crate::memory::permanent::PermanentMemory::load() else {
-        return String::new();
-    };
-    let facts = pm.all_facts();
-    if facts.is_empty() {
-        return String::new();
-    }
-    match crate::memory::recall::relevant_facts(
-        &config.llm.base_url,
-        &config.llm.embedding_model,
-        input,
-        facts,
-        k,
-    )
-    .await
-    {
-        Some(recalled) => crate::memory::recall::format_block(&recalled),
-        None => pm.as_prompt_block(),
-    }
 }
 
 /// Compact prompt for the fast model. Greetings land here, so the intro must
@@ -282,17 +261,6 @@ const DEEP_PROMPT: &str = "You are Luna. Your one and only creator is Netrunner 
     system design, debugging, and multi-step analysis. \
     If you need to run commands, search the web, or use tools, do so. \
     Be comprehensive but well-structured. Never guess — if uncertain, say so.";
-
-/// Injected into every tier's system prompt so the model can answer
-/// questions about its own capabilities instead of claiming it's a
-/// "text-based AI with no voice".
-const SELF_AWARENESS: &str = "\n\n### Capabilities\n\
-    - Luna is a voice-capable AI assistant running locally on Arch Linux (powered by Ollama models).\n\
-    - Voice input: activate by saying your wake word (e.g. \"luna\"); speech is transcribed via Whisper.\n\
-    - Hands-free voice mode: say \"luna voice mode\" to start, \"luna voice mode off\" to stop; auto-ends after configured idle time.\n\
-    - Text-to-speech output: replies are spoken aloud when TTS is enabled.\n\
-    - Tool use: web search, file and command actions on this machine (for deeper queries).\n\
-    - If asked about your capabilities, answer honestly: you have voice wake detection, hands-free voice mode, and text-to-speech.";
 
 /// Log which model tier was chosen for a given query, always visible
 /// in both TUI (debug panel) and terminal (stderr) modes.
@@ -342,7 +310,13 @@ pub async fn run_routed_turn(
         config,
     );
     let fast_react = fast_client.as_ref().map(|c| {
-        ReactLoop::new(c, config.agent.max_react_iterations, crate::tools::fast_tool_definitions(), config)
+        ReactLoop::new(
+            c,
+            config.agent.max_react_iterations,
+            crate::tools::fast_tool_definitions(),
+            config,
+        )
+        .with_recall_k(3)
     });
     let deep_react = deep_client.as_ref().map(|c| {
         ReactLoop::new(
@@ -355,6 +329,7 @@ pub async fn run_routed_turn(
             },
             config,
         )
+        .with_recall_k(10)
     });
 
     let system_prompt = build_system_prompt(config);
@@ -382,14 +357,12 @@ pub async fn run_routed_turn(
         _ => (&react, system_prompt.clone(), false, false),
     };
 
-log_model_choice(input, is_fast, is_deep, config);
+    log_model_choice(input, is_fast, is_deep, config);
 
-    effective_prompt.push_str(
-        &memory_block_for(input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await,
-    );
     // Capabilities go last — the model follows the instruction right before
-    // the user message far better than a block buried mid-prompt.
-    effective_prompt.push_str(SELF_AWARENESS);
+    // the user message far better than a block buried mid-prompt. (Memory,
+    // skills, profile and nudges are injected by ReactLoop::run itself.)
+    effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
 
     for attempt in 1..=2 {
         let mem_snapshot = memory.len();
@@ -402,8 +375,7 @@ log_model_choice(input, is_fast, is_deep, config);
                     is_fast = false;
                     is_deep = false;
                     effective_prompt = system_prompt.clone();
-                    effective_prompt.push_str(&memory_block_for(input, config, 6).await);
-                    effective_prompt.push_str(SELF_AWARENESS);
+                    effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                     continue;
                 }
                 let model = if is_fast {
@@ -421,7 +393,12 @@ log_model_choice(input, is_fast, is_deep, config);
                 } else {
                     config.llm.model.clone()
                 };
-                return Ok(TurnOutcome { text: response, model });
+                crate::agent::learning::append_turn("user", input);
+                crate::agent::learning::append_turn("assistant", &response);
+                return Ok(TurnOutcome {
+                    text: response,
+                    model,
+                });
             }
             Err(e) => return Err(e),
         }
@@ -447,6 +424,9 @@ enum ControlFlow {
 
 pub async fn run(config: &LunaConfig) -> Result<()> {
     crate::tools::proactive::spawn(config);
+    // Summarize earlier conversations into titles + summaries (Hermes-style
+    // session search fodder) on a background task — never blocks the first turn.
+    crate::agent::learning::spawn_session_summarizer(config.clone());
 
     match config.audio.input_mode {
         crate::config::InputMode::Tui => run_text(config).await,
@@ -507,18 +487,25 @@ async fn run_voice_session(
             };
 
             match stt.transcribe(&wav_path).await {
-                Ok(t) => { tokio::fs::remove_file(&wav_path).await.ok(); t }
+                Ok(t) => {
+                    tokio::fs::remove_file(&wav_path).await.ok();
+                    t
+                }
                 Err(e) => {
                     tracing::error!("Transcription failed: {}", e);
                     tokio::fs::remove_file(&wav_path).await.ok();
-                    if turn == 0 { return Ok(ControlFlow::Continue); }
+                    if turn == 0 {
+                        return Ok(ControlFlow::Continue);
+                    }
                     continue;
                 }
             }
         };
 
         if input.is_empty() || looks_like_artifact(&input) {
-            if turn == 0 { return Ok(ControlFlow::Continue); }
+            if turn == 0 {
+                return Ok(ControlFlow::Continue);
+            }
             continue;
         }
 
@@ -530,20 +517,28 @@ async fn run_voice_session(
 
         match input_trim {
             "exit" | "quit" | "goodbye" | "goodbye luna" => {
-                tts::speak("Shutting down.", &config.voice.mode, config).await.ok();
+                tts::speak("Shutting down.", &config.voice.mode, config)
+                    .await
+                    .ok();
                 return Ok(ControlFlow::Exit);
             }
             "clear" | "clear memory" => {
                 memory.clear()?;
-                tts::speak("Memory cleared.", &config.voice.mode, config).await.ok();
+                tts::speak("Memory cleared.", &config.voice.mode, config)
+                    .await
+                    .ok();
                 continue;
             }
             "use text" | "text mode" | "switch to text" => {
-                tts::speak("Switching to text mode.", &config.voice.mode, config).await.ok();
+                tts::speak("Switching to text mode.", &config.voice.mode, config)
+                    .await
+                    .ok();
                 return Ok(ControlFlow::SwitchToText);
             }
             "use voice" | "voice mode" | "switch to voice" => {
-                tts::speak("Already in voice mode.", &config.voice.mode, config).await.ok();
+                tts::speak("Already in voice mode.", &config.voice.mode, config)
+                    .await
+                    .ok();
                 continue;
             }
             "that's all" | "thats all" | "stop listening" | "end session" | "never mind" => {
@@ -561,6 +556,8 @@ async fn run_voice_session(
                 if !streamed {
                     println!("{}", response);
                 }
+                crate::agent::learning::append_turn("user", &input);
+                crate::agent::learning::append_turn("assistant", &response);
                 if config.voice.mode != VoiceMode::Off {
                     tts::speak(&response, &config.voice.mode, config).await.ok();
                 }
@@ -596,7 +593,15 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         config,
     );
     tracing::debug!("fast_client is_some: {}", fast_client.is_some());
-    let fast_react = fast_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, crate::tools::fast_tool_definitions(), config));
+    let fast_react = fast_client.as_ref().map(|c| {
+        ReactLoop::new(
+            c,
+            config.agent.max_react_iterations,
+            crate::tools::fast_tool_definitions(),
+            config,
+        )
+        .with_recall_k(3)
+    });
     let deep_react = deep_client.as_ref().map(|c| {
         ReactLoop::new(
             c,
@@ -608,6 +613,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
             },
             config,
         )
+        .with_recall_k(10)
     });
     let system_prompt = build_system_prompt(config);
 
@@ -625,7 +631,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         let line = match rl.readline("You: ") {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Interrupted) => continue, // ^C → fresh prompt
-            Err(rustyline::error::ReadlineError::Eof) => break,           // ^D exits
+            Err(rustyline::error::ReadlineError::Eof) => break,            // ^D exits
             Err(e) => {
                 tracing::error!("Failed to read input: {}", e);
                 break;
@@ -658,59 +664,75 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         }
 
         let debug = config.logging.level == "debug";
-        let (mut active_react, mut effective_prompt, mut is_fast, mut is_deep): (&ReactLoop, String, bool, bool) =
-            match classify(&input) {
-                QueryComplexity::Simple => {
-                    if let Some(fr) = fast_react.as_ref() {
-                        (fr, with_time_context(FAST_PROMPT.to_string()), true, false)
-                    } else {
-                        (&react, system_prompt.to_string(), false, false)
-                    }
+        let (mut active_react, mut effective_prompt, mut is_fast, mut is_deep): (
+            &ReactLoop,
+            String,
+            bool,
+            bool,
+        ) = match classify(&input) {
+            QueryComplexity::Simple => {
+                if let Some(fr) = fast_react.as_ref() {
+                    (fr, with_time_context(FAST_PROMPT.to_string()), true, false)
+                } else {
+                    (&react, system_prompt.to_string(), false, false)
                 }
-                QueryComplexity::Deep => {
-                    if let Some(dr) = deep_react.as_ref() {
-                        (dr, with_time_context(DEEP_PROMPT.to_string()), false, true)
-                    } else {
-                        (&react, system_prompt.to_string(), false, false)
-                    }
+            }
+            QueryComplexity::Deep => {
+                if let Some(dr) = deep_react.as_ref() {
+                    (dr, with_time_context(DEEP_PROMPT.to_string()), false, true)
+                } else {
+                    (&react, system_prompt.to_string(), false, false)
                 }
-                _ => (&react, system_prompt.to_string(), false, false),
-            };
+            }
+            _ => (&react, system_prompt.to_string(), false, false),
+        };
         log_model_choice(&input, is_fast, is_deep, config);
-        effective_prompt
-            .push_str(&memory_block_for(&input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
         // Capabilities go last — right before the user message, where the
-        // model follows them best.
-        effective_prompt.push_str(SELF_AWARENESS);
+        // model follows them best. (Memory, skills, profile and the nudges
+        // are injected by ReactLoop::run itself.)
+        effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
 
         // Up to two attempts: a fast-model reply of "ESCALATE" rolls back
         // the exchange and retries once on the full model with tools.
         for attempt in 1..=2 {
             let mem_snapshot = memory.len();
             let tag = if debug {
-                if is_fast { "[fast] " } else if is_deep { "[deep] " } else { "[full] " }
+                if is_fast {
+                    "[fast] "
+                } else if is_deep {
+                    "[deep] "
+                } else {
+                    "[full] "
+                }
             } else {
                 ""
             };
             print!("Luna{}: ", tag);
             io::stdout().flush().ok();
 
-            match active_react.run(&input, &mut memory, &effective_prompt).await {
+            match active_react
+                .run(&input, &mut memory, &effective_prompt)
+                .await
+            {
                 Ok((response, streamed)) => {
-                    if is_fast && crate::llm::react::is_escalation_response(&response) && attempt < 2 {
+                    if is_fast
+                        && crate::llm::react::is_escalation_response(&response)
+                        && attempt < 2
+                    {
                         tracing::info!("Fast model escalated — re-running on full model");
                         memory.truncate_to(mem_snapshot);
                         active_react = &react;
                         is_fast = false;
                         is_deep = false;
                         effective_prompt = system_prompt.to_string();
-                        effective_prompt.push_str(&memory_block_for(&input, config, 6).await);
-                        effective_prompt.push_str(SELF_AWARENESS);
+                        effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                         continue;
                     }
                     if !streamed {
                         println!("{}", response);
                     }
+                    crate::agent::learning::append_turn("user", &input);
+                    crate::agent::learning::append_turn("assistant", &response);
                     if config.voice.mode != VoiceMode::Off {
                         if let Err(e) = tts::speak(&response, &config.voice.mode, config).await {
                             tracing::warn!("TTS failed: {} — continuing without audio", e);
@@ -872,11 +894,10 @@ async fn answer_input(
         _ => (react, system_prompt.to_string(), false, false),
     };
     log_model_choice(input, is_fast, is_deep, config);
-    effective_prompt
-        .push_str(&memory_block_for(input, config, if is_fast { 3 } else if is_deep { 10 } else { 6 }).await);
     // Capabilities go last — right before the user message, where the model
-    // follows them best.
-    effective_prompt.push_str(SELF_AWARENESS);
+    // follows them best. (Memory, skills, profile and nudges are injected by
+    // ReactLoop::run itself.)
+    effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
 
     for attempt in 1..=2 {
         let mem_snapshot = memory.len();
@@ -894,7 +915,10 @@ async fn answer_input(
         print!("Luna{}: ", tag);
         io::stdout().flush().ok();
 
-        match active_react.run(input, &mut *memory, &effective_prompt).await {
+        match active_react
+            .run(input, &mut *memory, &effective_prompt)
+            .await
+        {
             Ok((response, streamed)) => {
                 if is_fast && crate::llm::react::is_escalation_response(&response) && attempt < 2 {
                     tracing::info!("Fast model escalated — re-running on full model");
@@ -903,13 +927,14 @@ async fn answer_input(
                     is_fast = false;
                     is_deep = false;
                     effective_prompt = system_prompt.to_string();
-                    effective_prompt.push_str(&memory_block_for(input, config, 6).await);
-                    effective_prompt.push_str(SELF_AWARENESS);
+                    effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                     continue;
                 }
                 if !streamed {
                     println!("{}", response);
                 }
+                crate::agent::learning::append_turn("user", input);
+                crate::agent::learning::append_turn("assistant", &response);
                 if config.voice.mode != VoiceMode::Off {
                     tts::speak(&response, &config.voice.mode, config).await.ok();
                 }
@@ -944,7 +969,15 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
         },
         config,
     );
-    let fast_react = fast_client.as_ref().map(|c| ReactLoop::new(c, config.agent.max_react_iterations, crate::tools::fast_tool_definitions(), config));
+    let fast_react = fast_client.as_ref().map(|c| {
+        ReactLoop::new(
+            c,
+            config.agent.max_react_iterations,
+            crate::tools::fast_tool_definitions(),
+            config,
+        )
+        .with_recall_k(3)
+    });
     let deep_client = build_deep_client(config);
     let deep_react = deep_client.as_ref().map(|c| {
         ReactLoop::new(
@@ -957,6 +990,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
             },
             config,
         )
+        .with_recall_k(10)
     });
     let stt = build_stt(config);
     let system_prompt = build_system_prompt(config);
@@ -972,7 +1006,8 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
     // Hands-free state — either the follow-up conversation window (set after a
     // wake-word session ends) or explicit voice mode (toggled with
     // "luna voice mode" / "luna voice mode off", auto-ends after inactivity).
-    let conversation_timeout = Duration::from_secs(config.audio.conversation_timeout_mins as u64 * 60);
+    let conversation_timeout =
+        Duration::from_secs(config.audio.conversation_timeout_mins as u64 * 60);
     let voice_idle_timeout = Duration::from_secs(config.audio.voice_mode_idle_mins * 60);
     let mut handsfree: Option<Handsfree> = None;
 
@@ -1046,10 +1081,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
             let mut should_end: Option<HandsfreeEnd> = None;
 
             // Drain any transcribed utterances (non-blocking)
-            while let Some(text) = handsfree
-                .as_mut()
-                .and_then(|hf| hf.rx.try_recv().ok())
-            {
+            while let Some(text) = handsfree.as_mut().and_then(|hf| hf.rx.try_recv().ok()) {
                 let text = text.trim().to_string();
                 if text.is_empty() || looks_like_artifact(&text) {
                     continue;
@@ -1060,7 +1092,9 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                         "  [Voice mode off — listening for \"{}\"]",
                         config.audio.wake_word
                     );
-                    tts::speak("Voice mode off.", &config.voice.mode, config).await.ok();
+                    tts::speak("Voice mode off.", &config.voice.mode, config)
+                        .await
+                        .ok();
                     should_end = Some(HandsfreeEnd::Explicit);
                     break;
                 }
@@ -1269,7 +1303,9 @@ fn looks_like_artifact(s: &str) -> bool {
     let t = s.trim().to_lowercase();
     // Very short single words that are clearly not commands — but allow common greetings
     if t.split_whitespace().count() <= 1 && t.len() < 4 {
-        let common_greetings = ["hi", "hey", "yo", "ok", "okay", "hiya", "sup", "hello", "bye"];
+        let common_greetings = [
+            "hi", "hey", "yo", "ok", "okay", "hiya", "sup", "hello", "bye",
+        ];
         if !common_greetings.contains(&t.as_str()) {
             return true;
         }

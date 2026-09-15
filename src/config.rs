@@ -244,6 +244,15 @@ impl Default for AudioConfig {
 pub struct MemoryConfig {
     pub context_window: usize,
     pub history_path: PathBuf,
+    /// Every N user turns, Luna reviews the recent conversation for things to
+    /// remember (preferences, details, expectations) and repeatable procedures
+    /// worth saving as skills — the "memory nudge" (Hermes-style self-learning).
+    #[serde(default = "default_nudge_interval")]
+    pub nudge_interval: u32,
+}
+
+fn default_nudge_interval() -> u32 {
+    10
 }
 
 impl Default for MemoryConfig {
@@ -254,6 +263,7 @@ impl Default for MemoryConfig {
         Self {
             context_window: 20,
             history_path: data_dir.join("history.json"),
+            nudge_interval: default_nudge_interval(),
         }
     }
 }
@@ -417,9 +427,18 @@ impl Default for DaemonConfig {
             ram_threshold_mb: 1500,
             cpu_threshold_percent: 80.0,
             ignore_processes: [
-                "ollama", "luna", "plasmashell", "kwin_wayland", "gnome-shell",
-                "Xwayland", "pipewire", "pipewire-pulse", "wireplumber",
-                "systemd", "dbus-daemon", "dbus-broker",
+                "ollama",
+                "luna",
+                "plasmashell",
+                "kwin_wayland",
+                "gnome-shell",
+                "Xwayland",
+                "pipewire",
+                "pipewire-pulse",
+                "wireplumber",
+                "systemd",
+                "dbus-daemon",
+                "dbus-broker",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -439,10 +458,25 @@ impl Default for DaemonConfig {
             suggest_autokill_after_mins: 45,
             protected_processes: [
                 // GUI apps that hold unsaved user state — NEVER auto-killed
-                "firefox", "zen-browser", "chromium", "code", "zed", "kitty",
-                "alacritty", "konsole", "foot", "obs", "gimp", "krita",
-                "blender", "libreoffice", "soffice", "thunderbird",
-                "discord", "telegram-desktop", "slack",
+                "firefox",
+                "zen-browser",
+                "chromium",
+                "code",
+                "zed",
+                "kitty",
+                "alacritty",
+                "konsole",
+                "foot",
+                "obs",
+                "gimp",
+                "krita",
+                "blender",
+                "libreoffice",
+                "soffice",
+                "thunderbird",
+                "discord",
+                "telegram-desktop",
+                "slack",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -677,12 +711,14 @@ mod tests {
 
     #[test]
     fn save_merge_preserves_comments_and_updates_values() {
-        let existing = "# top comment\n[logging]\n# keep me\nlevel = \"info\"\n\n[llm]\nmodel = \"old\"\n";
+        let existing =
+            "# top comment\n[logging]\n# keep me\nlevel = \"info\"\n\n[llm]\nmodel = \"old\"\n";
         let mut doc: toml_edit::DocumentMut = existing.parse().unwrap();
 
-        let new_val: toml::Value =
-            toml::from_str("[logging]\nlevel = \"debug\"\n\n[llm]\nmodel = \"new\"\nfast_model = \"f\"\n")
-                .unwrap();
+        let new_val: toml::Value = toml::from_str(
+            "[logging]\nlevel = \"debug\"\n\n[llm]\nmodel = \"new\"\nfast_model = \"f\"\n",
+        )
+        .unwrap();
         merge_toml_value(doc.as_table_mut(), &new_val);
 
         let out = doc.to_string();

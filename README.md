@@ -11,6 +11,7 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 - **Self-correcting model escalation** — the fast model says "ESCALATE" when a query needs tools, and the full model transparently takes over
 - **Real reminders** — "remind me in 20 minutes" fires as a desktop notification even with chat closed (daemon polls `reminders.json` and wakes early for them)
 - **Self-learning** — the daemon periodically distills your fish history into workflow facts (top commands, most-visited directories, most-edited files) and re-indexes your projects/scripts/configs into permanent memory, monthly by default; "learn about my system" runs it on demand
+- **Self-improving loop (Hermes-style)** — every `nudge_interval` turns Luna reviews the conversation and proactively *remembers* durable facts and *creates skills* from repeatable procedures (`~/.local/share/luna/skills/`); relevant skills are recalled into the prompt by semantic similarity, used skills get refreshed when they go stale, past sessions get titles + summaries, and `search_history` finds old conversations
 - **Safety check** — weekly `run_safety_check` runs pacman -Syu, ClamAV, rkhunter, UFW, Lynis and monthly AIDE, with a light scan of hot dirs that escalates to a full-home antivirus scan monthly; the daemon runs it detached and a systemd timer can back it up when the daemon is down
 - **Incremental backups** — the weekly `backup` tool snapshots the home directory to `/dev/sda1` at `/mnt/backup/arch-backup/` via hardlink-incremental rsync (only new changes cost space) while the drive is plugged in
 - **WhatsApp messaging** — `luna --whatsapp-link` pairs your account once over QR (like WhatsApp Web) and the `whatsapp_send` tool lets Luna send messages through your own account
@@ -48,6 +49,8 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 | `allow_autokill` / `deny_autokill` | Grant/revoke idle auto-kill for a process (daemon-managed) |
 | `nmap_scan` / `analyze_pcap` / `decode_payload` / `hash_file` / `dns_lookup` | CTF/network toolkit: scanning, pcap analysis, decoding, hashing, DNS/whois |
 | `remember` / `forget` / `list_memories` | Manage permanent memory |
+| `create_skill` / `use_skill` / `list_skills` / `forget_skill` | Save, load, list, and delete reusable skills — Luna creates them automatically from repeatable tasks and improves them when they go stale |
+| `search_history` | Search all past conversations (titles, summaries, and turn-by-turn text) |
 | `memory_report` | What Luna has permanently learned (workflow, system index, stats) |
 | `set_reminder` / `list_reminders` / `cancel_reminder` | Scheduled reminders that fire even when chat is closed |
 | `index_system` | Deeply learn the system — maps home projects/scripts/configs AND analyzes fish history (top commands, directories, files) into permanent memory (also runs periodically via daemon); "learn about my system" triggers it |
@@ -280,35 +283,41 @@ re-run `luna --spotify-auth`.
 
 ```
 main.rs
-├── agent/mod.rs       — main loop, hybrid/voice/text routing, voice session mode
+├── agent/
+│   ├── mod.rs          — main loop, hybrid/voice/text routing, voice session mode
+│   └── learning.rs     — self-improvement loop: memory nudge counter, skill recall,
+│                         user-profile distill, conversation log, session summaries
 ├── llm/
-│   ├── ollama.rs      — Ollama HTTP client (streaming + tool calls)
-│   ├── react.rs       — ReAct loop with empty-response retry
-│   └── escalation.rs  — simple/complex query classifier for model routing
+│   ├── ollama.rs       — Ollama HTTP client (streaming + tool calls)
+│   ├── react.rs        — ReAct loop with empty-response retry + per-turn prompt enrichment
+│   └── escalation.rs   — simple/complex query classifier for model routing
 ├── memory/
-│   ├── mod.rs         — rolling context window with tool-artifact filtering
-│   └── permanent.rs   — persistent fact store, survives `clear` and restarts
+│   ├── mod.rs          — rolling context window with tool-artifact filtering
+│   ├── permanent.rs    — persistent fact store, survives `clear` and restarts
+│   ├── recall.rs       — semantic recall (embedding cache, RAG-lite)
+│   ├── skills.rs       — reusable skill store (`.md` files + frontmatter, ~/.local/share/luna/skills/)
+│   └── workflow.rs     — fish-history learning + system indexing
 ├── tools/
-│   ├── mod.rs         — tool registry + executor
-│   ├── shell.rs       — bash command runner with sudo injection (never hangs on a prompt)
-│   ├── filesystem.rs  — file read/write
-│   ├── desktop.rs     — notifications
-│   ├── web.rs         — Tavily → Gemini → DuckDuckGo search chain
-│   ├── learn.rs       — combined search + fetch for one-shot research
-│   ├── security.rs    — nmap / tshark / encoding / hashing / DNS for CTF work
-│   ├── todoist.rs     — Todoist Unified API v1 client
-│   └── proactive.rs   — background battery/disk/update monitor
+│   ├── mod.rs          — tool registry + executor
+│   ├── shell.rs        — bash command runner with sudo injection (never hangs on a prompt)
+│   ├── filesystem.rs   — file read/write
+│   ├── desktop.rs      — notifications
+│   ├── web.rs          — Tavily → Gemini → DuckDuckGo search chain
+│   ├── learn.rs        — combined search + fetch for one-shot research
+│   ├── security.rs     — nmap / tshark / encoding / hashing / DNS for CTF work
+│   ├── todoist.rs      — Todoist Unified API v1 client
+│   └── proactive.rs    — background battery/disk/update monitor
 ├── daemon/
-│   ├── mod.rs         — daemon entry loop + idle-process policy
-│   ├── watchdog.rs    — /proc scanner (RAM/CPU/jiffies)
-│   ├── tracker.rs     — usage learning, daily-use classification, allowlist
-│   └── cleanup.rs     — safe disk hygiene (pacman cache, ~/.cache, trash, journals) + orphaned-package auto-removal
+│   ├── mod.rs          — daemon entry loop + idle-process policy
+│   ├── watchdog.rs     — /proc scanner (RAM/CPU/jiffies)
+│   ├── tracker.rs      — usage learning, daily-use classification, allowlist
+│   └── cleanup.rs      — safe disk hygiene (pacman cache, ~/.cache, trash, journals) + orphaned-package auto-removal
 ├── tts/
-│   └── mod.rs        — Kokoro TTS via Python subprocess
+│   └── mod.rs          — Kokoro TTS via Python subprocess
 ├── stt/
-│   └── whisper.rs     — Whisper STT via whisper-cli subprocess
+│   └── whisper.rs      — Whisper STT via whisper-cli subprocess
 └── audio/
-    └── capture.rs     — mic capture with adaptive, calibrated VAD
+    └── capture.rs      — mic capture with adaptive, calibrated VAD
 ```
 
 ## Luna Versions

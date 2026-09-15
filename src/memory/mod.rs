@@ -2,6 +2,7 @@
 
 pub mod permanent;
 pub mod recall;
+pub mod skills;
 pub mod workflow;
 
 use crate::llm::ollama::Message;

@@ -3,20 +3,20 @@
 //! One tool per capability, sized for a 7B model to use reliably.
 //! Redundant tools (list_dir, find_binary, open) removed;
 //! run_shell handles all of those.
+pub mod backup;
 pub mod desktop;
 pub mod filesystem;
 pub mod learn;
 pub mod proactive;
 pub mod reminders;
+pub mod safety;
 pub mod security;
 pub mod shell;
-pub mod safety;
-pub mod backup;
 pub mod spotify;
-pub mod todoist;
-pub mod whatsapp;
 pub mod sysmode;
+pub mod todoist;
 pub mod web;
+pub mod whatsapp;
 
 use crate::llm::ollama::{ToolCall, ToolDef, ToolFunction};
 use anyhow::{Context, Result};
@@ -444,6 +444,84 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                     "type": "object",
                     "properties": {},
                     "required": []
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "create_skill".into(),
+                description: "Save a reusable procedure as a skill (learned from experience). \
+                              Call when a conversation shows a repeatable multi-step task, or to \
+                              UPDATE an existing skill under the same name when it was wrong or \
+                              outdated. name = short kebab-case (e.g. 'arch-package-rebuild'), \
+                              description = one line, procedure = step-by-step instructions. \
+                              Skills are listed by list_skills, loaded by use_skill, and recalled \
+                              automatically whenever relevant.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Skill name (kebab-case)" },
+                        "description": { "type": "string", "description": "One-line summary" },
+                        "procedure": { "type": "string", "description": "Step-by-step procedure" }
+                    },
+                    "required": ["name", "procedure"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "use_skill".into(),
+                description: "Load a saved skill's full procedure by name so you can apply it. \
+                              Use when a saved skill is relevant to the user's request. If the \
+                              skill turns out wrong or out of date, re-save the corrected \
+                              version with create_skill (same name) to improve it.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Skill name to load" }
+                    },
+                    "required": ["name"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "list_skills".into(),
+                description: "List every skill Luna has saved, with descriptions and use counts.".into(),
+                parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "forget_skill".into(),
+                description: "Delete a saved skill by name.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "search_history".into(),
+                description: "Search everything Luna remembers from PAST conversations: session \
+                              titles/summaries and raw turn-by-turn text. Use for 'what did we \
+                              talk about last time', 'when did I ask about X', or recalling \
+                              previously-discussed details. Give a topic, task name, or phrase.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Topic, task, or phrase to find" }
+                    },
+                    "required": ["query"]
                 }),
             },
         },
@@ -1044,6 +1122,30 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             Ok(pm.list())
         }
 
+        "create_skill" => {
+            let name = args["name"].as_str().unwrap_or("");
+            let description = args["description"].as_str().unwrap_or("");
+            let procedure = args["procedure"].as_str().unwrap_or("");
+            crate::memory::skills::create(name, description, procedure)
+        }
+
+        "use_skill" => {
+            let name = args["name"].as_str().unwrap_or("");
+            crate::memory::skills::read(name)
+        }
+
+        "list_skills" => Ok(crate::memory::skills::list_and_format()),
+
+        "forget_skill" => {
+            let name = args["name"].as_str().unwrap_or("");
+            crate::memory::skills::forget(name)
+        }
+
+        "search_history" => {
+            let query = args["query"].as_str().unwrap_or("");
+            Ok(crate::agent::learning::search_history(query))
+        }
+
         "index_system" => {
             let summary = crate::memory::workflow::run_index_system(sudo_pass).await?;
             if summary.is_empty() {
@@ -1071,22 +1173,28 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             let tracker = crate::daemon::tracker::Tracker::load();
             let stats = tracker.stats_snapshot();
             if stats.is_empty() {
-                return Ok("No process learning data yet — the daemon hasn't completed a scan cycle."
-                    .into());
+                return Ok(
+                    "No process learning data yet — the daemon hasn't completed a scan cycle."
+                        .into(),
+                );
             }
             let allowlist: std::collections::HashSet<String> =
-                crate::daemon::tracker::load_allowlist().into_iter().collect();
+                crate::daemon::tracker::load_allowlist()
+                    .into_iter()
+                    .collect();
             let protected = config.daemon.protected_processes.clone();
 
             let mut rows: Vec<String> = stats
                 .iter()
                 .map(|(name, s)| {
                     let days_14 = {
-                        let cutoff =
-                            (chrono::Local::now() - chrono::Duration::days(14))
-                                .format("%Y-%m-%d")
-                                .to_string();
-                        s.days_seen.iter().filter(|d| d.as_str() > cutoff.as_str()).count()
+                        let cutoff = (chrono::Local::now() - chrono::Duration::days(14))
+                            .format("%Y-%m-%d")
+                            .to_string();
+                        s.days_seen
+                            .iter()
+                            .filter(|d| d.as_str() > cutoff.as_str())
+                            .count()
                     };
                     let status = if protected.iter().any(|p| p == name) {
                         "protected"
@@ -1097,11 +1205,7 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
                     };
                     format!(
                         "{:<24} {}/14d  idle {} cyc  {:>6} jiffies  {}",
-                        name,
-                        days_14,
-                        s.idle_cycles,
-                        s.total_jiffies,
-                        status
+                        name, days_14, s.idle_cycles, s.total_jiffies, status
                     )
                 })
                 .collect();
@@ -1135,7 +1239,10 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
                 anyhow::bail!("No process name provided");
             }
             match crate::daemon::tracker::allowlist_remove(name)? {
-                true => Ok(format!("Revoked — '{}' will never be auto-killed again.", name)),
+                true => Ok(format!(
+                    "Revoked — '{}' will never be auto-killed again.",
+                    name
+                )),
                 false => Ok(format!(
                     "'{}' wasn't on the auto-kill list — it was already safe.",
                     name
@@ -1168,7 +1275,14 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             }
             let rows: Vec<String> = all
                 .iter()
-                .map(|r| format!("#{}  {}  {}", r.id, local_fmt(r.fire_at, "%a %d %b %H:%M"), r.text))
+                .map(|r| {
+                    format!(
+                        "#{}  {}  {}",
+                        r.id,
+                        local_fmt(r.fire_at, "%a %d %b %H:%M"),
+                        r.text
+                    )
+                })
                 .collect();
             Ok(rows.join("\n"))
         }
@@ -1188,7 +1302,10 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
 
             let mut by_cat: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
             for f in facts {
-                by_cat.entry(f.category.as_str()).or_default().push(&f.content);
+                by_cat
+                    .entry(f.category.as_str())
+                    .or_default()
+                    .push(&f.content);
             }
 
             let mut out = String::from("What Luna has permanently learned:\n");
@@ -1207,7 +1324,6 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             );
             Ok(out)
         }
-
 
         "media_info" => {
             // Use gdbus (GIO) — dbus-send is broken on some Arch builds.
@@ -1263,10 +1379,15 @@ echo "STATUS=$STATUS"
                 let mut album = String::new();
                 let mut status = String::new();
                 for line in stdout.lines() {
-                    if let Some(v) = line.strip_prefix("TITLE=") { title = v.to_string(); }
-                    else if let Some(v) = line.strip_prefix("ARTIST=") { artist = v.to_string(); }
-                    else if let Some(v) = line.strip_prefix("ALBUM=") { album = v.to_string(); }
-                    else if let Some(v) = line.strip_prefix("STATUS=") { status = v.to_string(); }
+                    if let Some(v) = line.strip_prefix("TITLE=") {
+                        title = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("ARTIST=") {
+                        artist = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("ALBUM=") {
+                        album = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("STATUS=") {
+                        status = v.to_string();
+                    }
                 }
                 let mut out = format!("Now playing: {} by {}", title, artist);
                 if !album.is_empty() {
@@ -1304,9 +1425,11 @@ echo "STATUS=$STATUS"
                 "run" => {
                     let mode = args["mode"].as_str().unwrap_or("light");
                     if crate::tools::safety::is_running() {
-                        Ok("A safety check is already running — I'll wait for it and report the \
+                        Ok(
+                            "A safety check is already running — I'll wait for it and report the \
                             result. Ask me again in a while."
-                            .into())
+                                .into(),
+                        )
                     } else {
                         match crate::tools::safety::run(mode, sudo_pass, false).await {
                             Ok(summary) => Ok(format!(
@@ -1327,9 +1450,11 @@ echo "STATUS=$STATUS"
             match action {
                 "run" => {
                     if !std::path::Path::new("/dev/sda1").exists() {
-                        Ok("Backup drive /dev/sda1 isn't connected. Plug the external drive in \
+                        Ok(
+                            "Backup drive /dev/sda1 isn't connected. Plug the external drive in \
                             and say 'back up my files' again."
-                            .into())
+                                .into(),
+                        )
                     } else {
                         Ok(crate::tools::backup::run(sudo_pass).await?)
                     }
@@ -1341,9 +1466,11 @@ echo "STATUS=$STATUS"
         "sysmode" => {
             let scfg = &config.sysmode;
             if !scfg.enabled {
-                Ok("sysmode support is disabled in config ([sysmode] enabled = false). \
+                Ok(
+                    "sysmode support is disabled in config ([sysmode] enabled = false). \
                     Tell the user to re-enable it in luna.toml if they want it."
-                    .into())
+                        .into(),
+                )
             } else {
                 let action = args["action"].as_str().unwrap_or("status");
                 match action {
@@ -1359,9 +1486,9 @@ echo "STATUS=$STATUS"
                                 .await
                             {
                                 Ok(out) => Ok(out),
-                                Err(e) => Ok(format!(
-                                    "Couldn't switch to the {mode} profile: {e:#}"
-                                )),
+                                Err(e) => {
+                                    Ok(format!("Couldn't switch to the {mode} profile: {e:#}"))
+                                }
                             }
                         }
                     }
@@ -1402,10 +1529,12 @@ echo "STATUS=$STATUS"
                         let to = args["to"].as_str().unwrap_or("");
                         let text = args["text"].as_str().unwrap_or("").trim();
                         if to.is_empty() {
-                            Ok("The recipient was missing. Ask the user for it (full number, \
+                            Ok(
+                                "The recipient was missing. Ask the user for it (full number, \
                                 digits only, e.g. 15551234567, or a contact name like 'mom') \
                                 and don't guess."
-                                .into())
+                                    .into(),
+                            )
                         } else if text.is_empty() {
                             Ok("The message text was empty. Ask the user what to say.".into())
                         } else {
@@ -1444,7 +1573,8 @@ fn local_fmt(epoch: u64, fmt: &str) -> String {
         .unwrap_or_default()
 }
 
-pub fn extract_sources(tool_name: &str, result: &str) -> Vec<String> {    let mut sources: Vec<String> = Vec::new();
+pub fn extract_sources(tool_name: &str, result: &str) -> Vec<String> {
+    let mut sources: Vec<String> = Vec::new();
     let mut push = |s: &str| {
         let t = s.trim();
         if !t.is_empty() && !sources.iter().any(|x| x == t) {
@@ -1491,9 +1621,12 @@ async fn fetch_page_firecrawl(url: &str) -> Result<String> {
         std::process::Command::new("curl")
             .args([
                 "-s",
-                "--max-time", "30",
-                "-H", "Content-Type: application/json",
-                "-d", &body_str,
+                "--max-time",
+                "30",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &body_str,
                 "https://api.firecrawl.dev/v1/scrape",
             ])
             .output()
@@ -1502,9 +1635,8 @@ async fn fetch_page_firecrawl(url: &str) -> Result<String> {
     .await
     .context("spawn_blocking panicked")??;
 
-    let resp: serde_json::Value =
-        serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
-            .context("Failed to parse Firecrawl response")?;
+    let resp: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
+        .context("Failed to parse Firecrawl response")?;
 
     if let Some(err) = resp.get("error") {
         anyhow::bail!("Firecrawl: {}", err);
