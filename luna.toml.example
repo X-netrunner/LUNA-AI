@@ -142,6 +142,7 @@ enabled = true
 enabled = true
 # bin = "sysmode"
 
+[daemon]
 # Disk hygiene: pacman cache, ~/.cache, trash, journals.
 # cleanup_mode:
 #   notify = only report reclaimable space (default, safe)
@@ -158,6 +159,27 @@ min_notify_mb = 500            # only report cleanups worth this much
 # this many days. 0 = never remove — only notify. Add exact names to keep.
 orphan_cleanup_days = 7
 # orphan_keep = ["some-orphan-package"]
+
+# ── Project-Vision browser automation ─────────────────────────────────────────
+# Lets Luna actually DO things in a real, visible Chromium window ("add this
+# to the cart", "search for X on amazon & open the results"). Luna talks to
+# your Project-Vision (SIH) browser-automation server over WebSocket, and
+# drives Chromium over the DevTools Protocol: the server's VLM plans and
+# decides what to click, Luna executes it and sends screenshots back. No
+# Chrome extension needed. Chromium keeps its own profile (see profile_dir)
+# so you only log into sites once, and it stays open after each task.
+[browser]
+enabled = true
+# WebSocket the Project-Vision server exposes (its main.py serves it)
+srijan_url = "ws://127.0.0.1:8001/ws"
+# Folder that holds the server's main.py. Empty = Luna won't auto-start the
+# server and will tell you to run it yourself.
+server_dir = "/home/netrunner/Projects/sih/Project-Vision/Server[unnati&srijan]"
+chromium = "chromium"
+cdp_port = 9222
+# profile_dir = "/home/YOUR_USERNAME/.local/share/luna/browser-profile"
+headless = false
+timeout_secs = 600
 
 [voice]
 mode = "basic"              # basic | off

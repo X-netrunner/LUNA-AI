@@ -14,7 +14,8 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 - **Self-improving loop (Hermes-style)** — every `nudge_interval` turns Luna reviews the conversation and proactively *remembers* durable facts and *creates skills* from repeatable procedures (`~/.local/share/luna/skills/`); relevant skills are recalled into the prompt by semantic similarity, used skills get refreshed when they go stale, past sessions get titles + summaries, and `search_history` finds old conversations
 - **Safety check** — weekly `run_safety_check` runs pacman -Syu, ClamAV, rkhunter, UFW, Lynis and monthly AIDE, with a light scan of hot dirs that escalates to a full-home antivirus scan monthly; the daemon runs it detached and a systemd timer can back it up when the daemon is down
 - **Incremental backups** — the weekly `backup` tool snapshots the home directory to `/dev/sda1` at `/mnt/backup/arch-backup/` via hardlink-incremental rsync (only new changes cost space) while the drive is plugged in
-- **WhatsApp messaging** — `luna --whatsapp-link` pairs your account once over QR (like WhatsApp Web) and the `whatsapp_send` tool lets Luna send messages through your own account
+- **WhatsApp messaging** — `luna --whatsapp-link` pairs your account once over QR; `whatsapp_send` lets Luna send messages, look up contacts by name, or list the full contact book (names ↔ numbers)
+- **Browser automation** — `browser_do` connects to your Project-Vision (SIH) VLM planner and a real Chromium window to execute goals like "add this to cart" or "fill this form"
 - **sysmode hardening** — the `sysmode` tool switches system profiles (`secure` / `cyber` / `stealth` / `lockdown`), functional self-tests the honeypot + IDS + decoy stack ("is the honeypot working?", "test if everything is running"), and pulls attack logs (needs the external `sysmode` script + a sudo password)
 - **Shell history context** — recent fish commands are injected into every session prompt
 - **Background daemon** — `luna --daemon` watches for RAM/CPU hogs, learns which apps you use daily, reclaims disk space safely, and can auto-end idle processes you approve by chat
@@ -56,7 +57,8 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 | `index_system` | Deeply learn the system — maps home projects/scripts/configs AND analyzes fish history (top commands, directories, files) into permanent memory (also runs periodically via daemon); "learn about my system" triggers it |
 | `run_safety_check` | Run the weekly safety check (pacman -Syu, ClamAV, rkhunter, UFW, Lynis, AIDE, backup) or report on the last run |
 | `backup` | Incremental home-directory backup to /dev/sda1 (/mnt/backup/arch-backup) or a status report |
-| `whatsapp_send` | Send WhatsApp messages through your own linked account (pair once with `luna --whatsapp-link`) |
+| `whatsapp_send` | Send WhatsApp messages through your own linked account (pair once with `luna --whatsapp-link`). Actions: `send` (to + text), `lookup` (name → number), `contacts` (list full contact book with names & numbers), `status` (bridge health) |
+| `browser_do` | **Run real browser tasks** — spins up the Project-Vision (SIH) VLM planner + a visible Chromium window to execute goals like "add the first PS5 result to cart on amazon.com" or "fill this Google Form". Blocks until done; profile persists so logins only need to happen once. |
 | `sysmode` | Switch system hardening profiles (`secure`/`cyber`/`stealth`/`lockdown`), run a functional self-test of the honeypot/IDS/decoy stack ("is the honeypot working?"), or pull attack logs |
 | `todoist_list` / `todoist_add` / `todoist_complete` | Manage Todoist tasks (requires an API token) |
 | `spotify` | Control Spotify via the Web API: liked songs, playlists, search, transport (requires Premium + one-time OAuth) |
@@ -141,6 +143,14 @@ level = "debug"              # info | debug | trace — debug shows full tool/th
 enabled = true
 check_interval_mins = 30
 notify_hours = 1              # "I'm alive" desktop notification every N hours (0 = off)
+
+[browser]
+enabled = true
+srijan_url = "ws://127.0.0.1:8001/ws"
+server_dir = "/home/YOU/Projects/sih/Project-Vision/Server[unnati&srijan]"
+cdp_port = 9222
+headless = false
+timeout_secs = 600
 ```
 
 ## Secrets (OS keyring)

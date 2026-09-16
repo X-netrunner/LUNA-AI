@@ -25,6 +25,9 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# WebSocket — Chrome DevTools Protocol (browser automation) + Project-Vision server bridge
+tokio-tungstenite = "0.26"
+
 # Config file — luna.toml: model name, voice mode, wake word, etc.
 toml = "0.8"
 toml_edit = "0.22"  # comment-preserving config rewrites (set_debug etc.)

@@ -8,6 +8,7 @@
 
 mod agent;
 mod audio;
+mod browser;
 mod config;
 mod daemon;
 mod first_run;

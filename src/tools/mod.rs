@@ -814,6 +814,35 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         ToolDef {
             r#type: "function".into(),
             function: ToolFunction {
+                name: "browser_do".into(),
+                description: "Make Luna actually use a real web browser. Spins up the local \
+                              Project-Vision browser-automation pipeline (a VLM that looks at the \
+                              page and decides what to click/type where, executing inside a \
+                              visible Chromium window with its own saved profile). Good for \
+                              goals like 'open amazon and add the first PS4 controller to the \
+                              cart', 'search for ryzen 7 on amazon.com', or 'fill this form \
+                              https://...'. Give ONE clear natural-language task. It blocks \
+                              until the task finishes or its timeout passes. Use this instead of \
+                              just searching when the user explicitly wants something DONE in a \
+                              browser. It cannot login for you or read captchas; if the site \
+                              needs a login the browser window is visible so the user can \
+                              complete it.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "the goal to accomplish in the browser, as a sentence (e.g. 'search for ps4 on amazon.com' or 'add the first result to cart')"
+                        }
+                    },
+                    "required": ["task"]
+                }),
+            },
+        },
+
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
                 name: "whatsapp_send".into(),
                 description: "Interact with the user's own WhatsApp via the local bridge (linked \
                               once via 'luna --whatsapp-link'). SEND-ONLY: it cannot read incoming \
@@ -822,9 +851,13 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                               15551234567, OR 'myself'/'me' for the user's own number, OR a \
                               contact name like 'mom' — resolved from WhatsApp contacts) and \
                               'text' (the message body); action=lookup with 'to' as a name to \
-                              report that contact's number WITHOUT sending (use for 'what's X's \
-                              whatsapp number'); action=status reports whether the bridge is up/\
-                              linked and the user's own number. Never invent a recipient — if the \
+                              report that contact's number WITHOUT sending; action=contacts to \
+                              list the whole indexed contact book as names with their numbers \
+                              (with an optional 'q' to filter by a name fragment) so messages \
+                              can be addressed by name; action=status reports whether the bridge \
+                              is up/linked and the user's own number. When a number appears in \
+                              conversation, prefer the contact's NAME; only give the bare number \
+                              if there's no contact entry. Never invent a recipient — if the \
                               user didn't provide one, ask. If the bridge is offline, tell the \
                               user to run 'luna --whatsapp-link' or check luna-whapp.service.".into(),
                 parameters: json!({
@@ -832,8 +865,8 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["send", "lookup", "status"],
-                            "description": "send = deliver a message (needs to + text); lookup = report a contact's number by name without sending; status = check the bridge is up and linked"
+                            "enum": ["send", "lookup", "contacts", "status"],
+                            "description": "send = deliver a message (needs to + text); lookup = report a contact's number by name without sending; contacts = list the contact book (names ↔ numbers); status = check the bridge is up and linked"
                         },
                         "to": {
                             "type": "string",
@@ -842,6 +875,10 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                         "text": {
                             "type": "string",
                             "description": "the message body to deliver"
+                        },
+                        "q": {
+                            "type": "string",
+                            "description": "optional name filter for action=contacts (e.g. 'jane')"
                         }
                     },
                     "required": ["action"]
@@ -1549,7 +1586,31 @@ echo "STATUS=$STATUS"
                             crate::tools::whatsapp::lookup(to, base).await
                         }
                     }
+                    "contacts" => {
+                        let q = args["q"].as_str();
+                        crate::tools::whatsapp::contacts(q, base).await
+                    }
                     _ => crate::tools::whatsapp::status(base).await,
+                }
+            }
+        }
+
+        "browser_do" => {
+            if !config.browser.enabled {
+                Ok("Browser automation is disabled in config ([browser] enabled = false). Tell \
+                    the user to re-enable it in luna.toml."
+                    .into())
+            } else {
+                let task = args["task"].as_str().unwrap_or("").trim();
+                if task.is_empty() {
+                    Ok("The browser task was empty. Ask the user what they want done in the \
+                        browser."
+                        .into())
+                } else {
+                    match crate::browser::run(task, config).await {
+                        Ok(out) => Ok(out),
+                        Err(e) => Ok(format!("Browser task failed: {e:#}")),
+                    }
                 }
             }
         }
@@ -1562,6 +1623,8 @@ echo "STATUS=$STATUS"
 }
 
 /// Pull the URLs a research tool surfaced out of its plain-text result,
+/// so the assistant can show the user the exact sources it referenced.
+/// Format a unix timestamp for reminder display in local time.
 /// so the assistant can show the user the exact sources it referenced.
 /// Format a unix timestamp for reminder display in local time.
 fn local_fmt(epoch: u64, fmt: &str) -> String {

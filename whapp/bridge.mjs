@@ -279,6 +279,22 @@ function startHttp({ get: getSocket, contacts: getContacts }, cfg) {
       return send(200, { ok: true, matches: results });
     }
 
+    if (req.url === '/contacts' && req.method === 'GET') {
+      const sock = getSocket();
+      if (!sock?.user) return send(503, { ok: false, error: 'bridge not linked' });
+      const q = new URL(req.url, 'http://localhost').searchParams.get('q') || '';
+      const contactsMap = getContacts();
+      if (contactsMap.size === 0) {
+        // Empty contact book is a real (and recoverable) state, not an error.
+        return send(200, { ok: true, contacts: [], total: 0, note: 'no contacts indexed yet' });
+      }
+      const list = [...contactsMap.values()]
+        .filter((c) => c.name && (!q || c.name.toLowerCase().includes(q.toLowerCase())))
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+        .map((c) => ({ jid: c.id, phone: extractPhone(c.id), name: c.name }));
+      return send(200, { ok: true, contacts: list, total: list.length });
+    }
+
     if (req.url === '/send' && req.method === 'POST') {
       let body = '';
       for await (const chunk of req) body += chunk;

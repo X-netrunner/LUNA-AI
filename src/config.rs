@@ -50,6 +50,9 @@ pub struct LunaConfig {
 
     #[serde(default)]
     pub sysmode: SysmodeConfig,
+
+    #[serde(default)]
+    pub browser: BrowserConfig,
 }
 
 // ── Agent behaviour ───────────────────────────────────────────────────────────
@@ -529,6 +532,47 @@ impl Default for SysmodeConfig {
         Self {
             enabled: true,
             bin: "sysmode".into(),
+        }
+    }
+}
+
+// ── Project-Vision browser automation ─────────────────────────────────────────
+// Luna drives the user's Project-Vision (SIH) browser server + Chromium over
+// the DevTools Protocol, so a natural-language goal becomes real browsing.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct BrowserConfig {
+    /// Whether the browser_do tool is available at all
+    pub enabled: bool,
+    /// WebSocket endpoint of the Project-Vision server (the SIH planner/VLM)
+    pub srijan_url: String,
+    /// Folder that holds the server's main.py; if empty, Luna doesn't auto-start
+    /// the server and instead tells the user to start it.
+    pub server_dir: String,
+    /// Browser binary used for automation (chromium, google-chrome, ...)
+    pub chromium: String,
+    /// Port Chromium's remote debugging listens on
+    pub cdp_port: u16,
+    /// Private profile dir for the automation browser (keeps logins). Empty =
+    /// ~/.local/share/luna/browser-profile
+    pub profile_dir: String,
+    /// Run Chromium headless (invisible). Default visible so the user can watch.
+    pub headless: bool,
+    /// Hard cap on how long one browser task may run
+    pub timeout_secs: u64,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            srijan_url: "ws://127.0.0.1:8001/ws".into(),
+            server_dir: String::new(),
+            chromium: "chromium".into(),
+            cdp_port: 9222,
+            profile_dir: String::new(),
+            headless: false,
+            timeout_secs: 600,
         }
     }
 }

@@ -167,6 +167,126 @@ pub async fn lookup(name: &str, explicit_base: Option<&str>) -> Result<String> {
     ))
 }
 
+/// Keep the shipped bridge script current. Luna ships its own copy of
+/// `whapp/bridge.mjs`; if the installed copy under ~/.local/share/whapp is an
+/// older revision, refresh it and restart the systemd unit so new endpoints
+/// take effect without a manual `luna --whatsapp-link`. Cheap (one file read),
+/// safe to call before any bridge call.
+pub fn sync_bridge() {
+    let dir = data_dir();
+    if !dir.join("bridge.mjs").exists() {
+        return; // never installed
+    }
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("whapp");
+    let mut changed = false;
+    for name in ["bridge.mjs", "package.json"] {
+        let src = repo.join(name);
+        let dst = dir.join(name);
+        if !src.exists() {
+            continue;
+        }
+        let shipped = match std::fs::read(&src) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        if std::fs::read(&dst).map(|b| b == shipped).unwrap_or(false) {
+            continue;
+        }
+        if std::fs::write(&dst, shipped).is_ok() {
+            changed = true;
+        }
+    }
+    if changed {
+        tracing::info!("refreshed the WhatsApp bridge script (new endpoints live)");
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "restart", "luna-whapp"])
+            .status();
+    }
+}
+
+fn render_contacts(v: &Value) -> String {
+    let list = match v["contacts"].as_array() {
+        Some(l) => l,
+        None => {
+            return "The bridge returned a response I couldn't parse. Try again in a moment."
+                .to_string();
+        }
+    };
+    if list.is_empty() {
+        return "No WhatsApp contacts are indexed yet — WhatsApp only pushes your contact book \
+                on a device link. Re-link once (`luna --whatsapp-link`) to backfill it, or have \
+                the person message you once."
+            .to_string();
+    }
+    let mut lines: Vec<String> = list
+        .iter()
+        .map(|c| {
+            let name = c["name"].as_str().unwrap_or("(unnamed)");
+            match c["phone"].as_str() {
+                Some(p) => format!("- {name}: +{p}"),
+                None => format!("- {name}"),
+            }
+        })
+        .collect();
+    lines.sort();
+    lines.insert(
+        0,
+        format!("WhatsApp contact book ({} entries):", list.len()),
+    );
+    lines.join("\n")
+}
+
+/// List the indexed WhatsApp contact book (name ↔ phone).
+///
+/// Prefers the live bridge (`GET /contacts`); if the bridge is down or not
+/// linked, falls back to the on-disk contact book the bridge itself maintains.
+pub async fn contacts(query: Option<&str>, explicit_base: Option<&str>) -> Result<String> {
+    sync_bridge();
+    if let Some(reason) = missing_reason() {
+        bail!("WhatsApp bridge isn't installed ({reason}). Run `luna --whatsapp-link` to set it up.");
+    }
+    let q = query.map(str::trim).filter(|s| !s.is_empty());
+
+    let live: Option<String> = (async || {
+        let token = read_token().ok()?;
+        let base = resolved_base(explicit_base);
+        let client = reqwest::Client::new();
+        let mut req = client
+            .get(format!("{base}/contacts"))
+            .bearer_auth(&token)
+            .timeout(std::time::Duration::from_secs(8));
+        if let Some(q) = q {
+            req = req.query(&[("q", q)]);
+        }
+        let res = req.send().await.ok()?;
+        let v = res.json::<Value>().await.ok()?;
+        if v["ok"].as_bool() == Some(true) {
+            Some(render_contacts(&v))
+        } else {
+            None
+        }
+    })()
+    .await;
+
+    if let Some(rendered) = live {
+        return Ok(rendered);
+    }
+
+    // Bridge offline or not linked — read the contact book the bridge maintains.
+    let path = data_dir().join("contacts.json");
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
+            Ok(v) if v.is_array() => Ok(render_contacts(&json!({ "contacts": v }))),
+            _ => Ok("The bridge is offline and I couldn't read the saved contact book. \
+                     Start the bridge (luna-whapp.service) and try again."
+                .to_string()),
+        },
+        Err(_) => Ok("The WhatsApp bridge is offline and no saved contact book exists yet. \
+                      Make sure luna-whapp.service is running, then try again."
+            .to_string()),
+    }
+}
+
 /// Send a WhatsApp message through the local bridge.
 pub async fn send(to: &str, text: &str, explicit_base: Option<&str>) -> Result<String> {
     if let Some(reason) = missing_reason() {
