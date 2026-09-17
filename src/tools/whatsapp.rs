@@ -9,6 +9,7 @@
 //! Runtime data: ~/.local/share/whapp/{bridge.mjs,node_modules,session,config.json}
 
 use anyhow::{anyhow, bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -63,7 +64,13 @@ async fn warm_cache() -> Result<()> {
                 let mut cache = HashMap::new();
                 for c in arr {
                     if let (Some(name), Some(phone)) = (c["name"].as_str(), c["phone"].as_str()) {
-                        cache.insert(name.to_lowercase(), phone.to_string());
+                        cache.insert(
+                            name.to_lowercase(),
+                            CacheEntry {
+                                phone: phone.to_string(),
+                                last_active: c["last_active"].as_i64(),
+                            },
+                        );
                     }
                 }
                 save_cache(&cache);
@@ -79,7 +86,13 @@ async fn warm_cache() -> Result<()> {
                 let mut cache = HashMap::new();
                 for c in arr {
                     if let (Some(name), Some(phone)) = (c["name"].as_str(), c["phone"].as_str()) {
-                        cache.insert(name.to_lowercase(), phone.to_string());
+                        cache.insert(
+                            name.to_lowercase(),
+                            CacheEntry {
+                                phone: phone.to_string(),
+                                last_active: c["last_active"].as_i64(),
+                            },
+                        );
                     }
                 }
                 save_cache(&cache);
@@ -91,12 +104,19 @@ async fn warm_cache() -> Result<()> {
 
 const DEFAULT_PORT: u16 = 7373;
 
+#[derive(Serialize, Deserialize, Clone)]
+struct CacheEntry {
+    phone: String,
+    last_active: Option<i64>,
+}
+
 fn cache_path() -> PathBuf {
     data_dir().join("contacts_cache.json")
 }
 
-/// Load the local contacts cache (name → phone) for fast offline resolution.
-fn load_cache() -> HashMap<String, String> {
+/// Load the local contacts cache (name → phone + last activity) for fast
+/// offline resolution.
+fn load_cache() -> HashMap<String, CacheEntry> {
     std::fs::read_to_string(cache_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -104,7 +124,7 @@ fn load_cache() -> HashMap<String, String> {
 }
 
 /// Save the contacts cache.
-fn save_cache(cache: &HashMap<String, String>) {
+fn save_cache(cache: &HashMap<String, CacheEntry>) {
     let _ = std::fs::write(cache_path(), serde_json::to_string_pretty(cache).unwrap_or_default());
 }
 
@@ -171,17 +191,36 @@ fn resolved_base(explicit: Option<&str>) -> String {
 ///   "myself" / "me"      → the phone number of the linked account
 ///   "15551234567"/"+919..." → used as-is
 ///   "mom", "alice", ...   → looked up in the local cache first, then the bridge
+///
+/// Returns the resolved recipient plus, when known, the matched contact's name
+/// and last-activity (epoch ms) so callers can flag stale contacts.
+struct ResolvedRecipient {
+    phone: String,
+    name: Option<String>,
+    last_active: Option<i64>,
+}
+
+impl ResolvedRecipient {
+    fn plain(phone: &str) -> Self {
+        Self {
+            phone: phone.to_string(),
+            name: None,
+            last_active: None,
+        }
+    }
+}
+
 async fn resolve_recipient(
     to: &str,
     base: &str,
     token: &str,
-) -> Result<String> {
+) -> Result<ResolvedRecipient> {
     let t = to.trim().to_string();
     let low = t.to_lowercase();
 
     if low == "myself" || low == "me" || low == "my number" || low == "my phone" {
         if let Some(p) = my_phone() {
-            return Ok(p);
+            return Ok(ResolvedRecipient::plain(&p));
         }
         bail!(
             "I can resolve 'myself' once the bridge has seen your number — it records it right \
@@ -191,13 +230,17 @@ async fn resolve_recipient(
 
     // A bare number (optionally prefixed with +) passes straight through.
     if t.chars().all(|c| c.is_ascii_digit()) || t.starts_with('+') {
-        return Ok(t);
+        return Ok(ResolvedRecipient::plain(&t));
     }
 
     // Check local cache first (populated by contacts() calls)
     let cache = load_cache();
-    if let Some(phone) = cache.get(&low) {
-        return Ok(phone.clone());
+    if let Some(entry) = cache.get(&low) {
+        return Ok(ResolvedRecipient {
+            phone: entry.phone.clone(),
+            name: Some(to.trim().to_string()),
+            last_active: entry.last_active,
+        });
     }
 
     // Anything else is a name: look it up in the bridge's contact list.
@@ -218,12 +261,14 @@ async fn resolve_recipient(
             "{err} — either say a number, or have them message you once so I can find them in contacts."
         );
     }
-    if let Some(phone) = v["matches"]
-        .as_array()
-        .and_then(|m| m.first())
-        .and_then(|m| m["phone"].as_str())
-    {
-        return Ok(phone.to_string());
+    if let Some(m) = v["matches"].as_array().and_then(|m| m.first()) {
+        if let Some(phone) = m["phone"].as_str() {
+            return Ok(ResolvedRecipient {
+                phone: phone.to_string(),
+                name: m["name"].as_str().map(str::to_string),
+                last_active: m["last_active"].as_i64(),
+            });
+        }
     }
     bail!(
         "no WhatsApp contact matching \"{t}\". Use the full number once, or have them message you so I can save them."
@@ -322,9 +367,20 @@ fn render_contacts(v: &Value, show_all: bool) -> String {
         .iter()
         .map(|c| {
             let name = c["name"].as_str().unwrap_or("(unnamed)");
+            let activity = match c["last_active"].as_i64() {
+                Some(ms) if ms > 0 => {
+                    let days = ((now_ms() - ms) as f64 / 86_400_000.0).round() as i64;
+                    if days <= 0 {
+                        " (recent)".to_string()
+                    } else {
+                        format!(" ({days}d ago)")
+                    }
+                }
+                _ => " (activity unknown)".to_string(),
+            };
             match c["phone"].as_str() {
-                Some(p) => format!("- {name}: +{p}"),
-                None => format!("- {name}"),
+                Some(p) => format!("- {name}: +{p}{activity}"),
+                None => format!("- {name}{activity}"),
             }
         })
         .collect();
@@ -382,7 +438,13 @@ pub async fn contacts(query: Option<&str>, show_all: bool, explicit_base: Option
             let mut cache = load_cache();
             for c in arr {
                 if let (Some(name), Some(phone)) = (c["name"].as_str(), c["phone"].as_str()) {
-                    cache.insert(name.to_lowercase(), phone.to_string());
+                    cache.insert(
+                        name.to_lowercase(),
+                        CacheEntry {
+                            phone: phone.to_string(),
+                            last_active: c["last_active"].as_i64(),
+                        },
+                    );
                 }
             }
             save_cache(&cache);
@@ -401,7 +463,13 @@ pub async fn contacts(query: Option<&str>, show_all: bool, explicit_base: Option
                 if let Some(arr) = v.as_array() {
                     for c in arr {
                         if let (Some(name), Some(phone)) = (c["name"].as_str(), c["phone"].as_str()) {
-                            cache.insert(name.to_lowercase(), phone.to_string());
+                            cache.insert(
+                                name.to_lowercase(),
+                                CacheEntry {
+                                    phone: phone.to_string(),
+                                    last_active: c["last_active"].as_i64(),
+                                },
+                            );
                         }
                     }
                 }
@@ -418,6 +486,71 @@ pub async fn contacts(query: Option<&str>, show_all: bool, explicit_base: Option
     }
 }
 
+/// List the contacts the user texts MOST (default: active within ~20 days),
+/// ranked most-recent first. Used to disambiguate names and pick frequent
+/// contacts over stale ones.
+pub async fn frequent(explicit_base: Option<&str>) -> Result<String> {
+    ensure_cache_initialized();
+    sync_bridge();
+    if missing_reason().is_some() {
+        bail!("WhatsApp bridge not usable. Run `luna --whatsapp-link` once to link it.");
+    }
+    let token = match read_token() {
+        Ok(t) => t,
+        Err(_) => bail!("WhatsApp bridge not linked. Run `luna --whatsapp-link` once to pair it."),
+    };
+    let base = resolved_base(explicit_base);
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{base}/frequent"))
+        .bearer_auth(&token)
+        .query(&[("days", "20")])
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await;
+    let v = match res {
+        Ok(r) => match r.error_for_status() {
+            Ok(r) => r.json::<Value>().await.unwrap_or(Value::Null),
+            Err(_) => Value::Null,
+        },
+        Err(_) => Value::Null,
+    };
+    if v["ok"].as_bool() == Some(true) {
+        let total = v["total"].as_i64().unwrap_or(0);
+        if total == 0 {
+            return Ok("No contacts have been active in the last ~20 days. The recency map \
+                           fills in as messages flow — check again after the next chat."
+                .to_string());
+        }
+        let list = v["contacts"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .map(|c| {
+                let name = c["name"].as_str().unwrap_or("(unnamed)");
+                let phone = c["phone"].as_str().unwrap_or("?");
+                match c["last_active"].as_i64() {
+                    Some(ms) if ms > 0 => {
+                        let days = ((now_ms() - ms) as f64 / 86_400_000.0).round() as i64;
+                        format!("- {name}: +{phone} ({days}d ago)")
+                    }
+                    _ => format!("- {name}: +{phone}"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(format!(
+            "Frequent contacts (active within ~20 days, most recent first):\n{list}"
+        ))
+    } else if v.is_null() {
+        Ok("The WhatsApp bridge is offline — can't check frequent contacts. Make sure \
+                      luna-whapp.service is running."
+            .into())
+    } else {
+        Ok("The bridge didn't return frequent contacts. Try again in a moment.".into())
+    }
+}
+
 /// Send a WhatsApp message through the local bridge.
 pub async fn send(to: &str, text: &str, explicit_base: Option<&str>) -> Result<String> {
     ensure_cache_initialized();
@@ -427,11 +560,26 @@ pub async fn send(to: &str, text: &str, explicit_base: Option<&str>) -> Result<S
     let token = read_token()?;
     let base = resolved_base(explicit_base);
     let recipient = resolve_recipient(to, &base, &token).await?;
+    // Warn about contacts we haven't heard from in a while, so a bare name
+    // never silently lands on an old contact when a fresher one matches.
+    let stale_note = match (&recipient.name, recipient.last_active) {
+        (Some(name), Some(ms)) if ms > 0 => {
+            let days = ((now_ms() - ms) as f64 / 86_400_000.0).round();
+            if days > 20.0 {
+                Some(format!(
+                    "\n(Heads up: \"{name}\" was last active ~{days:.0} days ago — say the full name if you meant someone else.)"
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/send"))
         .bearer_auth(&token)
-        .json(&json!({ "to": recipient, "text": text }))
+        .json(&json!({ "to": recipient.phone, "text": text }))
         .timeout(std::time::Duration::from_secs(45))
         .send()
         .await
@@ -439,7 +587,12 @@ pub async fn send(to: &str, text: &str, explicit_base: Option<&str>) -> Result<S
     let status_code = res.status();
     let v: Value = res.json().await.unwrap_or(Value::Null);
     match v["ok"].as_bool() {
-        Some(true) => Ok(format!("Message sent to {recipient} on WhatsApp ({text_len} chars).", text_len = text.trim().chars().count())),
+        Some(true) => Ok(format!(
+            "Message sent to {} on WhatsApp ({} chars).{}",
+            recipient.phone,
+            text.trim().chars().count(),
+            stale_note.unwrap_or_default()
+        )),
         _ => {
             let err = v["error"].as_str().unwrap_or("unknown bridge error");
             if status_code == reqwest::StatusCode::SERVICE_UNAVAILABLE {
@@ -448,6 +601,13 @@ pub async fn send(to: &str, text: &str, explicit_base: Option<&str>) -> Result<S
             bail!("WhatsApp send failed: {err}");
         }
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Live status of the bridge and its connection.

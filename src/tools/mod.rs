@@ -855,8 +855,17 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                               list the whole indexed contact book as names with their numbers \
                               (with an optional 'q' to filter by a name fragment, and 'show_all' \
                               to return the complete list instead of a preview) so messages \
-                              can be addressed by name; action=status reports whether the bridge \
-                              is up/linked and the user's own number. When a number appears in \
+                              can be addressed by name; action=frequent to list the contacts \
+                              the user texts MOST — names with how many days ago each was last \
+                              active (default window ~20 days) — prefer these when a name is \
+                              ambiguous; action=status reports whether the bridge \
+                              is up/linked and the user's own number. RECENCY RULE: when a \
+                              contact name is ambiguous (e.g. two people called 'Vani'), ALWAYS \
+                              prefer the most recently active match — the bridge already ranks \
+                              them most-recent-first — and if the resolved contact hasn't been \
+                              texted in 20+ days, mention that so the user can correct you; \
+                              prefer frequent contacts over stale ones unless the user is \
+                              explicit. When a number appears in \
                               conversation, prefer the contact's NAME; only give the bare number \
                               if there's no contact entry. Never invent a recipient — if the \
                               user didn't provide one, ask. If the bridge is offline, tell the \
@@ -866,8 +875,8 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["send", "lookup", "contacts", "status"],
-                            "description": "send = deliver a message (needs to + text); lookup = report a contact's number by name without sending; contacts = list the contact book (names ↔ numbers); status = check the bridge is up and linked"
+                            "enum": ["send", "lookup", "contacts", "frequent", "status"],
+                            "description": "send = deliver a message (needs to + text); lookup = report a contact's number by name without sending; contacts = list the contact book (names ↔ numbers); frequent = list contacts texted most recently (~20 days, ranked most-recent first); status = check the bridge is up and linked"
                         },
                         "to": {
                             "type": "string",
@@ -1596,6 +1605,7 @@ echo "STATUS=$STATUS"
                         let show_all = args["show_all"].as_bool().unwrap_or(false);
                         crate::tools::whatsapp::contacts(q, show_all, base).await
                     }
+                    "frequent" => crate::tools::whatsapp::frequent(base).await,
                     _ => crate::tools::whatsapp::status(base).await,
                 }
             }

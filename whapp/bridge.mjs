@@ -114,6 +114,7 @@ function quietLogger() {
 }
 
 const CONTACTS_PATH = path.join(DATA_DIR, 'contacts.json');
+const RECENCY_PATH = path.join(DATA_DIR, 'recency.json');
 
 function loadContacts() {
   try {
@@ -129,6 +130,50 @@ function persistContacts(contacts) {
   } catch {}
 }
 
+// ── Contact activity (recency) ───────────────────────────────────────────────
+// jid → epoch ms of the last known message (in or out). Watched from live
+// events + the initial history sync so Luna can prefer FREQUENT contacts and
+// flag stale ones (> ~20 days) instead of confusing similar names.
+let recency = {}; // { jid: ms }
+
+function loadRecency() {
+  try {
+    recency = { ...JSON.parse(fs.readFileSync(RECENCY_PATH, 'utf8')) };
+  } catch {
+    recency = {};
+  }
+}
+
+function persistRecency() {
+  try {
+    fs.writeFileSync(RECENCY_PATH, JSON.stringify(recency, null, 2) + '\n');
+  } catch {}
+}
+
+// messageTimestamp can be a number (seconds) or { low, high }. Normalize to ms.
+function timestampMs(ts) {
+  if (typeof ts === 'number') return ts * 1000;
+  if (ts && typeof ts === 'object') {
+    const low = typeof ts.low === 'number' ? ts.low : 0;
+    const high = typeof ts.high === 'number' ? ts.high : 0;
+    const secs = high * 2 ** 32 + low;
+    if (secs > 0) return secs * 1000;
+  }
+  return null;
+}
+
+function touchRecency(jid, ms) {
+  if (!jid || typeof jid !== 'string') return;
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return;
+  if (!(jid in recency) || ms > recency[jid]) {
+    recency[jid] = ms;
+  }
+}
+
+function recencyOf(jid) {
+  return typeof recency[jid] === 'number' ? recency[jid] : null;
+}
+
 // ── Baileys socket (links via QR, reconnects, persists session) ───────────────
 // `giveUpAfter` (number of closed connections without ever opening) makes a
 // one-shot caller like `link` stop retrying and exit with a diagnostic instead
@@ -142,6 +187,7 @@ function createSocket({ onQr, onOpen, onLoggedOut, onContacts, giveUpAfter = nul
   // contacts.update pushes (their version of the contact book) so name-based
   // sends work without Baileys' removed in-memory store.
   const contacts = new Map(loadContacts().map((c) => [c.id, c]));
+  loadRecency();
 
   function mergeContacts(incoming) {
     let changed = false;
@@ -156,6 +202,45 @@ function createSocket({ onQr, onOpen, onLoggedOut, onContacts, giveUpAfter = nul
       persistContacts([...contacts.values()]);
       if (onContacts) onContacts(contacts.size);
     }
+  }
+
+  // Pull last-message activity from any event that carries it, so recency.json
+  // accumulates even for contacts we haven't messaged mid-session.
+  function absorbActivity(coll) {
+    if (!Array.isArray(coll)) return;
+    let touched = false;
+    for (const item of coll) {
+      let jid = null;
+      let m = null;
+      if (item?.id) {
+        jid = item.id;
+        m = item.lastMessage || null;
+      } else if (item?.key?.remoteJid) {
+        jid = item.key.remoteJid;
+        m = item;
+      }
+      const ts =
+        (m && timestampMs(m.messageTimestamp)) ||
+        (m?.key?.timestamp ? m.key.timestamp * 1000 : null) ||
+        (jid && item?.lastMessageRecvTimestamp ? item.lastMessageRecvTimestamp * 1000 : null);
+      if (jid && ts) {
+        touchRecency(jid, ts);
+        touched = true;
+      }
+    }
+    if (touched) persistRecency();
+  }
+
+  // Outgoing sends also count as "recent" — mark the jid now.
+  function touchRecencyForSent(messages) {
+    let touched = false;
+    for (const m of messages || []) {
+      if (m?.key?.remoteJid && m.key.fromMe) {
+        touchRecency(m.key.remoteJid, Date.now());
+        touched = true;
+      }
+    }
+    if (touched) persistRecency();
   }
 
   async function connect() {
@@ -177,6 +262,18 @@ function createSocket({ onQr, onOpen, onLoggedOut, onContacts, giveUpAfter = nul
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('contacts.upsert', mergeContacts);
     sock.ev.on('contacts.update', mergeContacts);
+    // Learn who you actually text: upcoming messages (in+out), chat updates
+    // that carry a last message, and the initial/full history sync all feed
+    // the recency map so stale contacts can be told apart from frequent ones.
+    sock.ev.on('messages.upsert', ({ messages }) => {
+      const seen = (messages || [])
+        .filter((m) => m?.key?.remoteJid && !m.key.fromMe)
+        .map((m) => ({ id: m.key.remoteJid, lastMessage: m }));
+      absorbActivity(seen);
+      touchRecencyForSent(messages);
+    });
+    sock.ev.on('chats.update', (updates) => absorbActivity(updates || []));
+    sock.ev.on('messaging-history.set', ({ chats }) => absorbActivity(chats || []));
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
       if (qr && onQr) onQr(qr);
@@ -281,16 +378,54 @@ function startHttp({ get: getSocket, contacts: getContacts }, cfg) {
           const clean = c.name.toLowerCase().replace(/[^a-z0-9]/g, '');
           return clean === q || clean.includes(q) || q.includes(clean);
         })
-        .slice(0, 5)
+        .slice(0, 20)
         .map((c) => ({
           jid: c.id,
           phone: extractPhone(c.id),
           name: c.name,
-        }));
+          last_active: recencyOf(c.id),
+        }))
+        // Rank: exact-stripped match first, then names that CONTAIN the query as a
+        // proper substring (closest wins — fewest extra chars), then weaker
+        // query-contains-name matches, then MOST RECENTLY texted — so an
+        // ambiguous "Vani" picks the person you actually talk to ("Vani :D")
+        // over a passive match ("Vani Garg"), and never a stale old contact.
+        .sort((a, b) => {
+          const aClean = a.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const bClean = b.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const aExact = aClean === q ? 1 : 0;
+          const bExact = bClean === q ? 1 : 0;
+          if (aExact !== bExact) return bExact - aExact;
+          // Names containing the query sort ahead of names the query contains.
+          const aOf = aClean.includes(q) ? 1 : 0;
+          const bOf = bClean.includes(q) ? 1 : 0;
+          if (aOf !== bOf) return bOf - aOf;
+          const aExtra = aClean.length - q.length;
+          const bExtra = bClean.length - q.length;
+          if (aExtra !== bExtra) return aExtra - bExtra;
+          return (b.last_active || 0) - (a.last_active || 0);
+        })
+        .slice(0, 5);
       if (results.length === 0) {
         return send(404, { ok: false, error: `no contact named "${name}" matched` });
       }
       return send(200, { ok: true, matches: results });
+    }
+
+    if (req.url.startsWith('/frequent') && req.method === 'GET') {
+      // Contacts with a message within the window (default 20 days), ranked
+      // most-recent first — Luna's "who do I actually talk to" list.
+      const sock = getSocket();
+      if (!sock?.user) return send(503, { ok: false, error: 'bridge not linked' });
+      const days = Math.max(1, Number(new URL(req.url, 'http://localhost').searchParams.get('days')) || 20);
+      const cutoff = Date.now() - days * 86400_000;
+      const contactsMap = getContacts();
+      const list = [...contactsMap.values()]
+        .filter((c) => c.name)
+        .map((c) => ({ jid: c.id, phone: extractPhone(c.id), name: c.name, last_active: recencyOf(c.id) }))
+        .filter((c) => c.last_active && c.last_active >= cutoff)
+        .sort((a, b) => (b.last_active || 0) - (a.last_active || 0));
+      return send(200, { ok: true, days, cutoff, contacts: list, total: list.length });
     }
 
     if (req.url.startsWith('/contacts') && req.method === 'GET') {
@@ -305,7 +440,7 @@ function startHttp({ get: getSocket, contacts: getContacts }, cfg) {
       const list = [...contactsMap.values()]
         .filter((c) => c.name && (!q || c.name.toLowerCase().includes(q.toLowerCase())))
         .sort((a, b) => String(a.name).localeCompare(String(b.name)))
-        .map((c) => ({ jid: c.id, phone: extractPhone(c.id), name: c.name }));
+        .map((c) => ({ jid: c.id, phone: extractPhone(c.id), name: c.name, last_active: recencyOf(c.id) }));
       return send(200, { ok: true, contacts: list, total: list.length });
     }
 
@@ -322,6 +457,8 @@ function startHttp({ get: getSocket, contacts: getContacts }, cfg) {
       try { jid = toJid(parsed.to ?? ''); } catch (e) { return send(400, { ok: false, error: e.message }); }
       try {
         const msg = await sock.sendMessage(jid, { text });
+        touchRecency(jid, Date.now());
+        persistRecency();
         log(`sent ${text.length} chars to ${jid}`);
         return send(200, { ok: true, id: msg?.key?.id || null });
       } catch (e) {
