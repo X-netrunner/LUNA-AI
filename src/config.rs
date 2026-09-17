@@ -53,6 +53,9 @@ pub struct LunaConfig {
 
     #[serde(default)]
     pub browser: BrowserConfig,
+
+    #[serde(default)]
+    pub desktop: DesktopConfig,
 }
 
 // ── Agent behaviour ───────────────────────────────────────────────────────────
@@ -573,6 +576,43 @@ impl Default for BrowserConfig {
             profile_dir: String::new(),
             headless: false,
             timeout_secs: 600,
+        }
+    }
+}
+
+// ── Desktop computer-use automation ──────────────────────────────────────────
+// The "bigger than SIH" mode: Luna stares at the whole desktop (grim screenshot),
+// asks the SIH VLM for the next action, and executes it with ydotool — so it can
+// drive ANY application, not just a browser. No extension involved.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DesktopConfig {
+    /// Whether the desktop_do tool is available at all
+    pub enabled: bool,
+    /// HTTP base of the Project-Vision server (its /desktop-act endpoint)
+    pub srijan_url: String,
+    /// Folder holding the server's main.py; if empty, Luna doesn't auto-start
+    pub server_dir: String,
+    /// Screenshot tool (grim for Wayland, import for X11, etc.)
+    pub screenshot_cmd: String,
+    /// Path to the ydotool binary (empty = auto-detect from PATH)
+    pub ydotool_bin: String,
+    /// Hard cap on actions per task (safety valve so it never spins forever)
+    pub max_steps: u32,
+    /// Hard cap on how long one task may run
+    pub timeout_secs: u64,
+}
+
+impl Default for DesktopConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            srijan_url: "http://127.0.0.1:8001".into(),
+            server_dir: String::new(),
+            screenshot_cmd: "grim".into(),
+            ydotool_bin: String::new(),
+            max_steps: 30,
+            timeout_secs: 300,
         }
     }
 }

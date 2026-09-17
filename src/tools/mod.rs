@@ -843,6 +843,36 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         ToolDef {
             r#type: "function".into(),
             function: ToolFunction {
+                name: "desktop_do".into(),
+                description: "Control the user's WHOLE desktop — any application, not just a \
+                              browser. Luna looks at a full-screen screenshot (grim), asks the \
+                              local Project-Vision VLM what to do next, then drives the mouse \
+                              and keyboard via ydotool (click, type, press keys, scroll) and \
+                              launches apps by name (firefox, code, spotify, terminal, files, \
+                              etc.). It keeps looking/acting until the task is done or the \
+                              step cap hits. Use for desktop tasks the browser can't do, like \
+                              'open firefox and search my history', 'open the terminal and run \
+                              htop', 'open spotify and play the daily mix', 'move this window', \
+                              or anything on the desktop itself. Requires the Wayland session \
+                              (grim + ydotoold) and the local VLM server. Give ONE clear \
+                              sentence; it blocks until finished or the timeout passes. It \
+                              cannot login for you or solve captchas.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "the goal to accomplish on the desktop, as one sentence"
+                        }
+                    },
+                    "required": ["task"]
+                }),
+            },
+        },
+
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
                 name: "whatsapp_send".into(),
                 description: "Interact with the user's own WhatsApp via the local bridge (linked \
                               once via 'luna --whatsapp-link'). SEND-ONLY: it cannot read incoming \
@@ -1626,6 +1656,26 @@ echo "STATUS=$STATUS"
                     match crate::browser::run(task, config).await {
                         Ok(out) => Ok(out),
                         Err(e) => Ok(format!("Browser task failed: {e:#}")),
+                    }
+                }
+            }
+        }
+
+        "desktop_do" => {
+            if !config.desktop.enabled {
+                Ok("Desktop automation is disabled in config ([desktop] enabled = false). Tell \
+                    the user to re-enable it in luna.toml."
+                    .into())
+            } else {
+                let task = args["task"].as_str().unwrap_or("").trim();
+                if task.is_empty() {
+                    Ok("The desktop task was empty. Ask the user what they want done on the \
+                        computer."
+                        .into())
+                } else {
+                    match crate::tools::desktop::run(task, config).await {
+                        Ok(out) => Ok(out),
+                        Err(e) => Ok(format!("Desktop task failed: {e:#}")),
                     }
                 }
             }

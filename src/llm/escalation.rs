@@ -134,6 +134,15 @@ pub fn classify(input: &str) -> QueryComplexity {
         "whatsapp", "whats app", "send whatsapp", "wa message",
         "text ", "text me", "text myself", "text my phone",
         "send a text", "sms ", "message me", "message him", "message her",
+        // Desktop / browser computer-use (desktop_do / browser_do — only the
+        // full model has them; the VLM drives the actual clicks)
+        "on the desktop", "on the computer", "on my computer", "on the screen",
+        "in firefox", "in chrome", "in the browser", "open the browser",
+        "open firefox", "open chrome", "open spotify", "open the terminal",
+        "open the editor", "open vs code", "open code",
+        "use the desktop", "control the screen", "click on", "type in",
+        "in the terminal", "on amazon", "on flipkart", "add to cart",
+        "open the file", "open a file", "open the app", "open the software",
         // sysmode hardening / decoy-honeypot awareness — Luna must answer
         // "is the honeypot running?", "switch to lockdown", "is everything
         // working?" with real tool output, not the fast model's guesses.
