@@ -53,14 +53,18 @@ fn app_command(word: &str) -> Option<&'static str> {
         ("chromium", "chromium"),
         ("brave", "brave-browser"),
         ("zen", "zen-browser"),
+        ("browser", "zen-browser"),
+        ("default browser", "zen-browser"),
+        ("web browser", "zen-browser"),
         // editors / dev
         ("code", "code"),
         ("vscode", "code"),
         ("visual studio code", "code"),
         ("codium", "codium"),
         // terminals
-        ("terminal", "kitty"),
-        ("kitty", "kitty"),
+        ("terminal", "ghostty"),
+        ("ghostty", "ghostty"),
+        ("kitty", "ghostty"),
         ("konsole", "konsole"),
         ("alacritty", "alacritty"),
         // comms
@@ -493,6 +497,10 @@ mod tests {
         assert_eq!(app_command("Firefox"), Some("firefox"));
         assert_eq!(app_command("code"), Some("code"));
         assert_eq!(app_command("\"spotify\""), Some("spotify"));
+        assert_eq!(app_command("terminal"), Some("ghostty"));
+        assert_eq!(app_command("kitty"), Some("ghostty"));
+        assert_eq!(app_command("browser"), Some("zen-browser"));
+        assert_eq!(app_command("default browser"), Some("zen-browser"));
         assert_eq!(app_command("file manager"), Some("nautilus"));
         assert_eq!(app_command("hovercraft"), None);
         assert_eq!(app_command(""), None);
