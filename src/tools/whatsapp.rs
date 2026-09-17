@@ -10,10 +10,103 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::OnceLock;
+
+static WHATSAPP_CACHE_INIT: OnceLock<()> = OnceLock::new();
+
+/// Initialize the WhatsApp contacts cache on first use.
+/// Runs automatically when any WhatsApp tool is invoked.
+/// Populates the local cache from the bridge or on-disk contacts.json
+/// so name→phone resolution works offline immediately.
+fn ensure_cache_initialized() {
+    WHATSAPP_CACHE_INIT.get_or_init(|| {
+        // Fire-and-forget: warm the cache in the background.
+        // We don't block the caller; the cache will be ready on next use.
+        tokio::spawn(async {
+            let _ = warm_cache().await;
+        });
+    });
+}
+
+async fn warm_cache() -> Result<()> {
+    if missing_reason().is_some() {
+        return Ok(()); // bridge not installed, nothing to do
+    }
+    // Check if cache already has entries
+    let cache = load_cache();
+    if !cache.is_empty() {
+        return Ok(());
+    }
+    // Try live bridge first
+    let token = match read_token() {
+        Ok(t) => t,
+        Err(_) => return Ok(()),
+    };
+    let base = resolved_base(None);
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{base}/contacts"))
+        .bearer_auth(&token)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+    let v = match res {
+        Ok(r) => r.json::<Value>().await.ok(),
+        Err(_) => None,
+    };
+    if let Some(v) = v {
+        if v["ok"].as_bool() == Some(true) {
+            if let Some(arr) = v["contacts"].as_array() {
+                let mut cache = HashMap::new();
+                for c in arr {
+                    if let (Some(name), Some(phone)) = (c["name"].as_str(), c["phone"].as_str()) {
+                        cache.insert(name.to_lowercase(), phone.to_string());
+                    }
+                }
+                save_cache(&cache);
+                return Ok(());
+            }
+        }
+    }
+    // Fallback: read the bridge's on-disk contacts.json
+    let path = data_dir().join("contacts.json");
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+            if let Some(arr) = v.as_array() {
+                let mut cache = HashMap::new();
+                for c in arr {
+                    if let (Some(name), Some(phone)) = (c["name"].as_str(), c["phone"].as_str()) {
+                        cache.insert(name.to_lowercase(), phone.to_string());
+                    }
+                }
+                save_cache(&cache);
+            }
+        }
+    }
+    Ok(())
+}
 
 const DEFAULT_PORT: u16 = 7373;
+
+fn cache_path() -> PathBuf {
+    data_dir().join("contacts_cache.json")
+}
+
+/// Load the local contacts cache (name → phone) for fast offline resolution.
+fn load_cache() -> HashMap<String, String> {
+    std::fs::read_to_string(cache_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Save the contacts cache.
+fn save_cache(cache: &HashMap<String, String>) {
+    let _ = std::fs::write(cache_path(), serde_json::to_string_pretty(cache).unwrap_or_default());
+}
 
 pub fn data_dir() -> PathBuf {
     dirs::data_local_dir()
@@ -77,7 +170,7 @@ fn resolved_base(explicit: Option<&str>) -> String {
 /// Turn whatever the user said into a number the bridge can use:
 ///   "myself" / "me"      → the phone number of the linked account
 ///   "15551234567"/"+919..." → used as-is
-///   "mom", "alice", ...   → looked up in the WhatsApp contacts via the bridge
+///   "mom", "alice", ...   → looked up in the local cache first, then the bridge
 async fn resolve_recipient(
     to: &str,
     base: &str,
@@ -99,6 +192,12 @@ async fn resolve_recipient(
     // A bare number (optionally prefixed with +) passes straight through.
     if t.chars().all(|c| c.is_ascii_digit()) || t.starts_with('+') {
         return Ok(t);
+    }
+
+    // Check local cache first (populated by contacts() calls)
+    let cache = load_cache();
+    if let Some(phone) = cache.get(&low) {
+        return Ok(phone.clone());
     }
 
     // Anything else is a name: look it up in the bridge's contact list.
@@ -133,6 +232,7 @@ async fn resolve_recipient(
 
 /// Look up a contact by name and report number(s) without sending anything.
 pub async fn lookup(name: &str, explicit_base: Option<&str>) -> Result<String> {
+    ensure_cache_initialized();
     let base = resolved_base(explicit_base);
     let token = read_token()?;
     let client = reqwest::Client::new();
@@ -204,7 +304,7 @@ pub fn sync_bridge() {
     }
 }
 
-fn render_contacts(v: &Value) -> String {
+fn render_contacts(v: &Value, show_all: bool) -> String {
     let list = match v["contacts"].as_array() {
         Some(l) => l,
         None => {
@@ -229,25 +329,33 @@ fn render_contacts(v: &Value) -> String {
         })
         .collect();
     lines.sort();
-    lines.insert(
-        0,
-        format!("WhatsApp contact book ({} entries):", list.len()),
-    );
-    lines.join("\n")
+    let total = lines.len();
+    let lines_to_show = if show_all { total } else { total.min(15) };
+    let preview: Vec<String> = lines.iter().take(lines_to_show).cloned().collect();
+    let mut out = format!("WhatsApp contact book ({total} entries{}):\n",
+        if show_all { "" } else { ", showing first 15" });
+    out.push_str(&preview.join("\n"));
+    if !show_all && total > 15 {
+        out.push_str(&format!("\n... and {} more. Use action=contacts with show_all=true to see all, or q=<name> to filter.", total - 15));
+    }
+    out
 }
 
 /// List the indexed WhatsApp contact book (name ↔ phone).
 ///
 /// Prefers the live bridge (`GET /contacts`); if the bridge is down or not
 /// linked, falls back to the on-disk contact book the bridge itself maintains.
-pub async fn contacts(query: Option<&str>, explicit_base: Option<&str>) -> Result<String> {
+/// Also updates a local cache for fast offline name→phone resolution.
+/// If `show_all` is true, returns the complete list; otherwise a preview (first 15).
+pub async fn contacts(query: Option<&str>, show_all: bool, explicit_base: Option<&str>) -> Result<String> {
+    ensure_cache_initialized();
     sync_bridge();
     if let Some(reason) = missing_reason() {
         bail!("WhatsApp bridge isn't installed ({reason}). Run `luna --whatsapp-link` to set it up.");
     }
     let q = query.map(str::trim).filter(|s| !s.is_empty());
 
-    let live: Option<String> = (async || {
+    let live: Option<(String, Value)> = (async || {
         let token = read_token().ok()?;
         let base = resolved_base(explicit_base);
         let client = reqwest::Client::new();
@@ -261,14 +369,24 @@ pub async fn contacts(query: Option<&str>, explicit_base: Option<&str>) -> Resul
         let res = req.send().await.ok()?;
         let v = res.json::<Value>().await.ok()?;
         if v["ok"].as_bool() == Some(true) {
-            Some(render_contacts(&v))
+            Some((render_contacts(&v, show_all), v.clone()))
         } else {
             None
         }
     })()
     .await;
 
-    if let Some(rendered) = live {
+    if let Some((rendered, v)) = live {
+        // Update local cache from live data
+        if let Some(arr) = v["contacts"].as_array() {
+            let mut cache = load_cache();
+            for c in arr {
+                if let (Some(name), Some(phone)) = (c["name"].as_str(), c["phone"].as_str()) {
+                    cache.insert(name.to_lowercase(), phone.to_string());
+                }
+            }
+            save_cache(&cache);
+        }
         return Ok(rendered);
     }
 
@@ -276,7 +394,20 @@ pub async fn contacts(query: Option<&str>, explicit_base: Option<&str>) -> Resul
     let path = data_dir().join("contacts.json");
     match std::fs::read_to_string(&path) {
         Ok(raw) => match serde_json::from_str::<Value>(&raw) {
-            Ok(v) if v.is_array() => Ok(render_contacts(&json!({ "contacts": v }))),
+            Ok(v) if v.is_array() => {
+                let rendered = render_contacts(&json!({ "contacts": v }), show_all);
+                // Also update cache from file
+                let mut cache = load_cache();
+                if let Some(arr) = v.as_array() {
+                    for c in arr {
+                        if let (Some(name), Some(phone)) = (c["name"].as_str(), c["phone"].as_str()) {
+                            cache.insert(name.to_lowercase(), phone.to_string());
+                        }
+                    }
+                }
+                save_cache(&cache);
+                Ok(rendered)
+            }
             _ => Ok("The bridge is offline and I couldn't read the saved contact book. \
                      Start the bridge (luna-whapp.service) and try again."
                 .to_string()),
@@ -289,6 +420,7 @@ pub async fn contacts(query: Option<&str>, explicit_base: Option<&str>) -> Resul
 
 /// Send a WhatsApp message through the local bridge.
 pub async fn send(to: &str, text: &str, explicit_base: Option<&str>) -> Result<String> {
+    ensure_cache_initialized();
     if let Some(reason) = missing_reason() {
         bail!("Can't send: {reason}. Run `luna --whatsapp-link` once to pair your WhatsApp.");
     }
@@ -320,6 +452,7 @@ pub async fn send(to: &str, text: &str, explicit_base: Option<&str>) -> Result<S
 
 /// Live status of the bridge and its connection.
 pub async fn status(explicit_base: Option<&str>) -> Result<String> {
+    ensure_cache_initialized();
     if let Some(reason) = missing_reason() {
         return Ok(format!(
             "WhatsApp bridge not installed ({reason}). Run `luna --whatsapp-link` once to pair your WhatsApp."
@@ -342,12 +475,11 @@ pub async fn status(explicit_base: Option<&str>) -> Result<String> {
                     .unwrap_or_default();
                 format!("WhatsApp bridge is up and linked{who}.")
             } else {
-                format!("WhatsApp bridge is running but not linked — run `luna --whatsapp-link` and scan the QR.")
+                "WhatsApp bridge is running but not linked — run `luna --whatsapp-link` and scan the QR.".to_string()
             })
         }
-        Err(_) => Ok(format!(
-            "WhatsApp bridge is not running. Start it (it auto-starts with luna-whapp.service) or run `luna --whatsapp-link`."
-        )),
+        Err(_) => Ok("WhatsApp bridge is not running. Start it (it auto-starts with luna-whapp.service) or run `luna --whatsapp-link`."
+            .to_string()),
     }
 }
 

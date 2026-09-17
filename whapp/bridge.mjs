@@ -259,7 +259,7 @@ function startHttp({ get: getSocket, contacts: getContacts }, cfg) {
 
     if (!okToken) return send(401, { ok: false, error: 'unauthorized' });
 
-    if (req.url === '/resolve' && req.method === 'GET') {
+    if (req.url.startsWith('/resolve') && req.method === 'GET') {
       const sock = getSocket();
       if (!sock?.user) return send(503, { ok: false, error: 'bridge not linked' });
       const name = new URL(req.url, 'http://localhost').searchParams.get('name') || '';
@@ -272,14 +272,28 @@ function startHttp({ get: getSocket, contacts: getContacts }, cfg) {
             "Re-pair once from the terminal (luna --whatsapp-link) to backfill your contact book now.",
         });
       }
-      const results = resolveContact(contactsMap, name);
+      // More lenient match: exact first, then case-insensitive substring,
+      // ignoring non-alphanumeric differences (handles "Vani :D" vs "Vani:D" etc.)
+      const q = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const results = [...contactsMap.values()]
+        .filter((c) => c.name) // name must exist
+        .filter((c) => {
+          const clean = c.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+          return clean === q || clean.includes(q) || q.includes(clean);
+        })
+        .slice(0, 5)
+        .map((c) => ({
+          jid: c.id,
+          phone: extractPhone(c.id),
+          name: c.name,
+        }));
       if (results.length === 0) {
         return send(404, { ok: false, error: `no contact named "${name}" matched` });
       }
       return send(200, { ok: true, matches: results });
     }
 
-    if (req.url === '/contacts' && req.method === 'GET') {
+    if (req.url.startsWith('/contacts') && req.method === 'GET') {
       const sock = getSocket();
       if (!sock?.user) return send(503, { ok: false, error: 'bridge not linked' });
       const q = new URL(req.url, 'http://localhost').searchParams.get('q') || '';

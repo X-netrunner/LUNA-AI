@@ -853,7 +853,8 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                               'text' (the message body); action=lookup with 'to' as a name to \
                               report that contact's number WITHOUT sending; action=contacts to \
                               list the whole indexed contact book as names with their numbers \
-                              (with an optional 'q' to filter by a name fragment) so messages \
+                              (with an optional 'q' to filter by a name fragment, and 'show_all' \
+                              to return the complete list instead of a preview) so messages \
                               can be addressed by name; action=status reports whether the bridge \
                               is up/linked and the user's own number. When a number appears in \
                               conversation, prefer the contact's NAME; only give the bare number \
@@ -879,6 +880,10 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                         "q": {
                             "type": "string",
                             "description": "optional name filter for action=contacts (e.g. 'jane')"
+                        },
+                        "show_all": {
+                            "type": "boolean",
+                            "description": "if true, return the complete contact list; otherwise a preview (first 15 entries)"
                         }
                     },
                     "required": ["action"]
@@ -1588,7 +1593,8 @@ echo "STATUS=$STATUS"
                     }
                     "contacts" => {
                         let q = args["q"].as_str();
-                        crate::tools::whatsapp::contacts(q, base).await
+                        let show_all = args["show_all"].as_bool().unwrap_or(false);
+                        crate::tools::whatsapp::contacts(q, show_all, base).await
                     }
                     _ => crate::tools::whatsapp::status(base).await,
                 }

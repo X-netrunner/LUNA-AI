@@ -163,6 +163,10 @@ impl<'a> ReactLoop<'a> {
         let mut iteration = 0;
         let mut turn_messages: Vec<Message> = Vec::new();
         let mut empty_retries = 0;
+        // Guards against the model *claiming* an action completed (notably
+        // "message sent") without the corresponding tool actually running this
+        // turn — it can happen when the model just echoes a previous reply.
+        let mut send_confirm_retries = 0;
         // Tool calls already executed this turn (name + JSON args), tracked to
         // break identical-repeat loops where a model calls the same tool with
         // the same arguments forever instead of writing an answer.
@@ -282,6 +286,27 @@ impl<'a> ReactLoop<'a> {
                     }
 
                     // ── Genuine text response ─────────────────────────────
+                    // WhatsApp send-integrity guard: an assistant claim that a
+                    // message was SENT is only true if the whatsapp_send tool
+                    // actually ran this turn. If the reply claims "sent" but no
+                    // send tool executed, force one retry so the message really
+                    // goes out (models echo prior confirmations without acting).
+                    let requested_send = is_whatsapp_send_request(user_input);
+                    let claims_delivery = claims_message_sent(&text);
+                    let send_ran = used_calls.iter().any(|c| c.starts_with("whatsapp_send"));
+                    if requested_send && claims_delivery && !send_ran && send_confirm_retries < 2 {
+                        tracing::warn!(
+                            "Reply claimed 'message sent' but whatsapp_send never ran — retrying"
+                        );
+                        send_confirm_retries += 1;
+                        turn_messages.push(Message::user(
+                            "Correction: you replied as if the WhatsApp message was already \
+                             sent, but the whatsapp_send tool has NOT run this turn, so nothing \
+                             was delivered. Actually call whatsapp_send now (action=send, with \
+                             to=<contact> and text=...) — then report the tool's real result.",
+                        ));
+                        continue;
+                    }
                     memory.push(Message::assistant(&text));
                     if let Err(e) = memory.save() {
                         tracing::warn!("Failed to save memory: {}", e);
@@ -452,6 +477,31 @@ fn text_of(response: &OllamaResponse) -> String {
     }
 }
 
+/// Heuristic: the user is asking us to SEND a WhatsApp message. Matches the
+/// phrasing "send <recipient> <quoted text>" (e.g. "send Vani :D \"hi\"").
+fn is_whatsapp_send_request(input: &str) -> bool {
+    let lower = input.to_lowercase();
+    (lower.contains("send") || lower.starts_with("text "))
+        && (input.contains('"') || input.contains('“'))
+}
+
+/// Heuristic: an assistant reply that CLAIMS a WhatsApp message was delivered.
+fn claims_message_sent(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "has been sent",
+        "have been sent",
+        "has been sent to",
+        "sent to ",
+        "message sent",
+        "the message \"",
+        "has been delivered",
+        "was sent to",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
 /// Detect a standalone `ESCALATE` token in the response, or a general
 /// refusal/uncertainty ("I don't know", "can't answer", …). The latter is the
 /// general safety net: ANY time the fast model confesses it can't answer, the
@@ -603,6 +653,30 @@ mod tests {
             call.function.arguments["command"],
             "systemctl --user stop bluetooth"
         );
+    }
+
+    #[test]
+    fn detects_whatsapp_send_request() {
+        assert!(is_whatsapp_send_request("Send Vani :D \"lemme know\""));
+        assert!(is_whatsapp_send_request("send mom \"happy birthday\""));
+        assert!(is_whatsapp_send_request("Text Vani: \"on my way\""));
+        assert!(!is_whatsapp_send_request("What's the weather?"));
+        assert!(!is_whatsapp_send_request("send me the time"));
+        assert!(!is_whatsapp_send_request("List my contacts"));
+    }
+
+    #[test]
+    fn detects_sent_claims() {
+        assert!(claims_message_sent(
+            "The message \"hi\" has been sent to Vani at +919354676101."
+        ));
+        assert!(claims_message_sent(
+            "Your message has been delivered to mom on WhatsApp."
+        ));
+        assert!(!claims_message_sent(
+            "I'll try sending that once I have the details."
+        ));
+        assert!(!claims_message_sent("No message was sent."));
     }
 
     #[test]

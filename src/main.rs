@@ -232,6 +232,13 @@ async fn main() -> Result<()> {
         tracing::info!("Voice mode overridden by CLI: {:?}", config.voice.mode);
     }
 
+    // Voice output is TUI-only. Pure-CLI runs (`--text-only`, piped input,
+    // the default fallback) exist for testing and must stay silent.
+    if !args.tui {
+        config.voice.mode = VoiceMode::Off;
+        tracing::info!("Voice force-disabled in non-TUI (CLI) mode");
+    }
+
     // ── Daemon mode ──────────────────────────────────────────────────────────
     // No tty interaction, no sudo prompt, no Ollama needed.
     if args.daemon {
