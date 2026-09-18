@@ -547,11 +547,6 @@ impl Default for SysmodeConfig {
 pub struct BrowserConfig {
     /// Whether the browser_do tool is available at all
     pub enabled: bool,
-    /// WebSocket endpoint of the Project-Vision server (the SIH planner/VLM)
-    pub srijan_url: String,
-    /// Folder that holds the server's main.py; if empty, Luna doesn't auto-start
-    /// the server and instead tells the user to start it.
-    pub server_dir: String,
     /// Browser binary used for automation (chromium, google-chrome, ...)
     pub chromium: String,
     /// Port Chromium's remote debugging listens on
@@ -569,8 +564,6 @@ impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            srijan_url: "ws://127.0.0.1:8001/ws".into(),
-            server_dir: String::new(),
             chromium: "chromium".into(),
             cdp_port: 9222,
             profile_dir: String::new(),
