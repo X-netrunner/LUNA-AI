@@ -1,18 +1,12 @@
 //! CDP client using chromiumoxide — native async DevTools Protocol driver.
 
 use anyhow::{anyhow, Context, Result};
-use chromiumoxide::{
-    Browser, BrowserConfig,
-    browser::HeadlessMode,
-    js::Evaluation,
-    page::ScreenshotParams,
-};
+use chromiumoxide::{Browser, BrowserConfig, browser::HeadlessMode};
 use chromiumoxide_cdp::cdp::browser_protocol::page::NavigateParams;
 use futures::StreamExt;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::process::Command;
 
 /// Persistent Chromium instance with a dedicated profile.
 pub struct CdpBrowser {
@@ -20,20 +14,74 @@ pub struct CdpBrowser {
     _handler_task: tokio::task::JoinHandle<()>,
 }
 
+/// The dedicated profile directory used for automation — mirrors
+/// [`CdpBrowser::new`] so `ensure_browser` can target the same instance.
+fn profile_path(config: &crate::config::BrowserConfig) -> PathBuf {
+    if config.profile_dir.trim().is_empty() {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("luna")
+            .join("browser-profile")
+    } else {
+        PathBuf::from(&config.profile_dir)
+    }
+}
+
+/// True when some live process was launched with `--user-data-dir=<profile>`
+/// (i.e. one of our automation Chromiums is still running).
+fn process_uses_profile(profile: &PathBuf) -> bool {
+    let needle = format!("--user-data-dir={}", profile.display());
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        if raw.windows(needle.len()).any(|w| w == needle.as_bytes()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Hard-kill any leftover automation Chromium (by profile dir and by CDP port)
+/// and purge the stale singleton lock files it leaves behind.
+async fn kill_leftovers(config: &crate::config::BrowserConfig) {
+    let profile = profile_path(config);
+
+    // 1. Kill processes bound to our CDP port.
+    let _ = tokio::process::Command::new("fuser")
+        .arg("-k")
+        .arg(format!("{}/tcp", config.cdp_port))
+        .output()
+        .await;
+    // 2. Kill by profile flag too — catches zombies that no longer hold the port.
+    let _ = tokio::process::Command::new("pkill")
+        .arg("-KILL")
+        .arg("-f")
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .output()
+        .await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // 3. Remove stale singleton locks. Chromium writes these on start and only
+    //    clears them on a clean exit; after a SIGKILL they outlive the process
+    //    and make the next launch report "profile is in use by another process".
+    for name in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
+        let _ = std::fs::remove_file(profile.join(name));
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
 impl CdpBrowser {
     /// Launch or connect to a Chromium instance with a persistent profile.
     pub async fn new(config: &crate::config::BrowserConfig) -> Result<Self> {
-        let profile = if config.profile_dir.trim().is_empty() {
-            dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("luna")
-                .join("browser-profile")
-        } else {
-            PathBuf::from(&config.profile_dir)
-        };
+        let profile = profile_path(config);
         std::fs::create_dir_all(&profile)?;
-
-        let log_path = profile.join("chromium.log");
 
         // Build chromiumoxide config
         let mut builder = BrowserConfig::builder()
@@ -112,39 +160,48 @@ impl CdpBrowser {
     pub async fn eval(&self, expression: &str) -> Result<Value> {
         let page = self.current_page().await?;
         let result = page
-            .evaluate(expression)  // Evaluation implements From<&str>
+            .evaluate(expression)
             .await
             .context("evaluate js")?;
         Ok(result.object().value.clone().unwrap_or(Value::Null))
     }
-
-    /// Take a screenshot as base64 PNG
-    pub async fn screenshot(&self) -> Result<String> {
-        let page = self.current_page().await?;
-        let data = page
-            .screenshot(ScreenshotParams::default())
-            .await
-            .context("capture screenshot")?;
-        Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data))
-    }
-
-    /// Get the underlying browser for advanced operations
-    pub fn browser(&self) -> &Browser {
-        &self.browser
-    }
 }
 
-/// Ensure a debuggable Chromium is running, return a connected CdpBrowser.
+/// Ensure our automation Chromium is running, return a connected CdpBrowser.
+///
+/// Reuses an already-running automation instance (same profile + port) so
+/// repeated tasks don't spawn a second window; otherwise it kills any leftovers
+/// and launches a fresh one.
 pub async fn ensure_browser(config: &crate::config::BrowserConfig) -> Result<CdpBrowser> {
-    // Kill any existing process on the CDP port to avoid conflicts with user's browser
-    let _ = tokio::process::Command::new("fuser")
-        .arg("-k")
-        .arg(format!("{}/tcp", config.cdp_port))
-        .output()
-        .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Reuse: is one of our automation Chromiums (same profile dir) still alive?
+    let alive_profile = process_uses_profile(&profile_path(config));
+    if alive_profile {
+        let cdp_url = format!("http://127.0.0.1:{}", config.cdp_port);
+        if let Ok((browser, mut handler)) = Browser::connect(&cdp_url).await {
+            tokio::spawn(async move {
+                while let Some(h) = handler.next().await {
+                    if h.is_err() {
+                        break;
+                    }
+                }
+            });
+            if let Ok(pages) = browser.pages().await {
+                if !pages.is_empty() {
+                    tracing::info!(
+                        "reusing existing automation Chromium on port {}",
+                        config.cdp_port
+                    );
+                    return Ok(CdpBrowser {
+                        browser,
+                        _handler_task: tokio::spawn(async {}),
+                    });
+                }
+            }
+        }
+    }
 
-    // Always launch our own isolated instance with dedicated profile
+    // No healthy instance — clear stale processes/locks, then launch fresh.
+    kill_leftovers(config).await;
     tracing::info!("launching isolated Chromium on port {} for automation", config.cdp_port);
     CdpBrowser::new(config).await
 }

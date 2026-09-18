@@ -3,28 +3,6 @@
 use crate::browser::types::ActionResult;
 use serde_json::Value;
 
-/// Click at viewport coordinates (x, y). Finds the deepest clickable element.
-pub fn dom_click_expr(x: i64, y: i64) -> String {
-    format!(
-        r#"(() => {{
-  const el = document.elementFromPoint({x}, {y});
-  if (!el) return {{ ok: false, error: "no element at point" }};
-  const clickable =
-    el.closest('button,a,input,textarea,select,label,[role="button"],[role="radio"],[role="checkbox"],[role="option"],[role="menuitem"],[role="switch"],[onclick],[tabindex]') ||
-    (el instanceof HTMLElement ? el : null);
-  if (!clickable) return {{ ok: false, error: "element not clickable" }};
-  const ev = {{ bubbles: true, cancelable: true, view: window, clientX: {x}, clientY: {y} }};
-  clickable.dispatchEvent(new PointerEvent("pointerdown", ev));
-  clickable.dispatchEvent(new MouseEvent("mousedown", ev));
-  clickable.focus();
-  clickable.dispatchEvent(new PointerEvent("pointerup", ev));
-  clickable.dispatchEvent(new MouseEvent("mouseup", ev));
-  clickable.click();
-  return {{ ok: true }};
-}})()"#
-    )
-}
-
 /// Type text into the currently focused or best-guess input element.
 pub fn dom_type_expr(text: &str) -> String {
     let t = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());

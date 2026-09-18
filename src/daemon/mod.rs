@@ -270,6 +270,11 @@ pub async fn run(config: LunaConfig) -> Result<()> {
             .await;
         }
 
+        // ── 11. Keep the desktop notification corner bounded ─────────────
+        if config.daemon.notif_cap > 0 {
+            enforce_notif_cap(config.daemon.notif_cap).await;
+        }
+
         // Sleep until the next scan OR the next reminder, whichever first —
         // so a "remind me in 2 minutes" doesn't wait out the whole interval.
         let next_reminder = crate::tools::reminders::next_in()
@@ -277,6 +282,33 @@ pub async fn run(config: LunaConfig) -> Result<()> {
             .unwrap_or(interval);
         tokio::time::sleep(next_reminder.max(Duration::from_secs(5))).await;
     }
+}
+
+/// Keep the desktop notification corner bounded. Reads the running shell's
+/// stored notification list (caelestia/Quickshell) and, when it exceeds the
+/// configured cap, tells the shell to clear it. no-op when cap == 0.
+async fn enforce_notif_cap(cap: u32) {
+    if cap == 0 {
+        return;
+    }
+    let state = dirs::state_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("caelestia")
+        .join("notifs.json");
+    let Ok(text) = tokio::fs::read_to_string(&state).await else {
+        return; // shell not present or not running — nothing to do
+    };
+    let count = serde_json::from_str::<Vec<serde_json::Value>>(&text)
+        .map(|v| v.len())
+        .unwrap_or(0);
+    if count <= cap as usize {
+        return;
+    }
+    tracing::info!("Notification corner has {count} items (cap {cap}) — clearing via shell");
+    let _ = tokio::process::Command::new("qs")
+        .args(["-c", "caelestia", "ipc", "call", "notifs", "clear"])
+        .output()
+        .await;
 }
 
 // ── Idle handling ─────────────────────────────────────────────────────────────

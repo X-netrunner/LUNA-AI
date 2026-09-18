@@ -5,8 +5,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::browser::types::ActionResult;
-
 /// A single planner step in our internal format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
@@ -64,10 +62,6 @@ impl Step {
             value: None,
             is_last: false,
         }
-    }
-    pub fn with_last(mut self, last: bool) -> Self {
-        self.is_last = last;
-        self
     }
 }
 

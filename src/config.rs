@@ -423,6 +423,9 @@ pub struct DaemonConfig {
     /// daemon runs (0 = off). The notification includes uptime, cycles,
     /// auto-kills and how much Luna knows.
     pub notify_hours: u32,
+    /// Keep the desktop notification corner bounded: when more than this many
+    /// notifications are stored, clear them via the shell (0 = never auto-clear).
+    pub notif_cap: u32,
 }
 
 impl Default for DaemonConfig {
@@ -492,6 +495,7 @@ impl Default for DaemonConfig {
             safety_check_days: 7,
             backup_days: 7,
             notify_hours: 0,
+            notif_cap: 100,
         }
     }
 }

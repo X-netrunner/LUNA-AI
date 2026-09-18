@@ -1,7 +1,6 @@
 //! Shared types for the browser automation engine.
 
 use serde::Serialize;
-use serde_json::Value;
 
 #[derive(Debug, Serialize)]
 pub struct ActionResult {

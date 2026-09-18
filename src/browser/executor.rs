@@ -1,7 +1,6 @@
 //! Plan executor — runs steps in the browser, handles retries and re-planning.
 
-use anyhow::{anyhow, Context, Result};
-use serde_json::Value;
+use anyhow::{Context, Result};
 use std::time::Duration;
 use tokio::time::timeout;
 

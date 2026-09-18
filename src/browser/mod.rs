@@ -49,9 +49,8 @@ pub async fn run(task: &str, config: &LunaConfig) -> Result<String> {
 
     let history_str = history.join("\n");
     Ok(format!(
-        "Done. The browser automation ({} steps) executed:\n{}\n\nThe browser window is \
-         still open so you can see the final state; tell me if you'd like it closed or if the \
-         result isn't what you wanted.",
+        "Done. The browser automation ({} steps) executed:\n{}\n\nThe automation browser was \
+         closed after the task (its profile is kept for logins).",
         history.len(),
         history_str
     ))
@@ -59,7 +58,6 @@ pub async fn run(task: &str, config: &LunaConfig) -> Result<String> {
 
 // Re-export for tests and internal use
 pub use planner::Step;
-pub use types::ActionResult;
 
 #[cfg(test)]
 pub use cdp::*;
