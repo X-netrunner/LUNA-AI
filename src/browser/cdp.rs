@@ -11,6 +11,12 @@ use std::time::Duration;
 /// Persistent Chromium instance with a dedicated profile.
 pub struct CdpBrowser {
     browser: Browser,
+    /// The page owned by this session (created by `new_page` on reuse, or the
+    /// initial tab on a fresh launch). `current_page` returns this handle
+    /// directly instead of scanning all tabs — a scan can latch onto a tab
+    /// that pre-dates this CDP connection, and navigation on such stale tabs
+    /// never completes (chromiumoxide `CdpError::Timeout`).
+    page: Option<chromiumoxide::Page>,
     _handler_task: tokio::task::JoinHandle<()>,
 }
 
@@ -60,9 +66,12 @@ async fn kill_leftovers(config: &crate::config::BrowserConfig) {
         .output()
         .await;
     // 2. Kill by profile flag too — catches zombies that no longer hold the port.
+    //    The `--` separator is required: procps-ng would otherwise parse the
+    //    `--user-data-dir=...` pattern as its own (invalid) option.
     let _ = tokio::process::Command::new("pkill")
         .arg("-KILL")
         .arg("-f")
+        .arg("--")
         .arg(format!("--user-data-dir={}", profile.display()))
         .output()
         .await;
@@ -120,18 +129,46 @@ impl CdpBrowser {
 
         // Ensure we have at least one page
         let pages = browser.pages().await.context("get pages")?;
-        if pages.is_empty() {
-            let _ = browser.new_page("about:blank").await.context("create initial page")?;
-        }
+        let page = match pages.into_iter().next() {
+            Some(p) => Some(p),
+            None => {
+                browser
+                    .new_page("about:blank")
+                    .await
+                    .context("create initial page")?
+                    .into()
+            }
+        };
 
         Ok(Self {
             browser,
+            page,
             _handler_task: handler_task,
         })
     }
 
-    /// Get the current active page (first non-blank page)
+    /// Leave the Automation Chromium running after this handle goes away.
+    ///
+    /// chromiumoxide's launched `Browser` kills its child on drop
+    /// (`kill_on_drop`), which closes the window at the end of a task.
+    /// Forgetting the handle keeps the process alive so the user can inspect
+    /// the final state; the next task picks it up again via
+    /// [`ensure_browser`]'s connect path.
+    pub fn detach(self) {
+        std::mem::forget(self);
+    }
+
+    /// Get the current active page.
+    ///
+    /// Prefers the page owned by this session (created via `new_page` on the
+    /// reuse path, or the initial tab on a fresh launch). Falls back to a scan
+    /// of all tabs only when no handle is held — the scan is unsafe on a
+    /// reused connection because tabs that pre-dated the connection register
+    /// as pages yet never complete navigation.
     pub async fn current_page(&self) -> Result<chromiumoxide::Page> {
+        if let Some(page) = &self.page {
+            return Ok(page.clone());
+        }
         let pages = self.browser.pages().await.context("get pages")?;
         // Prefer the first non-about:blank page
         for page in &pages {
@@ -175,27 +212,73 @@ impl CdpBrowser {
 pub async fn ensure_browser(config: &crate::config::BrowserConfig) -> Result<CdpBrowser> {
     // Reuse: is one of our automation Chromiums (same profile dir) still alive?
     let alive_profile = process_uses_profile(&profile_path(config));
+    tracing::debug!("ensure_browser: process_uses_profile={alive_profile}");
     if alive_profile {
         let cdp_url = format!("http://127.0.0.1:{}", config.cdp_port);
-        if let Ok((browser, mut handler)) = Browser::connect(&cdp_url).await {
-            tokio::spawn(async move {
-                while let Some(h) = handler.next().await {
-                    if h.is_err() {
-                        break;
+        match Browser::connect(&cdp_url).await {
+            Ok((mut browser, mut handler)) => {
+                tokio::spawn(async move {
+                    while let Some(h) = handler.next().await {
+                        if h.is_err() {
+                            break;
+                        }
                     }
+                });
+                // A freshly connected client does NOT get `targetCreated`
+                // events replayed for tabs that already exist, so the
+                // handler's page registry is empty and `pages()` returns [].
+                // Actively fetch current targets to populate it.
+                if browser.fetch_targets().await.is_ok() {
+                    // Close leftovers from the previous task so the window
+                    // stays clean and current_page() never latches onto a
+                    // stale, pre-connection tab (navigation on such tabs never
+                    // completes — CdpError::Timeout). pages() races target
+                    // init after connect, so poll briefly until the stale tabs
+                    // are visible before closing them.
+                    for _ in 0..15 {
+                        match browser.pages().await {
+                            Ok(pages) if !pages.is_empty() => {
+                                for page in pages {
+                                    let _ = page.close().await;
+                                }
+                                break;
+                            }
+                            Ok(_) => {
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    // Open a fresh page — the same proven path as
+                    // CdpBrowser::new. new_page() returns only once the page
+                    // is fully initialized, so steps won't hit a timeout. We
+                    // hold its handle so current_page() uses OUR page, never
+                    // a stale tab.
+                    match browser.new_page("about:blank").await {
+                        Ok(page) => {
+                            tracing::info!(
+                                "reusing existing automation Chromium on port {}",
+                                config.cdp_port
+                            );
+                            return Ok(CdpBrowser {
+                                browser,
+                                page: Some(page),
+                                _handler_task: tokio::spawn(async {}),
+                            });
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "ensure_browser: new_page on reused browser failed: {e}, \
+                                 relaunching"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::debug!("ensure_browser: fetch_targets failed, relaunching");
                 }
-            });
-            if let Ok(pages) = browser.pages().await {
-                if !pages.is_empty() {
-                    tracing::info!(
-                        "reusing existing automation Chromium on port {}",
-                        config.cdp_port
-                    );
-                    return Ok(CdpBrowser {
-                        browser,
-                        _handler_task: tokio::spawn(async {}),
-                    });
-                }
+            }
+            Err(e) => {
+                tracing::debug!("ensure_browser: connect failed: {e}, relaunching");
             }
         }
     }

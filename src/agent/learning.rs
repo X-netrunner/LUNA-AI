@@ -359,7 +359,11 @@ fn render_session(turns: &[(String, String)]) -> String {
 }
 
 async fn summarize_text(config: &LunaConfig, text: &str) -> Option<(String, String)> {
-    let client = OllamaClient::new(&config.llm.base_url, &config.llm.model, 0.2, 512);
+    let client = OllamaClient::new(&config.llm.base_url, &config.llm.model, 0.2, 512)
+        // Background job — never stream tokens/thinking to the terminal. It
+        // runs at startup while the user is at the input prompt, so printing
+        // would look like an unrelated "test case" is running by itself.
+        .term_output(false);
     let context = vec![
         Message::system(SUMMARY_SYSTEM.to_string()),
         Message::user(format!("Conversation:\n{}", text)),

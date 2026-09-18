@@ -39,9 +39,20 @@ pub async fn run(task: &str, config: &LunaConfig) -> Result<String> {
     tracing::info!("Generated plan with {} steps", steps.len());
 
     // Execute with retry/rethink
-    let history = execute_plan(&browser, &planner, task, steps)
-        .await
-        .context("execute plan")?;
+    let history = match execute_plan(&browser, &planner, task, steps).await {
+        Ok(h) => h,
+        Err(e) => {
+            // Leave the window open on failure too — the user should see the
+            // state the browser is stuck in. Next task reuses the instance.
+            browser.detach();
+            return Err(e).context("execute plan");
+        }
+    };
+
+    // Keep the automation Chromium alive so the user can see the final page
+    // (cart contents, search results, ...). It's cheap to reuse later thanks
+    // to ensure_browser's connect path.
+    browser.detach();
 
     if history.is_empty() {
         return Ok("The browser automation finished without executing any steps.".into());
@@ -49,8 +60,9 @@ pub async fn run(task: &str, config: &LunaConfig) -> Result<String> {
 
     let history_str = history.join("\n");
     Ok(format!(
-        "Done. The browser automation ({} steps) executed:\n{}\n\nThe automation browser was \
-         closed after the task (its profile is kept for logins).",
+        "Done. The browser automation ({} steps) executed:\n{}\n\nThe automation Chromium \
+         is still open so you can see the final state (your next browser task will reuse \
+         the same window).",
         history.len(),
         history_str
     ))
