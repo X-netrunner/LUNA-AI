@@ -171,6 +171,11 @@ impl CdpBrowser {
         let mut builder = BrowserConfig::builder()
             .port(config.cdp_port)
             .user_data_dir(&profile)
+            // chromiumoxide defaults to an emulated 800x600 viewport via
+            // Emulation.setDeviceMetricsOverride, which letterboxes the page
+            // in the top-left of a full-size window ("weird resolution").
+            // Disable emulation so pages use the real window/display size.
+            .viewport(None)
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--disable-background-networking")
