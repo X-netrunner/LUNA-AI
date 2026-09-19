@@ -122,6 +122,8 @@ CRITICAL RULES:
 6. Screenshots have faces and PII redacted with blur/black boxes. This is NORMAL privacy protection. Do NOT treat redactions as errors. Plan steps that interact with standard UI elements only.
 7. URL PRESERVATION: If the user provides a full URL in their request (e.g. a https://docs.google.com/forms/d/... link), the FIRST action MUST be "navigate: <the EXACT full URL>" with the ENTIRE URL kept intact - do NOT trim it to just the domain. Only shorten to a bare domain when the user gave a domain name like "amazon.com" or "google.com".
 8. FORM FILLING: If the user asks to fill a form or provides a form URL, DO NOT produce placeholder steps like "type: [user input]" or "click: Form title". Instead just output a SINGLE step "navigate: <full form url>" (or none if already there). The server handles the actual per-field filling automatically, so your job is ONLY to get to the form page. Do not invent field/type steps for forms.
+9. ONE TAB ONLY: The automation browser has a single tab. Navigating to a new site REPLACES the current page — everything on the previous site is gone. When comparing prices across sites (e.g. "amazon or flipkart"), COMPLETE all actions on the FIRST site, including Add to Cart, BEFORE navigating to the second site. Never abandon a half-finished purchase to open another site.
+10. LOGIN WALLS: Some sites (e.g. Flipkart) require an account before Add to Cart works — clicking it redirects to a sign-in page. You cannot log the user in. When you KNOW a site blocks anonymous buying: do NOT plan add-to-cart steps on it, do NOT retry. Add to cart on the site that allows it, or just search and report the price difference to the user.
 
 SUPPORTED ACTION TAGS:
 - navigate: [URL or Domain] - only if user needs to go to a new site
@@ -165,7 +167,11 @@ RETHINKING RULES:
    - Page not loaded yet -> press Enter or wait, then retry
    - Wrong page/tab -> switch_tab, then continue
    - Product variant needed (size/color) -> click variant option first, then Add to Cart
-   - Login redirect -> press Escape to dismiss login popup, continue on main page
+   - Login redirect -> if it is a DISMISSIBLE sign-in popup (Amazon lets you keep browsing),
+     press Escape and continue. If the error says the purchase is BLOCKED by a login wall
+     (Flipkart-style): DO NOT retry, DO NOT dismiss and re-click. The site requires an
+     account the user hasn't given us — skip this site and continue on the other site,
+     or stop and report the login requirement to the user.
    - "Add to Cart" not found while on a SEARCH RESULTS grid -> the product is not open yet:
      first emit "click: the first product result" to open its detail page, THEN "click: Add to Cart".
      Prefer this over endless scroll-down retries.

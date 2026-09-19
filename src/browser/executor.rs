@@ -1,6 +1,7 @@
 //! Plan executor — runs steps in the browser, handles retries and re-planning.
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -26,8 +27,25 @@ async fn execute_step(browser: &CdpBrowser, step: &Step, step_index: u64) -> Res
             let target = step.target.as_deref().unwrap_or("");
             let expr = find_and_click_expr(target);
             let result = browser.eval(&expr).await?;
-            // Click might trigger navigation - wait a moment for potential page load
+            // Click might trigger navigation - wait a moment for potential page
+            // load, then check whether a purchase click ran into a login wall.
             tokio::time::sleep(Duration::from_millis(1000)).await;
+            if result.get("ok").and_then(Value::as_bool).unwrap_or(false)
+                && is_purchase_click(target)
+            {
+                if let Some(reason) = browser.login_wall_reason().await {
+                    let err = format!(
+                        "purchase blocked — {reason}. Do NOT retry clicking; this site \
+                         needs the user logged in. Continue elsewhere or report back."
+                    );
+                    return Ok(ActionResult::fail(
+                        action_name,
+                        step_index,
+                        1,
+                        err,
+                    ));
+                }
+            }
             Ok(dom::result_from(result, action_name, step_index, 1))
         }
         "type" => {
@@ -64,6 +82,18 @@ async fn execute_step(browser: &CdpBrowser, step: &Step, step_index: u64) -> Res
         }
         other => Ok(ActionResult::fail(action_name, step_index, 1, format!("unsupported action '{other}'"))),
     }
+}
+
+/// Whether a click description targets a purchase action (where a login wall
+/// would block completion).
+fn is_purchase_click(desc: &str) -> bool {
+    let lower = desc.to_lowercase();
+    [
+        "add to cart", "add to bag", "buy now", "checkout", "place order",
+        "proceed to", "continue to checkout", "add to wishlist", "add to bucket",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
 }
 
 /// Generate JS to find an element by description and click it.

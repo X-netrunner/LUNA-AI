@@ -560,6 +560,9 @@ pub struct BrowserConfig {
     pub profile_dir: String,
     /// Run Chromium headless (invisible). Default visible so the user can watch.
     pub headless: bool,
+    /// Window size "WxH" for the automation browser (e.g. "1920x1200"). Empty =
+    /// auto-detect the primary screen so the window fills the display.
+    pub window_size: String,
     /// Hard cap on how long one browser task may run
     pub timeout_secs: u64,
 }
@@ -572,6 +575,7 @@ impl Default for BrowserConfig {
             cdp_port: 9222,
             profile_dir: String::new(),
             headless: false,
+            window_size: String::new(),
             timeout_secs: 600,
         }
     }

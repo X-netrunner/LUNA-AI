@@ -52,6 +52,7 @@ pub async fn run(task: &str, config: &LunaConfig) -> Result<String> {
     // Keep the automation Chromium alive so the user can see the final page
     // (cart contents, search results, ...). It's cheap to reuse later thanks
     // to ensure_browser's connect path.
+    let (final_url, final_title) = browser.current_url_title().await;
     browser.detach();
 
     if history.is_empty() {
@@ -59,12 +60,20 @@ pub async fn run(task: &str, config: &LunaConfig) -> Result<String> {
     }
 
     let history_str = history.join("\n");
+    let final_state = match (final_url, final_title) {
+        (Some(url), Some(title)) if !title.is_empty() => format!("{title} — {url}"),
+        (Some(url), _) => url,
+        _ => "unknown".into(),
+    };
     Ok(format!(
-        "Done. The browser automation ({} steps) executed:\n{}\n\nThe automation Chromium \
-         is still open so you can see the final state (your next browser task will reuse \
-         the same window).",
+        "Done. The browser automation ({} steps) executed:\n{}\n\nFinal page: {}\n\nImportant: \
+         report only what this final page actually shows. If a step failed or a site required \
+         login (so nothing could be added to a cart), say so honestly instead of assuming \
+         success. The automation Chromium is still open so you can see the final state (your \
+         next browser task will reuse the same window).",
         history.len(),
-        history_str
+        history_str,
+        final_state
     ))
 }
 

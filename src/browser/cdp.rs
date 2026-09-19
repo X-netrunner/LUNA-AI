@@ -86,11 +86,86 @@ async fn kill_leftovers(config: &crate::config::BrowserConfig) {
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
+/// Parse a "WxH" config value (e.g. "1920x1200") into (width, height).
+fn parse_window_size(s: &str) -> Option<(u32, u32)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (w, h) = s.split_once(['x', 'X'])?;
+    let w: u32 = w.trim().parse().ok()?;
+    let h: u32 = h.trim().parse().ok()?;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some((w, h))
+}
+
+/// Best-effort primary-screen resolution so the automation window fills the
+/// display. Tries Hyprland first (its JSON exposes the focused monitor), then
+/// X11. Returns None when no tool answers.
+async fn detect_screen_size() -> Option<(u32, u32)> {
+    // Hyprland: `hyprctl monitors -j` -> [{ width, height, focused, ... }]
+    if let Ok(out) = tokio::process::Command::new("hyprctl")
+        .args(["monitors", "-j"])
+        .output()
+        .await
+    {
+        if out.status.success() {
+            if let Ok(list) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) {
+                let mon = list
+                    .iter()
+                    .find(|m| m.get("focused").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .or_else(|| list.first());
+                if let Some(mon) = mon {
+                    let w = mon.get("width").and_then(|v| v.as_u64())?;
+                    let h = mon.get("height").and_then(|v| v.as_u64())?;
+                    if w > 0 && h > 0 {
+                        return Some((w as u32, h as u32));
+                    }
+                }
+            }
+        }
+    }
+
+    // X11 fallback: first "connected" line containing a WxH token.
+    if let Ok(out) = tokio::process::Command::new("xrandr")
+        .arg("--current")
+        .output()
+        .await
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if !line.contains("connected") {
+                continue;
+            }
+            for tok in line.split_whitespace() {
+                if let Some((w, h)) = tok.split_once('x') {
+                    if let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>()) {
+                        if w > 0 && h > 0 {
+                            return Some((w, h));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 impl CdpBrowser {
     /// Launch or connect to a Chromium instance with a persistent profile.
     pub async fn new(config: &crate::config::BrowserConfig) -> Result<Self> {
         let profile = profile_path(config);
         std::fs::create_dir_all(&profile)?;
+
+        // Size the window to the primary display (or an explicit WxH override)
+        // instead of a hardcoded 1366x900 that looks "weird" on other screens.
+        let (w, h) = match parse_window_size(&config.window_size) {
+            Some(size) => size,
+            None => detect_screen_size().await.unwrap_or((1366, 900)),
+        };
 
         // Build chromiumoxide config
         let mut builder = BrowserConfig::builder()
@@ -101,13 +176,16 @@ impl CdpBrowser {
             .arg("--disable-background-networking")
             .arg("--disable-component-update")
             .arg("--password-store=basic")
-            .arg("--window-size=1366,900")
+            .arg(format!("--window-size={w},{h}"))
             .launch_timeout(Duration::from_secs(60));
 
         if config.headless {
             builder = builder.headless_mode(HeadlessMode::New);
         } else {
-            builder = builder.with_head();
+            // Don't let Chromium open its own initial "new tab" — luna owns the
+            // only tab in the window. Without this, Chromium's initial tab plus
+            // our new_page() produced two tabs on every fresh launch.
+            builder = builder.with_head().arg("--no-startup-window");
         }
 
         let browser_config = builder
@@ -127,17 +205,38 @@ impl CdpBrowser {
             }
         });
 
-        // Ensure we have at least one page
-        let pages = browser.pages().await.context("get pages")?;
-        let page = match pages.into_iter().next() {
-            Some(p) => Some(p),
-            None => {
-                browser
+        // With --no-startup-window visible launches have no initial tabs, so we
+        // create exactly one. Headless keeps the old fallback: reuse Chromium's
+        // initial tab if it surfaces, otherwise create one.
+        let page = if config.headless {
+            let pages = browser.pages().await.context("get pages")?;
+            let mut chosen = None;
+            for p in pages {
+                if let Ok(Some(url)) = p.url().await {
+                    if url != "about:blank"
+                        && !url.is_empty()
+                        && !url.starts_with("chrome://")
+                        && !url.starts_with("chrome-extension://")
+                    {
+                        chosen = Some(p);
+                        break;
+                    }
+                }
+            }
+            match chosen {
+                Some(p) => Some(p),
+                None => browser
                     .new_page("about:blank")
                     .await
                     .context("create initial page")?
-                    .into()
+                    .into(),
             }
+        } else {
+            browser
+                .new_page("about:blank")
+                .await
+                .context("create initial page")?
+                .into()
         };
 
         Ok(Self {
@@ -201,6 +300,69 @@ impl CdpBrowser {
             .await
             .context("evaluate js")?;
         Ok(result.object().value.clone().unwrap_or(Value::Null))
+    }
+
+    /// Detect a login wall that blocks a purchase — a sign-in page or a strong
+    /// "you must log in to continue" prompt. Returns a short human reason.
+    ///
+    /// Only STRONG signals count (sign-in URL paths, explicit login-required
+    /// copy), so a site's harmless "Sign in" header link never trips it.
+    pub async fn login_wall_reason(&self) -> Option<String> {
+        let page = self.current_page().await.ok()?;
+
+        // 1. The browser landed on a sign-in page.
+        if let Ok(Some(url)) = page.url().await {
+            let lower = url.to_lowercase();
+            let login_paths = [
+                "/login", "/login?", "/accounts/login", "/account/login", "/signin",
+                "/sign-in", "/sign_in", "/ap/signin", "/identity/login",
+            ];
+            if login_paths.iter().any(|p| lower.contains(p)) {
+                return Some(format!(
+                    "the browser is on a sign-in page ({url}) and cannot continue \
+                     without logging into an account"
+                ));
+            }
+        }
+
+        // 2. Explicit "must log in" copy near the bottom of the page (modals,
+        //    interstitial screens, empty-cart nags).
+        let expr = r#"(() => {
+            const markers = [
+                "log in to continue", "login to continue", "please sign in",
+                "please login", "sign in to continue", "you must be logged in",
+                "you need to log in", "you need to login", "login required",
+                "sign in or register to continue", "continue with login",
+                "log in to buy", "login to buy", "login to place your order",
+                "login to add", "please sign in to continue"
+            ];
+            const t = ((document.body && document.body.innerText) || "").toLowerCase();
+            return markers.filter(m => t.includes(m));
+        })()"#;
+        if let Ok(res) = page.evaluate(expr).await {
+            if let Ok(matched) = res.into_value::<Vec<String>>() {
+                if !matched.is_empty() {
+                    return Some(format!(
+                        "the page requires an account — it shows \"{}\" and the \
+                         purchase cannot continue without logging in",
+                        matched[0]
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// Current page's URL + title — fed back into the tool result so the model
+    /// reports what is ACTUALLY on screen instead of guessing.
+    pub async fn current_url_title(&self) -> (Option<String>, Option<String>) {
+        let page = match self.current_page().await {
+            Ok(p) => p,
+            Err(_) => return (None, None),
+        };
+        let url = page.url().await.ok().flatten();
+        let title = page.get_title().await.ok().flatten();
+        (url, title)
     }
 }
 
