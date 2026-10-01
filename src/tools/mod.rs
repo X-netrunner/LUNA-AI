@@ -19,6 +19,7 @@ pub mod shell;
 pub mod spotify;
 pub mod sysmode;
 pub mod todoist;
+pub mod verify;
 pub mod web;
 pub mod whatsapp;
 
@@ -1485,8 +1486,46 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             if let Some(reason) = selfpatch::blocks_raw_write(&config.selfpatch, &expanded) {
                 return Err(anyhow::anyhow!(reason));
             }
-            filesystem::write_file(&expanded, content).await?;
-            Ok(format!("Written to {}", expanded))
+            // Models sometimes double-escape newlines, producing a file that
+            // looks right in a diff and cannot be run. Repaired here rather
+            // than after the fact, and only when the repaired form is provably
+            // valid — see `tools::verify`.
+            let (content, repair_note) = match verify::check_before_write(&expanded, content) {
+                verify::PreWrite::Clean => (content.to_string(), None),
+                verify::PreWrite::Repaired(fixed) => {
+                    tracing::warn!(
+                        "Repaired double-escaped newlines in {expanded} — the file as written \
+                         did not parse"
+                    );
+                    (
+                        fixed,
+                        Some(format!(
+                            "\nNote: the file was written with escaped newlines (`\\n` as text) \
+                             and did not parse. Newlines were repaired and the result verified. \
+                             If the content looks wrong, ask for it again."
+                        )),
+                    )
+                }
+                verify::PreWrite::StillBroken(orig) => {
+                    tracing::warn!(
+                        "{expanded} has escaped newlines and does not parse even after \
+                         repairing them — writing it unchanged and saying so"
+                    );
+                    (
+                        orig,
+                        Some(format!(
+                            "\nNote: the file at {expanded} was written with escaped newlines \
+                             and does not parse. It was NOT modified — a guess would be worse \
+                             than a file that is visibly broken. Re-ask for the script."
+                        )),
+                    )
+                }
+            };
+            filesystem::write_file(&expanded, &content).await?;
+            Ok(match repair_note {
+                Some(note) => format!("Written to {expanded}{note}"),
+                None => format!("Written to {expanded}"),
+            })
         }
 
         "notify" => {
