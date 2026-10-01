@@ -51,6 +51,22 @@ pub async fn logs(cfg: &SysmodeConfig) -> Result<String> {
     run(&format!("{} logs", bin_name(cfg)), None).await
 }
 
+pub async fn verify(cfg: &SysmodeConfig) -> Result<String> {
+    run(&format!("{} verify", bin_name(cfg)), None).await
+}
+
+pub async fn doctor(cfg: &SysmodeConfig) -> Result<String> {
+    run(&format!("{} doctor", bin_name(cfg)), None).await
+}
+
+pub async fn dossier(cfg: &SysmodeConfig, ip: Option<&str>) -> Result<String> {
+    if let Some(target_ip) = ip {
+        run(&format!("{} dossier {}", bin_name(cfg), target_ip), None).await
+    } else {
+        run(&format!("{} dossier", bin_name(cfg)), None).await
+    }
+}
+
 pub async fn reapply(cfg: &SysmodeConfig, sudo_pass: Option<&str>) -> Result<String> {
     if sudo_pass.is_none() {
         bail!(

@@ -14,11 +14,13 @@ mod daemon;
 mod first_run;
 mod llm;
 mod memory;
+mod overlay;
 mod stt;
 mod tools;
 mod tts;
 mod tui;
 mod util;
+mod wake;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -86,6 +88,12 @@ struct Args {
     /// machines that are already configured.
     #[arg(long)]
     setup: bool,
+
+    /// Run the always-on wake-word listener: sleeps until "hey luna" is heard,
+    /// then starts Luna in the configured mode and drives the desktop
+    /// listening animation. Intended for `systemctl --user start luna-wake`.
+    #[arg(long)]
+    wake_daemon: bool,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -151,7 +159,31 @@ async fn main() -> Result<()> {
 
     tracing::info!("Luna starting up...");
 
-    // ── Keyring management (exits immediately) ───────────────────────────────
+    // The security tier's default script directory. Created here, once, at the
+    // single startup path — rather than in `write_file` or in the prompt
+    // builder — so the prompt can state the path as fact instead of
+    // instructing the model to create it.
+    //
+    // Placed *after* the subscriber is installed. It was originally above the
+    // logging setup, where the two log lines were emitted into a subscriber that
+    // did not exist yet and were silently discarded — so the one case this is
+    // here to catch (a path that cannot be created) would have been the case
+    // that reported nothing.
+    if !config.llm.security_scripts_dir.trim().is_empty() {
+        match std::fs::create_dir_all(&config.llm.security_scripts_dir) {
+            Ok(()) => tracing::info!(
+                "Security scripts directory ready: {}",
+                config.llm.security_scripts_dir
+            ),
+            Err(e) => tracing::warn!(
+                "Could not create security scripts directory {}: {}. The security tier will \
+                 fall back to paths it picks itself.",
+                config.llm.security_scripts_dir,
+                e
+            ),
+        }
+    }
+
     if let Some(name) = args.set_key {
         let secret = match args.value {
             Some(v) if !v.trim().is_empty() => v,
@@ -217,7 +249,7 @@ async fn main() -> Result<()> {
 
     // ── Forced setup guide (text modes) ───────────────────────────────────────
     // TUI shows the interactive screen instead (below); daemon never shows it.
-    if args.setup && !args.tui && !args.daemon {
+    if args.setup && !args.tui && !args.daemon && !args.wake_daemon {
         print!("{}", crate::first_run::guide_text(&config));
         return Ok(());
     }
@@ -232,9 +264,11 @@ async fn main() -> Result<()> {
         tracing::info!("Voice mode overridden by CLI: {:?}", config.voice.mode);
     }
 
-    // Voice output is TUI-only. Pure-CLI runs (`--text-only`, piped input,
-    // the default fallback) exist for testing and must stay silent.
-    if !args.tui {
+    // Voice output is TUI-only — except for the wake daemon, whose headless
+    // sessions HAVE to speak (voice in, voice out, no terminal). Pure-CLI runs
+    // (`--text-only`, piped input, the default fallback) exist for testing and
+    // must stay silent.
+    if !args.tui && !args.wake_daemon {
         config.voice.mode = VoiceMode::Off;
         tracing::info!("Voice force-disabled in non-TUI (CLI) mode");
     }
@@ -244,6 +278,15 @@ async fn main() -> Result<()> {
     if args.daemon {
         daemon::run(config).await?;
         tracing::info!("Luna daemon stopped.");
+        return Ok(());
+    }
+
+    // ── Wake-word daemon mode ────────────────────────────────────────────────
+    // Always-on "hey luna" listener + desktop listening indicator.
+    // Intended for `systemctl --user start luna-wake`.
+    if args.wake_daemon {
+        wake::run(config).await?;
+        tracing::info!("Luna wake daemon stopped.");
         return Ok(());
     }
 

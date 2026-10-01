@@ -4,7 +4,7 @@ use crate::config::{LunaConfig, VoiceMode};
 use crate::memory::Memory;
 use crate::tui::log::LogBuffer;
 use crate::tui::onboarding::Onboarding;
-use crate::tui::widgets::{ChatHistory, DebugPanel, InputLine, StatusBar};
+use crate::tui::widgets::{ChatHistory, ConfigEditorModal, DebugPanel, InputLine, SettingsMenuModal, ShortcutsBar, ShortcutsModal, SlashCommandMenu, StatusBar};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{
@@ -68,6 +68,490 @@ struct KeyPrompt {
     secret: String,
 }
 
+
+/// State for the interactive luna.toml editor modal.
+pub struct ConfigState {
+    pub path: std::path::PathBuf,
+    pub lines: Vec<String>,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
+    pub scroll: usize,
+    pub status: String,
+    pub modified: bool,
+}
+
+impl ConfigState {
+    pub fn load() -> Self {
+        let path = crate::config::LunaConfig::config_path();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let lines: Vec<String> = if text.is_empty() {
+            vec![String::new()]
+        } else {
+            text.lines().map(String::from).collect()
+        };
+        Self {
+            path,
+            lines,
+            cursor_row: 0,
+            cursor_col: 0,
+            scroll: 0,
+            status: String::from("[Ctrl+S] Save · [Ctrl+E] External Editor · [Esc] Exit"),
+            modified: false,
+        }
+    }
+
+    pub fn to_string(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    pub fn save(&mut self, config: &mut crate::config::LunaConfig) -> bool {
+        let content = self.to_string();
+        if let Err(e) = toml::from_str::<serde_json::Value>(&content) {
+            self.status = format!("✗ TOML Syntax Error: {e}");
+            return false;
+        }
+        if let Err(e) = std::fs::write(&self.path, &content) {
+            self.status = format!("✗ File Save Failed: {e}");
+            return false;
+        }
+        match crate::config::LunaConfig::load() {
+            Ok(new_cfg) => {
+                *config = new_cfg;
+                self.modified = false;
+                self.status = String::from("✓ Saved & reloaded luna.toml successfully!");
+                true
+            }
+            Err(e) => {
+                self.status = format!("✗ Config Reload Error: {e}");
+                false
+            }
+        }
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        let line = &mut self.lines[self.cursor_row];
+        let col = self.cursor_col.min(line.len());
+        line.insert(col, c);
+        self.cursor_col = col + 1;
+        self.modified = true;
+    }
+
+    pub fn backspace(&mut self) {
+        if self.lines.is_empty() {
+            return;
+        }
+        if self.cursor_col > 0 {
+            let line = &mut self.lines[self.cursor_row];
+            let col = self.cursor_col.min(line.len());
+            line.remove(col - 1);
+            self.cursor_col = col - 1;
+            self.modified = true;
+        } else if self.cursor_row > 0 {
+            let current = self.lines.remove(self.cursor_row);
+            self.cursor_row -= 1;
+            let prev_len = self.lines[self.cursor_row].len();
+            self.lines[self.cursor_row].push_str(&current);
+            self.cursor_col = prev_len;
+            self.modified = true;
+        }
+    }
+
+    pub fn newline(&mut self) {
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        let line = &self.lines[self.cursor_row];
+        let col = self.cursor_col.min(line.len());
+        let remainder = line[col..].to_string();
+        self.lines[self.cursor_row].truncate(col);
+        self.cursor_row += 1;
+        self.lines.insert(self.cursor_row, remainder);
+        self.cursor_col = 0;
+        self.modified = true;
+    }
+
+    pub fn move_up(&mut self) {
+        if self.cursor_row > 0 {
+            self.cursor_row -= 1;
+            self.cursor_col = self.cursor_col.min(self.lines[self.cursor_row].len());
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        if self.cursor_row + 1 < self.lines.len() {
+            self.cursor_row += 1;
+            self.cursor_col = self.cursor_col.min(self.lines[self.cursor_row].len());
+        }
+    }
+
+    pub fn move_left(&mut self) {
+        if self.cursor_col > 0 {
+            self.cursor_col -= 1;
+        } else if self.cursor_row > 0 {
+            self.cursor_row -= 1;
+            self.cursor_col = self.lines[self.cursor_row].len();
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        let line_len = self.lines.get(self.cursor_row).map(|l| l.len()).unwrap_or(0);
+        if self.cursor_col < line_len {
+            self.cursor_col += 1;
+        } else if self.cursor_row + 1 < self.lines.len() {
+            self.cursor_row += 1;
+            self.cursor_col = 0;
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if self.lines.is_empty() {
+            return;
+        }
+        let line_len = self.lines[self.cursor_row].len();
+        if self.cursor_col < line_len {
+            self.lines[self.cursor_row].remove(self.cursor_col);
+            self.modified = true;
+        } else if self.cursor_row + 1 < self.lines.len() {
+            let next_line = self.lines.remove(self.cursor_row + 1);
+            self.lines[self.cursor_row].push_str(&next_line);
+            self.modified = true;
+        }
+    }
+
+    pub fn home(&mut self) {
+        self.cursor_col = 0;
+    }
+
+    pub fn end(&mut self) {
+        if let Some(line) = self.lines.get(self.cursor_row) {
+            self.cursor_col = line.len();
+        }
+    }
+
+    pub fn page_up(&mut self, amount: usize) {
+        self.cursor_row = self.cursor_row.saturating_sub(amount);
+        self.cursor_col = self.cursor_col.min(self.lines.get(self.cursor_row).map(|l| l.len()).unwrap_or(0));
+    }
+
+    pub fn page_down(&mut self, amount: usize) {
+        if !self.lines.is_empty() {
+            self.cursor_row = (self.cursor_row + amount).min(self.lines.len() - 1);
+            self.cursor_col = self.cursor_col.min(self.lines.get(self.cursor_row).map(|l| l.len()).unwrap_or(0));
+        }
+    }
+
+    pub fn insert_tab(&mut self) {
+        for _ in 0..2 {
+            self.insert_char(' ');
+        }
+    }
+}
+
+pub const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/settings", "Open interactive Settings & Toggle Controls"),
+    ("/toml", "Open raw luna.toml file editor modal"),
+    ("/clear", "Clear conversation history & reset memory"),
+    ("/voice", "Toggle hands-free voice mode (on/off)"),
+    ("/shortcuts", "Toggle bottom shortcuts keybindings bar"),
+    ("/debug", "Run full system diagnostic & write to Debug Panel"),
+    ("/test-voice", "Test Piper TTS & RVC voice subsystem"),
+    ("/test-model", "Test LLM Ollama model connectivity"),
+    ("/test-stt", "Test Whisper STT audio device & model"),
+    ("/test-memory", "Test Memory & vector embeddings"),
+    ("/log", "Write custom log line to Debug Panel"),
+    ("/setup", "Launch first-run setup wizard"),
+    ("/help", "Toggle keyboard shortcuts help dialog"),
+    ("/exit", "Exit Luna TUI session"),
+];
+
+#[derive(Clone, Debug)]
+pub enum SettingType {
+    Toggle(bool),
+    Value(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct SettingItem {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub setting_type: SettingType,
+}
+
+#[derive(Clone, Debug)]
+pub struct SettingCategory {
+    pub name: &'static str,
+    pub items: Vec<SettingItem>,
+}
+
+pub struct SettingsMenuState {
+    pub config: LunaConfig,
+    pub categories: Vec<SettingCategory>,
+    pub cat_index: usize,
+    pub item_index: usize,
+    pub status: String,
+    pub modified: bool,
+}
+
+impl SettingsMenuState {
+    pub fn load(config: LunaConfig) -> Self {
+        let categories = vec![
+            SettingCategory {
+                name: "🤖 AI & Models",
+                items: vec![
+                    SettingItem {
+                        key: "llm.enable_thinking",
+                        label: "Thinking Mode",
+                        description: "Enable step-by-step reasoning blocks before answering",
+                        setting_type: SettingType::Toggle(config.llm.enable_thinking),
+                    },
+                    SettingItem {
+                        key: "agent.native_tools",
+                        label: "Native Tools",
+                        description: "Use native Ollama tool schema dispatch",
+                        setting_type: SettingType::Toggle(config.agent.native_tools),
+                    },
+                    SettingItem {
+                        key: "llm.model",
+                        label: "Primary Model",
+                        description: "Ollama model name",
+                        setting_type: SettingType::Value(config.llm.model.clone()),
+                    },
+                ],
+            },
+            SettingCategory {
+                name: "🎙️ Voice & Audio",
+                items: vec![
+                    SettingItem {
+                        key: "wake.enabled",
+                        label: "Wake Daemon",
+                        description: "Background listener for 'hey luna' wake phrase",
+                        setting_type: SettingType::Toggle(config.wake.enabled),
+                    },
+                    SettingItem {
+                        key: "wake.overlay_enabled",
+                        label: "Desktop Overlay",
+                        description: "Draw Wayland desktop listening animation on activation",
+                        setting_type: SettingType::Toggle(config.wake.overlay_enabled),
+                    },
+                    SettingItem {
+                        key: "voice.mode",
+                        label: "Voice Mode",
+                        description: "Speech output engine (basic, jinx, off)",
+                        setting_type: SettingType::Value(format!("{:?}", config.voice.mode)),
+                    },
+                ],
+            },
+            SettingCategory {
+                name: "⚡ System & Watchdog",
+                items: vec![
+                    SettingItem {
+                        key: "proactive.enabled",
+                        label: "Proactive Monitor",
+                        description: "Background system health, battery, & disk checks",
+                        setting_type: SettingType::Toggle(config.proactive.enabled),
+                    },
+                    SettingItem {
+                        key: "proactive.check_updates",
+                        label: "Update Watcher",
+                        description: "Notify when Arch Linux pacman updates are pending",
+                        setting_type: SettingType::Toggle(config.proactive.check_updates),
+                    },
+                    SettingItem {
+                        key: "daemon.enabled",
+                        label: "Process Watchdog",
+                        description: "Monitor high RAM/CPU usage and idle processes",
+                        setting_type: SettingType::Toggle(config.daemon.enabled),
+                    },
+                    SettingItem {
+                        key: "daemon.learning_enabled",
+                        label: "Usage Learning",
+                        description: "Learn daily process habits to avoid false-positive kills",
+                        setting_type: SettingType::Toggle(config.daemon.learning_enabled),
+                    },
+                    SettingItem {
+                        key: "daemon.disk_cleanup",
+                        label: "Disk Hygiene",
+                        description: "Clean stale ~/.cache and trash when disk gets low",
+                        setting_type: SettingType::Toggle(config.daemon.disk_cleanup),
+                    },
+                ],
+            },
+            SettingCategory {
+                name: "🛡️ Safety Gates",
+                items: vec![
+                    SettingItem {
+                        key: "external.allow_external_actions",
+                        label: "External Actions Gate",
+                        description: "HUMAN SWITCH: Allow actions that send messages or alter external state",
+                        setting_type: SettingType::Toggle(config.external.allow_external_actions),
+                    },
+                    SettingItem {
+                        key: "updates.allow_apply",
+                        label: "Package Upgrade Gate",
+                        description: "HUMAN SWITCH: Allow Luna to run pacman upgrade",
+                        setting_type: SettingType::Toggle(config.updates.allow_apply),
+                    },
+                    SettingItem {
+                        key: "selfpatch.enabled",
+                        label: "Self-Patch Gate",
+                        description: "Allow Luna to propose verified source self-modifications",
+                        setting_type: SettingType::Toggle(config.selfpatch.enabled),
+                    },
+                ],
+            },
+            SettingCategory {
+                name: "🌐 Integrations",
+                items: vec![
+                    SettingItem {
+                        key: "vision.enabled",
+                        label: "Vision ('Eyes')",
+                        description: "Enable desktop screenshot & browser page visual understanding",
+                        setting_type: SettingType::Toggle(config.vision.enabled),
+                    },
+                    SettingItem {
+                        key: "browser.enabled",
+                        label: "Browser Automation",
+                        description: "Drive Chromium browser CDP tasks",
+                        setting_type: SettingType::Toggle(config.browser.enabled),
+                    },
+                    SettingItem {
+                        key: "desktop.enabled",
+                        label: "Desktop Automation",
+                        description: "Drive desktop GUI apps via ydotool & grim",
+                        setting_type: SettingType::Toggle(config.desktop.enabled),
+                    },
+                    SettingItem {
+                        key: "sysmode.enabled",
+                        label: "Sysmode IDS",
+                        description: "Hardening profile switcher & intrusion deception",
+                        setting_type: SettingType::Toggle(config.sysmode.enabled),
+                    },
+                    SettingItem {
+                        key: "whatsapp.enabled",
+                        label: "WhatsApp Bridge",
+                        description: "Enable WhatsApp message sending & reading tools",
+                        setting_type: SettingType::Toggle(config.whatsapp.enabled),
+                    },
+                ],
+            },
+        ];
+
+        Self {
+            config,
+            categories,
+            cat_index: 0,
+            item_index: 0,
+            status: String::from("[Space/Enter] Toggle · [S] Save & Auto-Restart Daemon · [T] Raw TOML · [Esc] Close"),
+            modified: false,
+        }
+    }
+
+    pub fn toggle_selected(&mut self) {
+        if let Some(cat) = self.categories.get_mut(self.cat_index) {
+            if let Some(item) = cat.items.get_mut(self.item_index) {
+                match &mut item.setting_type {
+                    SettingType::Toggle(ref mut b) => {
+                        *b = !*b;
+                        let val = *b;
+                        match item.key {
+                            "llm.enable_thinking" => self.config.llm.enable_thinking = val,
+                            "agent.native_tools" => self.config.agent.native_tools = val,
+                            "wake.enabled" => self.config.wake.enabled = val,
+                            "wake.overlay_enabled" => self.config.wake.overlay_enabled = val,
+                            "proactive.enabled" => self.config.proactive.enabled = val,
+                            "proactive.check_updates" => self.config.proactive.check_updates = val,
+                            "daemon.enabled" => self.config.daemon.enabled = val,
+                            "daemon.learning_enabled" => self.config.daemon.learning_enabled = val,
+                            "daemon.disk_cleanup" => self.config.daemon.disk_cleanup = val,
+                            "external.allow_external_actions" => self.config.external.allow_external_actions = val,
+                            "updates.allow_apply" => self.config.updates.allow_apply = val,
+                            "selfpatch.enabled" => self.config.selfpatch.enabled = val,
+                            "vision.enabled" => self.config.vision.enabled = val,
+                            "browser.enabled" => self.config.browser.enabled = val,
+                            "desktop.enabled" => self.config.desktop.enabled = val,
+                            "sysmode.enabled" => self.config.sysmode.enabled = val,
+                            "whatsapp.enabled" => self.config.whatsapp.enabled = val,
+                            _ => {}
+                        }
+                        self.modified = true;
+                        self.status = format!("✓ Toggled {} to {} [Press S to save]", item.label, if val { "ON" } else { "OFF" });
+                    }
+                    SettingType::Value(ref mut v) => {
+                        if item.key == "voice.mode" {
+                            let (next_mode, next_str) = match self.config.voice.mode {
+                                VoiceMode::Basic => (VoiceMode::Jinx, "Jinx"),
+                                VoiceMode::Jinx => (VoiceMode::Off, "Off"),
+                                VoiceMode::Off => (VoiceMode::Basic, "Basic"),
+                            };
+                            self.config.voice.mode = next_mode;
+                            *v = next_str.to_string();
+                            self.modified = true;
+                            self.status = format!("✓ Switched Voice Mode to {} [Press S to save]", next_str);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn save(&mut self, app_config: &mut LunaConfig) -> bool {
+        match self.config.save() {
+            Ok(()) => {
+                *app_config = self.config.clone();
+                self.modified = false;
+                self.status = String::from("✓ Saved luna.toml! Daemon auto-restarted.");
+                true
+            }
+            Err(e) => {
+                self.status = format!("✗ Save Failed: {e}");
+                false
+            }
+        }
+    }
+
+    pub fn next_category(&mut self) {
+        if !self.categories.is_empty() {
+            self.cat_index = (self.cat_index + 1) % self.categories.len();
+            self.item_index = 0;
+        }
+    }
+
+    pub fn prev_category(&mut self) {
+        if !self.categories.is_empty() {
+            if self.cat_index == 0 {
+                self.cat_index = self.categories.len() - 1;
+            } else {
+                self.cat_index -= 1;
+            }
+            self.item_index = 0;
+        }
+    }
+
+    pub fn next_item(&mut self) {
+        if let Some(cat) = self.categories.get(self.cat_index) {
+            if !cat.items.is_empty() {
+                self.item_index = (self.item_index + 1) % cat.items.len();
+            }
+        }
+    }
+
+    pub fn prev_item(&mut self) {
+        if let Some(cat) = self.categories.get(self.cat_index) {
+            if !cat.items.is_empty() {
+                if self.item_index == 0 {
+                    self.item_index = cat.items.len() - 1;
+                } else {
+                    self.item_index -= 1;
+                }
+            }
+        }
+    }
+}
+
 pub struct TuiApp {
     config: LunaConfig,
     memory: Memory,
@@ -101,6 +585,16 @@ pub struct TuiApp {
     onboarding: Option<Onboarding>,
     /// Active masked prompt for a chat-typed `--set-key <name>` (None = none).
     key_prompt: Option<KeyPrompt>,
+    /// Toggleable shortcuts help modal.
+    show_help: bool,
+    /// Toggleable bottom keybindings shortcuts bar.
+    show_shortcuts_bar: bool,
+    /// Active interactive luna.toml editor modal (None = none).
+    config_editor: Option<ConfigState>,
+    /// Active interactive Settings & Controls menu (None = none).
+    settings_menu: Option<SettingsMenuState>,
+    /// Index in slash command autocomplete popup.
+    slash_selected: usize,
 }
 
 impl TuiApp {
@@ -139,7 +633,188 @@ impl TuiApp {
             last_voice_activity: Arc::new(AtomicU64::new(millis_now())),
             onboarding,
             key_prompt: None,
+            show_help: false,
+            show_shortcuts_bar: false,
+            config_editor: None,
+            settings_menu: None,
+            slash_selected: 0,
         })
+    }
+
+    fn slash_matches(&self) -> Vec<(&'static str, &'static str)> {
+        if !self.input.starts_with('/') {
+            return Vec::new();
+        }
+        let query = self.input.to_lowercase();
+        SLASH_COMMANDS
+            .iter()
+            .copied()
+            .filter(|(cmd, _)| cmd.starts_with(&query))
+            .collect()
+    }
+
+    /// Inject a synthetic voice utterance at startup (the wake daemon's
+    /// pending one-breath command). Sent before the event loop runs, so it is
+    /// the first thing the app processes.
+    pub fn enqueue_voice(&self, text: String) {
+        let _ = self.tx.send(AppEvent::Voice(text));
+    }
+
+    pub fn run_voice_debug(&mut self) {
+        tracing::info!("── [DEBUG VOICE DIAGNOSTIC] ──");
+        tracing::info!("Voice Mode: {:?}", self.config.voice.mode);
+        tracing::info!("Piper Bin: {:?}", self.config.voice.piper_bin);
+        tracing::info!("Piper Model: {:?}", self.config.voice.piper_model);
+        tracing::info!("RVC Script: {:?}", self.config.voice.rvc_script);
+        tracing::info!("RVC Model: {:?}", self.config.voice.rvc_model);
+
+        let home = dirs::home_dir().unwrap_or_default();
+        let rvc_env_py = home.join(".local/share/luna/rvc_env/bin/python3");
+        let tts_env_py = home.join(".local/share/luna/tts_env/bin/python3");
+        let sys_py = std::path::Path::new("/usr/bin/python3");
+
+        tracing::info!("Python env check -> rvc_env exists: {}", rvc_env_py.exists());
+        tracing::info!("Python env check -> tts_env exists: {}", tts_env_py.exists());
+        tracing::info!("Python env check -> /usr/bin/python3 exists: {}", sys_py.exists());
+
+        let active_py = if rvc_env_py.exists() {
+            rvc_env_py.display().to_string()
+        } else if tts_env_py.exists() {
+            tts_env_py.display().to_string()
+        } else if sys_py.exists() {
+            sys_py.display().to_string()
+        } else {
+            "python3 (PATH)".to_string()
+        };
+        tracing::info!("Active RVC Python resolver chosen: {}", active_py);
+
+        let piper_ok = self.config.voice.piper_bin.exists();
+        let piper_model_ok = self.config.voice.piper_model.exists();
+        let rvc_script_ok = self.config.voice.rvc_script.as_ref().map(|p| p.exists()).unwrap_or(false);
+        let rvc_model_ok = self.config.voice.rvc_model.as_ref().map(|p| p.exists()).unwrap_or(false);
+
+        tracing::info!("Component files check -> Piper Bin: {}", if piper_ok { "OK" } else { "MISSING" });
+        tracing::info!("Component files check -> Piper Model: {}", if piper_model_ok { "OK" } else { "MISSING" });
+        tracing::info!("Component files check -> RVC Script: {}", if rvc_script_ok { "OK" } else { "NOT FOUND" });
+        tracing::info!("Component files check -> RVC Model: {}", if rvc_model_ok { "OK" } else { "NOT FOUND" });
+
+        let summary = format!(
+            "Voice Subsystem Diagnostic:\n\
+             • Mode: {:?}\n\
+             • Active RVC Python: {}\n\
+             • Piper Bin: {}\n\
+             • Piper Model: {}\n\
+             • RVC Script: {}\n\
+             • RVC Model: {}\n\
+             (Step-by-step logs written to Debug Panel on right)",
+            self.config.voice.mode,
+            active_py,
+            if piper_ok { "OK" } else { "Missing" },
+            if piper_model_ok { "OK" } else { "Missing" },
+            if rvc_script_ok { "OK" } else { "Missing" },
+            if rvc_model_ok { "OK" } else { "Missing" }
+        );
+
+        self.messages.push(Msg {
+            role: "assistant".into(),
+            content: summary,
+            thinking: None,
+        });
+    }
+
+    pub fn run_model_debug(&mut self) {
+        tracing::info!("── [DEBUG MODEL DIAGNOSTIC] ──");
+        tracing::info!("Configured Main Model: {}", self.config.llm.model);
+        tracing::info!("Fast Model: {:?}", self.config.llm.fast_model);
+        tracing::info!("Deep Model: {:?}", self.config.llm.deep_model);
+        tracing::info!("Host Endpoint: {}", self.config.llm.base_url);
+        tracing::info!("Context Window: {}", self.config.llm.num_ctx);
+
+        let summary = format!(
+            "LLM Model Subsystem Diagnostic:\n\
+             • Main Model: {}\n\
+             • Fast Model: {}\n\
+             • Deep Model: {}\n\
+             • Host Endpoint: {}\n\
+             (Step-by-step logs written to Debug Panel on right)",
+            self.config.llm.model,
+            self.config.llm.fast_model.as_deref().unwrap_or("none"),
+            self.config.llm.deep_model.as_deref().unwrap_or("none"),
+            self.config.llm.base_url
+        );
+
+        self.messages.push(Msg {
+            role: "assistant".into(),
+            content: summary,
+            thinking: None,
+        });
+    }
+
+    pub fn run_stt_debug(&mut self) {
+        tracing::info!("── [DEBUG STT / WHISPER DIAGNOSTIC] ──");
+        tracing::info!("Input Mode: {:?}", self.config.audio.input_mode);
+        tracing::info!("Whisper Model Path: {:?}", self.config.voice.whisper_model);
+        let model_exists = self.config.voice.whisper_model.exists();
+        tracing::info!("Whisper Model File Exists: {}", model_exists);
+
+        let summary = format!(
+            "STT / Whisper Subsystem Diagnostic:\n\
+             • Input Mode: {:?}\n\
+             • Whisper Model: {} ({})\n\
+             (Step-by-step logs written to Debug Panel on right)",
+            self.config.audio.input_mode,
+            if model_exists { "Found" } else { "Missing" },
+            self.config.voice.whisper_model.display()
+        );
+
+        self.messages.push(Msg {
+            role: "assistant".into(),
+            content: summary,
+            thinking: None,
+        });
+    }
+
+    pub fn run_memory_debug(&mut self) {
+        tracing::info!("── [DEBUG MEMORY DIAGNOSTIC] ──");
+        tracing::info!("Context Window Cap: {}", self.config.memory.context_window);
+        tracing::info!("History Path: {:?}", self.config.memory.history_path);
+        tracing::info!("Active Chat UI Messages: {}", self.messages.len());
+
+        let perm_path = dirs::home_dir().unwrap_or_default().join(".local/share/luna/permanent_memory.json");
+        let perm_exists = perm_path.exists();
+        tracing::info!("Permanent Memory File Exists: {}", perm_exists);
+
+        let summary = format!(
+            "Memory Subsystem Diagnostic:\n\
+             • Context Window: {} msgs\n\
+             • History Path: {:?}\n\
+             • Active UI Messages: {}\n\
+             • Permanent Memory File: {}\n\
+             (Step-by-step logs written to Debug Panel on right)",
+            self.config.memory.context_window,
+            self.config.memory.history_path,
+            self.messages.len(),
+            if perm_exists { "Found" } else { "Not created yet" }
+        );
+
+        self.messages.push(Msg {
+            role: "assistant".into(),
+            content: summary,
+            thinking: None,
+        });
+    }
+
+    pub fn run_all_debug(&mut self) {
+        tracing::info!("════════════════════════════════════════════════");
+        tracing::info!("       SYSTEM-WIDE FULL DIAGNOSTIC RUN          ");
+        tracing::info!("════════════════════════════════════════════════");
+        self.run_voice_debug();
+        self.run_model_debug();
+        self.run_stt_debug();
+        self.run_memory_debug();
+        tracing::info!("════════════════════════════════════════════════");
+        tracing::info!("          DIAGNOSTIC RUN COMPLETED              ");
+        tracing::info!("════════════════════════════════════════════════");
     }
 
     pub async fn run(mut self) -> Result<()> {
@@ -209,6 +884,7 @@ impl TuiApp {
                         .await
                         {
                             Ok(text) if !text.trim().is_empty() => {
+                                crate::overlay::signal("listening");
                                 if tx_voice.send(AppEvent::Voice(text)).is_err() {
                                     break;
                                 }
@@ -236,6 +912,7 @@ impl TuiApp {
                         .await
                         {
                             Ok(text) if !text.trim().is_empty() => {
+                                crate::overlay::signal("listening");
                                 if tx_voice.send(AppEvent::Voice(text)).is_err() {
                                     break;
                                 }
@@ -261,6 +938,7 @@ impl TuiApp {
                     .await
                     {
                         Ok(text) => {
+                            crate::overlay::signal("listening");
                             if tx_voice.send(AppEvent::Voice(text)).is_err() {
                                 break;
                             }
@@ -309,6 +987,8 @@ impl TuiApp {
                 self.model_name = model;
                 self.chat_scroll = 0;
                 self.status = String::from("Ready");
+                // Reply delivered (and spoken) — clear the thinking pulse.
+                crate::overlay::signal("idle");
                 // After a voice reply, keep the wake-word window open so the
                 // user can keep talking without repeating "luna". Only extends
                 // an already-active window — a typed turn shouldn't open one.
@@ -348,6 +1028,7 @@ impl TuiApp {
                     // Normal hands-free question: answer it and reset idle timer
                     self.last_voice_activity.store(millis_now(), Ordering::Relaxed);
                     self.add_user_message(&stripped);
+                    crate::overlay::signal("thinking");
                     self.submit(stripped);
                     return;
                 }
@@ -372,6 +1053,7 @@ impl TuiApp {
                 // ── Normal wake utterance: answer and extend conversation window ──
                 self.refresh_conversation_window();
                 self.add_user_message(&stripped);
+                crate::overlay::signal("thinking");
                 self.submit(stripped);
             }
             AppEvent::OnboardingLog(line) => self.app_emit(&line),
@@ -404,7 +1086,7 @@ impl TuiApp {
         }
     }
 
-    /// Open (or extend) the wake-word-free conversation window on any voice
+
     /// interaction so the user can keep talking without repeating "luna".
     fn refresh_conversation_window(&mut self) {
         let secs = self.config.audio.conversation_window_secs;
@@ -455,6 +1137,20 @@ impl TuiApp {
         }
     }
 
+    fn delete_word_backwards(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+        let before = &self.input[..self.cursor_pos];
+        let trimmed = before.trim_end();
+        let new_pos = match trimmed.rfind(' ') {
+            Some(idx) => idx + 1,
+            None => 0,
+        };
+        self.input.drain(new_pos..self.cursor_pos);
+        self.cursor_pos = new_pos;
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         // First-run setup screen steals the keyboard until dismissed.
         if self.onboarding.as_ref().map(Onboarding::is_active).unwrap_or(false) {
@@ -466,6 +1162,107 @@ impl TuiApp {
         if self.key_prompt.is_some() {
             self.handle_key_prompt(key);
             return;
+        }
+
+        // Settings Menu modal steals the keyboard while open.
+        if let Some(sm) = &mut self.settings_menu {
+            match (key.modifiers, key.code) {
+                (_, KeyCode::Esc) => {
+                    self.settings_menu = None;
+                }
+                (_, KeyCode::Char('s')) | (_, KeyCode::Char('S')) => {
+                    sm.save(&mut self.config);
+                }
+                (_, KeyCode::Char('t')) | (_, KeyCode::Char('T')) => {
+                    self.settings_menu = None;
+                    self.config_editor = Some(ConfigState::load());
+                }
+                (_, KeyCode::Tab) | (_, KeyCode::Right) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    sm.next_category();
+                }
+                (_, KeyCode::Left) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    sm.prev_category();
+                }
+                (_, KeyCode::Tab) => {
+                    sm.next_category();
+                }
+                (_, KeyCode::Up) => sm.prev_item(),
+                (_, KeyCode::Down) => sm.next_item(),
+                (_, KeyCode::Char(' ')) | (_, KeyCode::Enter) => {
+                    sm.toggle_selected();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Config Editor modal steals the keyboard while open.
+        if let Some(ed) = &mut self.config_editor {
+            match (key.modifiers, key.code) {
+                (_, KeyCode::Esc) => {
+                    self.config_editor = None;
+                }
+                (_, KeyCode::Char('s')) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    ed.save(&mut self.config);
+                }
+                (_, KeyCode::Char('e')) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let path = ed.path.clone();
+                    let _ = disable_raw_mode();
+                    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+                    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
+                    let _ = std::process::Command::new(editor).arg(&path).status();
+                    let _ = execute!(io::stdout(), EnterAlternateScreen);
+                    let _ = enable_raw_mode();
+                    *ed = ConfigState::load();
+                    if let Ok(new_cfg) = crate::config::LunaConfig::load() {
+                        self.config = new_cfg;
+                    }
+                }
+                (_, KeyCode::Up) => ed.move_up(),
+                (_, KeyCode::Down) => ed.move_down(),
+                (_, KeyCode::Left) => ed.move_left(),
+                (_, KeyCode::Right) => ed.move_right(),
+                (_, KeyCode::PageUp) => ed.page_up(15),
+                (_, KeyCode::PageDown) => ed.page_down(15),
+                (_, KeyCode::Home) => ed.home(),
+                (_, KeyCode::End) => ed.end(),
+                (_, KeyCode::Enter) => ed.newline(),
+                (_, KeyCode::Backspace) => ed.backspace(),
+                (_, KeyCode::Delete) => ed.delete(),
+                (_, KeyCode::Tab) => ed.insert_tab(),
+                (_, KeyCode::Char(c)) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    ed.insert_char(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Slash command autocomplete navigation while typing '/'
+        let slash_opts = self.slash_matches();
+        if !slash_opts.is_empty() {
+            match key.code {
+                KeyCode::Up => {
+                    if self.slash_selected == 0 {
+                        self.slash_selected = slash_opts.len().saturating_sub(1);
+                    } else {
+                        self.slash_selected -= 1;
+                    }
+                    return;
+                }
+                KeyCode::Down => {
+                    self.slash_selected = (self.slash_selected + 1) % slash_opts.len();
+                    return;
+                }
+                KeyCode::Tab => {
+                    if let Some((cmd, _)) = slash_opts.get(self.slash_selected) {
+                        self.input = cmd.to_string();
+                        self.cursor_pos = self.input.len();
+                    }
+                    return;
+                }
+                _ => {}
+            }
         }
 
         match (key.modifiers, key.code) {
@@ -482,11 +1279,142 @@ impl TuiApp {
                     self.should_quit = true;
                 }
             }
+            (_, KeyCode::Char('u')) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input.clear();
+                self.cursor_pos = 0;
+            }
+            (_, KeyCode::Char('w')) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_word_backwards();
+            }
+            (_, KeyCode::Char('a')) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cursor_pos = 0;
+            }
+            (_, KeyCode::Char('e')) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cursor_pos = self.input.len();
+            }
+            (_, KeyCode::Char('b')) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.show_shortcuts_bar = !self.show_shortcuts_bar;
+            }
+            (_, KeyCode::F(1)) => {
+                self.show_help = !self.show_help;
+            }
+            (_, KeyCode::F(2)) => {
+                self.settings_menu = Some(SettingsMenuState::load(self.config.clone()));
+            }
+            (_, KeyCode::Char('?')) if self.input.is_empty() => {
+                self.show_help = !self.show_help;
+            }
+            (_, KeyCode::Esc) => {
+                if self.show_help {
+                    self.show_help = false;
+                } else {
+                    self.chat_scroll = 0;
+                    self.debug_scroll = 0;
+                    self.focus = Focus::Chat;
+                }
+            }
             (_, KeyCode::Enter) => {
                 if !self.input.trim().is_empty() {
                     let user_input = self.input.clone();
                     self.input.clear();
                     self.cursor_pos = 0;
+                    let trimmed = user_input.trim();
+                    let lower = trimmed.to_lowercase();
+                    if lower == "/config" || lower == "/settings" || lower == ":config" || lower == ":settings" {
+                        self.settings_menu = Some(SettingsMenuState::load(self.config.clone()));
+                        return;
+                    }
+                    if lower == "/toml" || lower == ":toml" || lower == "/edit" || lower == ":edit" {
+                        self.config_editor = Some(ConfigState::load());
+                        return;
+                    }
+                    if lower == "/clear" {
+                        let _ = self.memory.clear();
+                        self.messages.clear();
+                        self.messages.push(Msg {
+                            role: "assistant".into(),
+                            content: "Memory and chat history cleared.".into(),
+                            thinking: None,
+                        });
+                        self.chat_scroll = 0;
+                        return;
+                    }
+                    if lower == "/voice" {
+                        let active = !self.handsfree_active.load(Ordering::Relaxed);
+                        self.handsfree_active.store(active, Ordering::Relaxed);
+                        let msg = if active {
+                            "[Voice mode ON — hands-free. Say \"voice mode off\" to exit]"
+                        } else {
+                            "[Voice mode OFF]"
+                        };
+                        self.messages.push(Msg {
+                            role: "assistant".into(),
+                            content: msg.into(),
+                            thinking: None,
+                        });
+                        self.speak_announce(msg);
+                        return;
+                    }
+                    if lower == "/shortcuts" || lower == "/bar" {
+                        self.show_shortcuts_bar = !self.show_shortcuts_bar;
+                        let msg = if self.show_shortcuts_bar {
+                            "[Bottom shortcuts bar ON — press Ctrl+B or /shortcuts to hide]"
+                        } else {
+                            "[Bottom shortcuts bar OFF — press F1 for help anytime]"
+                        };
+                        self.messages.push(Msg {
+                            role: "assistant".into(),
+                            content: msg.into(),
+                            thinking: None,
+                        });
+                        return;
+                    }
+                    if lower.starts_with("/log ") || lower.starts_with("/debug log ") {
+                        let msg_text = if lower.starts_with("/log ") {
+                            trimmed[5..].trim()
+                        } else {
+                            trimmed[11..].trim()
+                        };
+                        tracing::info!("[DEBUG USER] {}", msg_text);
+                        self.messages.push(Msg {
+                            role: "assistant".into(),
+                            content: format!("[Debug log written to Debug Panel: \"{}\"]", msg_text),
+                            thinking: None,
+                        });
+                        return;
+                    }
+                    if lower == "/test-voice" || lower == "/debug voice" {
+                        self.run_voice_debug();
+                        return;
+                    }
+                    if lower == "/test-model" || lower == "/debug model" {
+                        self.run_model_debug();
+                        return;
+                    }
+                    if lower == "/test-stt" || lower == "/debug stt" {
+                        self.run_stt_debug();
+                        return;
+                    }
+                    if lower == "/test-memory" || lower == "/debug memory" {
+                        self.run_memory_debug();
+                        return;
+                    }
+                    if lower == "/debug" || lower == "/debug help" || lower == "/debug status" || lower == "/debug all" {
+                        self.run_all_debug();
+                        return;
+                    }
+                    if lower == "/setup" {
+                        self.onboarding = Some(Onboarding::new());
+                        return;
+                    }
+                    if lower == "/help" {
+                        self.show_help = !self.show_help;
+                        return;
+                    }
+                    if lower == "/exit" || lower == "/quit" {
+                        self.should_quit = true;
+                        return;
+                    }
                     self.messages.push(Msg {
                         role: "user".into(),
                         content: user_input.clone(),
@@ -913,12 +1841,33 @@ impl TuiApp {
         match lower.as_str() {
             "clear" => {
                 let _ = self.memory.clear();
+                self.messages.clear();
                 self.messages.push(Msg {
                     role: "assistant".into(),
-                    content: "Memory cleared. Fresh start.".into(),
+                    content: "Memory and chat history cleared.".into(),
                     thinking: None,
                 });
                 self.chat_scroll = 0;
+                return;
+            }
+            "test voice" | "debug voice" => {
+                self.run_voice_debug();
+                return;
+            }
+            "test model" | "debug model" => {
+                self.run_model_debug();
+                return;
+            }
+            "test stt" | "debug stt" => {
+                self.run_stt_debug();
+                return;
+            }
+            "test memory" | "debug memory" => {
+                self.run_memory_debug();
+                return;
+            }
+            "debug" | "test debug" | "debug all" => {
+                self.run_all_debug();
                 return;
             }
             "exit" | "quit" | "bye" => {
@@ -988,15 +1937,27 @@ impl TuiApp {
             return;
         }
 
-        // ── Layout: status on top, then chat+debug side by side, input below
-        let outer = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),  // Status bar
-                Constraint::Min(10),    // Chat + debug
-                Constraint::Length(3),  // Input line
-            ])
-            .split(size);
+        // ── Layout: status on top, then chat+debug side by side, input below, shortcuts bar at bottom (if enabled)
+        let outer = if self.show_shortcuts_bar {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),  // Status bar
+                    Constraint::Min(8),     // Chat + debug
+                    Constraint::Length(3),  // Input line
+                    Constraint::Length(1),  // Shortcuts bar
+                ])
+                .split(size)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),  // Status bar
+                    Constraint::Min(9),     // Chat + debug
+                    Constraint::Length(3),  // Input line
+                ])
+                .split(size)
+        };
 
         // Horizontal split: chat takes 60%, debug 40%
         let mid = Layout::default()
@@ -1033,6 +1994,11 @@ impl TuiApp {
         // Input line
         let input = InputLine::new(&self.input);
         f.render_widget(input, outer[2]);
+
+        // Shortcuts bar (rendered only when visible)
+        if self.show_shortcuts_bar {
+            f.render_widget(ShortcutsBar, outer[3]);
+        }
 
         // Masked --set-key prompt overlay (hides the secret while typing).
         if let Some(kp) = &self.key_prompt {
@@ -1071,9 +2037,73 @@ impl TuiApp {
             f.render_widget(paragraph, pop);
         }
 
-        // Cursor
-        if let Some(cursor_area) = InputLine::cursor_area(outer[2], self.cursor_pos, &self.input) {
-            f.set_cursor_position(cursor_area);
+        // Shortcuts help modal overlay (toggle with ? or F1)
+        if self.show_help {
+            let pop_w = (size.width.saturating_mul(4) / 5).clamp(40, 78);
+            let pop_h = 24.min(size.height.saturating_sub(2));
+            let pop = Rect::new(
+                size.x + size.width.saturating_sub(pop_w) / 2,
+                size.y + size.height.saturating_sub(pop_h) / 2,
+                pop_w,
+                pop_h,
+            );
+            f.render_widget(Clear, pop);
+            f.render_widget(ShortcutsModal, pop);
+        }
+
+        // Slash Command Autocomplete Popover (when typing '/')
+        let slash_opts = self.slash_matches();
+        if !slash_opts.is_empty() {
+            let pop_h = ((slash_opts.len() + 2) as u16).min(10);
+            let pop_w = outer[2].width.min(68);
+            let pop_y = outer[2].y.saturating_sub(pop_h);
+            let pop = Rect::new(outer[2].x, pop_y, pop_w, pop_h);
+            f.render_widget(Clear, pop);
+            f.render_widget(
+                SlashCommandMenu {
+                    options: &slash_opts,
+                    selected: self.slash_selected,
+                },
+                pop,
+            );
+        }
+
+        // Interactive Settings & Menu Controls modal overlay (F2 or /config)
+        if let Some(sm) = &self.settings_menu {
+            let pop_w = (size.width.saturating_mul(9) / 10).clamp(50, 130);
+            let pop_h = (size.height.saturating_mul(9) / 10).clamp(16, 40);
+            let pop = Rect::new(
+                size.x + size.width.saturating_sub(pop_w) / 2,
+                size.y + size.height.saturating_sub(pop_h) / 2,
+                pop_w,
+                pop_h,
+            );
+            f.render_widget(Clear, pop);
+            f.render_widget(SettingsMenuModal { state: sm }, pop);
+        }
+
+        // Interactive luna.toml editor modal overlay (toggle with F2 or :config / /config)
+        if let Some(ed) = &self.config_editor {
+            let pop_w = (size.width.saturating_mul(9) / 10).clamp(50, 130);
+            let pop_h = (size.height.saturating_mul(9) / 10).clamp(16, 40);
+            let pop = Rect::new(
+                size.x + size.width.saturating_sub(pop_w) / 2,
+                size.y + size.height.saturating_sub(pop_h) / 2,
+                pop_w,
+                pop_h,
+            );
+            f.render_widget(Clear, pop);
+            f.render_widget(ConfigEditorModal { state: ed }, pop);
+            if let Some(cursor_area) = ConfigEditorModal::cursor_area(pop, ed) {
+                f.set_cursor_position(cursor_area);
+            }
+        }
+
+ // Cursor
+        if self.config_editor.is_none() && self.settings_menu.is_none() {
+            if let Some(cursor_area) = InputLine::cursor_area(outer[2], self.cursor_pos, &self.input) {
+                f.set_cursor_position(cursor_area);
+            }
         }
     }
 }

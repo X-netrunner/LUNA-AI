@@ -10,13 +10,18 @@ pub struct ActionResult {
     pub tab_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl ActionResult {
     pub fn fail(action: String, step_index: u64, tab_id: u64, error: String) -> Self {
-        Self { success: false, action, step_index, tab_id, error: Some(error) }
+        Self { success: false, action, step_index, tab_id, error: Some(error), note: None }
     }
     pub fn ok(action: String, step_index: u64, tab_id: u64) -> Self {
-        Self { success: true, action, step_index, tab_id, error: None }
+        Self { success: true, action, step_index, tab_id, error: None, note: None }
+    }
+    pub fn ok_note(action: String, step_index: u64, tab_id: u64, note: String) -> Self {
+        Self { success: true, action, step_index, tab_id, error: None, note: Some(note) }
     }
 }

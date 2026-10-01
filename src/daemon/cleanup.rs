@@ -32,6 +32,22 @@ pub(crate) async fn disk_cycle(
     {
         let cooled = last_cleanup.map(|t| t.elapsed() > Duration::from_secs(3600)).unwrap_or(true);
         if cooled {
+            // ANNOUNCE BEFORE ACTING — one message listing what's about to
+            // happen, then clean, then the after-summary below.
+            super::notify(
+                "Luna — about to act",
+                &format!(
+                    "Disk is at {}% — I'm cleaning up:\n- pacman cache (keep last {} versions)\n\
+                     - ~/.cache older than {} days\n- trash older than {} days\n\
+                     - systemd journals (vacuum > {} days)",
+                    usage.used_pct,
+                    config.daemon.pacman_cache_keep,
+                    config.daemon.cache_max_age_days,
+                    config.daemon.trash_max_age_days,
+                    config.daemon.journal_vacuum_days
+                ),
+            )
+            .await;
             let sudo = config.agent.sudo_password.as_deref();
             let freed = run_cleanup(config, sudo).await;
             *last_cleanup = Some(Instant::now());

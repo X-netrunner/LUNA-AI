@@ -25,6 +25,9 @@ pub struct ReactLoop<'a> {
     /// Loaded once at startup — tools must NOT reload config per call
     /// (that would redo keyring lookups and log noise every turn).
     config: crate::config::LunaConfig,
+    /// Set after repeated empty responses: forces temperature 0 on the next
+    /// request so a stochastic sampling failure doesn't just repeat itself.
+    force_greedy: std::sync::atomic::AtomicBool,
 }
 
 impl<'a> ReactLoop<'a> {
@@ -40,6 +43,7 @@ impl<'a> ReactLoop<'a> {
             tools,
             recall_k: 6,
             config: config.clone(),
+            force_greedy: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -90,13 +94,34 @@ impl<'a> ReactLoop<'a> {
     }
 
     /// When the ReAct loop exhausts or repeats, give the user something useful
-    /// from the last tool result instead of a bare "iteration limit" apology.
+    /// from the tool results instead of a bare "iteration limit" apology.
+    ///
+    /// Prefers the last result that actually succeeded. It used to take the last
+    /// result unconditionally, so a turn that wrote a file correctly and then
+    /// fumbled a follow-up call answered with the fumble:
+    ///   "Here's what I found:\n\nError: write_file was called with no path"
+    /// Six of six exploit-authoring turns ended that way while the file sat on
+    /// disk the whole time.
     fn synthesize_answer(&self, turn_messages: &[Message]) -> String {
-        let last_tool = turn_messages
+        let tools = turn_messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>();
+
+        // Last success wins; fall back to the last result of any kind.
+        let is_error = |c: &String| {
+            let t = c.trim_start();
+            t.starts_with("Error:") || t.starts_with("ERROR:")
+        };
+        let picked = tools
             .iter()
             .rev()
-            .find_map(|m| (m.role == "tool").then(|| m.content.clone()));
-        let Some(result) = last_tool else {
+            .find(|c| !is_error(c))
+            .or_else(|| tools.last())
+            .cloned();
+
+        let Some(result) = picked else {
             return "I hit my iteration limit.".to_string();
         };
         // Drop structural headers ("=== Search results ===") and junk lines that
@@ -141,7 +166,7 @@ impl<'a> ReactLoop<'a> {
         user_input: &str,
         memory: &mut Memory,
         system_prompt: &str,
-    ) -> Result<(String, bool)> {
+    ) -> Result<(String, Option<String>, bool)> {
         let effective = self.enrich(system_prompt, user_input).await;
         self.run_loop(user_input, memory, &effective).await
     }
@@ -151,18 +176,44 @@ impl<'a> ReactLoop<'a> {
         user_input: &str,
         memory: &mut Memory,
         system_prompt: &str,
-    ) -> Result<(String, bool)> {
+    ) -> Result<(String, Option<String>, bool)> {
         memory.push(Message::user(user_input));
 
-        let tools_arg = if self.tools.is_empty() {
+        // Per-request tool subsetting. See tools::select for the measurement:
+        // with all 47 schemas the 7B emitted NO tool call and narrated an
+        // action it had not performed (0/3), while a 22-tool payload called
+        // `edit_file` correctly (3/3). The silent failure is the dangerous part
+        // — the user is told a file was edited when nothing was written.
+        //
+        // Only applied to a large payload; a caller that already passes a
+        // narrow list is untouched.
+        let turn_tools: Vec<crate::llm::ollama::ToolDef> = if self.tools.is_empty() {
+            Vec::new()
+        } else if self.tools.len() > crate::tools::select::SUBSET_THRESHOLD {
+            let kept = crate::tools::select::subset_of(&self.tools, user_input);
+            tracing::debug!(
+                "Tool subset: {} of {} offered for this request",
+                kept.len(),
+                self.tools.len()
+            );
+            kept
+        } else {
+            self.tools.clone()
+        };
+        let tools_arg = if turn_tools.is_empty() {
             None
         } else {
-            Some(self.tools.as_slice())
+            Some(turn_tools.as_slice())
         };
 
         let mut iteration = 0;
         let mut turn_messages: Vec<Message> = Vec::new();
         let mut empty_retries = 0;
+        // Guards the positional-call correction: a model that writes
+        // `write_file("/tmp/x", "…")` instead of JSON gets told the shape once
+        // and gets a chance to re-issue. Capped so a model that cannot learn the
+        // shape still gets an answer instead of looping to the iteration cap.
+        let mut shape_retries = 0;
         // Guards against the model *claiming* an action completed (notably
         // "message sent") without the corresponding tool actually running this
         // turn — it can happen when the model just echoes a previous reply.
@@ -171,6 +222,16 @@ impl<'a> ReactLoop<'a> {
         // break identical-repeat loops where a model calls the same tool with
         // the same arguments forever instead of writing an answer.
         let mut used_calls: Vec<String> = Vec::new();
+        let mut accumulated_thinking = String::new();
+        // Whether any tool in this turn actually did something.
+        //
+        // Once one has, a subsequent *failed* call is the model flailing rather
+        // than working — measured on the security tier: the 8B wrote the file
+        // correctly, then emitted a second argument-less `write_file`, got an
+        // error back, and kept calling tools until all 8 iterations were gone.
+        // The repeat guard did not catch it because the two calls differ. We
+        // stop instead and answer from the work already done.
+        let mut had_success = false;
 
         loop {
             iteration += 1;
@@ -178,7 +239,8 @@ impl<'a> ReactLoop<'a> {
                 tracing::warn!("ReAct max iterations ({}) reached", self.max_iterations);
                 let fallback = self.synthesize_answer(&turn_messages);
                 memory.push(Message::assistant(&fallback));
-                return Ok((fallback, false));
+                let think_opt = if accumulated_thinking.trim().is_empty() { None } else { Some(accumulated_thinking) };
+                return Ok((fallback, think_opt, false));
             }
 
             let mut context = memory.build_context(system_prompt);
@@ -186,7 +248,16 @@ impl<'a> ReactLoop<'a> {
 
             tracing::debug!("ReAct iteration {}, context: {}", iteration, context.len());
 
-            let response = self.client.chat(&context, tools_arg).await?;
+            // Greedy resample after an empty response, so we don't roll the
+            // same dice again. `chat` takes the temperature override directly.
+            let greedy = self
+                .force_greedy
+                .swap(false, std::sync::atomic::Ordering::Relaxed);
+            let response = self.client.chat_at(&context, tools_arg, greedy).await?;
+            if std::env::var("LUNA_DUMP_CTX").is_ok() {
+                let p = format!("/tmp/opencode/ctx_{}.json", iteration);
+                let _ = std::fs::write(&p, serde_json::to_string_pretty(&context).unwrap());
+            }
 
             tracing::debug!(
                 "model output {}: {}",
@@ -199,7 +270,13 @@ impl<'a> ReactLoop<'a> {
             );
 
             match response {
-                OllamaResponse::Text { text, streamed } => {
+                OllamaResponse::Text { text, thinking, streamed } => {
+                    if let Some(think) = thinking {
+                        if !accumulated_thinking.is_empty() {
+                            accumulated_thinking.push('\n');
+                        }
+                        accumulated_thinking.push_str(&think);
+                    }
                     // ── Empty response ──────────────────────────────────────
                     if text.trim().is_empty() {
                         // The model came back mid-deliberation (empty content).
@@ -212,19 +289,40 @@ impl<'a> ReactLoop<'a> {
                             );
                             let fallback = self.synthesize_answer(&turn_messages);
                             memory.push(Message::assistant(&fallback));
-                            return Ok((fallback, false));
+                            let think_opt = if accumulated_thinking.trim().is_empty() { None } else { Some(accumulated_thinking) };
+                            return Ok((fallback, think_opt, false));
                         }
                         empty_retries += 1;
-                        if empty_retries >= 2 {
-                            // Give up after 2 empty retries
-                            let fallback = "I couldn't generate a response.".to_string();
+                        if empty_retries >= 3 {
+                            // Give up. Say so honestly, and if tools already ran,
+                            // report what they actually returned rather than
+                            // pretending the turn produced nothing.
+                            let fallback = if turn_messages.iter().any(|m| m.role == "tool") {
+                                self.synthesize_answer(&turn_messages)
+                            } else {
+                                "I couldn't generate a response — the model returned \
+                                 nothing three times in a row. Try rephrasing, or ask me \
+                                 something narrower."
+                                    .to_string()
+                            };
                             memory.push(Message::assistant(&fallback));
-                            return Ok((fallback, false));
+                            let think_opt = if accumulated_thinking.trim().is_empty() { None } else { Some(accumulated_thinking) };
+                            return Ok((fallback, think_opt, false));
                         }
-                        tracing::debug!("Empty response, retrying ({}/2)...", empty_retries);
-                        turn_messages.push(Message::user(
-                            "Please respond or use a tool to complete the request.",
-                        ));
+                        tracing::debug!("Empty response, retrying ({}/3)...", empty_retries);
+                        // NOTE: deliberately no nudge message here. Injecting
+                        // "please respond or use a tool" as a second user turn
+                        // made the model conclude the original request was
+                        // unclear and reply with "could you clarify?" — the
+                        // recovery *caused* the useless answer. An empty
+                        // response is a model-side sampling failure (~1 in 5 on
+                        // this model, correlated with very long generations), so
+                        // the correct move is simply to resample the same
+                        // context. temperature 0 on the last attempt stops the
+                        // stochastic loop from repeating itself.
+                        if empty_retries >= 2 {
+                            self.force_greedy.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                         continue;
                     }
                     empty_retries = 0;
@@ -244,12 +342,15 @@ impl<'a> ReactLoop<'a> {
                             );
                             let fallback = self.synthesize_answer(&turn_messages);
                             memory.push(Message::assistant(&fallback));
-                            return Ok((fallback, false));
+                            let think_opt = if accumulated_thinking.trim().is_empty() { None } else { Some(accumulated_thinking) };
+                            return Ok((fallback, think_opt, false));
                         }
                         used_calls.push(sig);
 
+                        let mut call_failed = false;
                         let tool_result = match tools::execute(&tool_call, &self.config).await {
                             Ok(o) => {
+                                had_success = true;
                                 if self.tui() {
                                     tracing::info!(
                                         "Tool {} succeeded: {}",
@@ -266,6 +367,7 @@ impl<'a> ReactLoop<'a> {
                                 o
                             }
                             Err(e) => {
+                                call_failed = true;
                                 if self.tui() {
                                     tracing::warn!("Tool {} failed: {}", tool_name, e);
                                 } else {
@@ -281,8 +383,46 @@ impl<'a> ReactLoop<'a> {
                             "<|tool_call|>{}<|/tool_call|>",
                             tool_name
                         )));
-                        turn_messages.push(Message::tool(tool_result));
+                        turn_messages.push(Message::tool(tool_result.clone()));
+
+                        // The turn has already accomplished something and the
+                        // model is now making calls that fail. Answer from the
+                        // work that landed instead of spending the remaining
+                        // iterations on a flail.
+                        if call_failed && had_success {
+                            tracing::warn!(
+                                "Stopping turn: '{}' failed after an earlier success",
+                                tool_name
+                            );
+                            let fallback = self.synthesize_answer(&turn_messages);
+                            memory.push(Message::assistant(&fallback));
+                            let think_opt = if accumulated_thinking.trim().is_empty() {
+                                None
+                            } else {
+                                Some(accumulated_thinking)
+                            };
+                            return Ok((fallback, think_opt, false));
+                        }
                         continue;
+                    }
+
+                    // ── Positional-call correction ─────────────────────────
+                    // The model wrote a tool call as `write_file("…", "…")`.
+                    // Recognised, not executed — see positional_call_hint.
+                    if let Some(hint) = positional_call_hint(&text) {
+                        if shape_retries < 2 {
+                            shape_retries += 1;
+                            tracing::warn!(
+                                "Model used positional call syntax — correcting shape (attempt {})",
+                                shape_retries
+                            );
+                            turn_messages.push(Message::assistant(truncate_control(&text)));
+                            turn_messages.push(Message::tool(hint));
+                            continue;
+                        }
+                        tracing::warn!(
+                            "Model ignored the positional-call correction twice — answering as text"
+                        );
                     }
 
                     // ── Genuine text response ─────────────────────────────
@@ -311,7 +451,8 @@ impl<'a> ReactLoop<'a> {
                     if let Err(e) = memory.save() {
                         tracing::warn!("Failed to save memory: {}", e);
                     }
-                    return Ok((text, streamed));
+                    let think_opt = if accumulated_thinking.trim().is_empty() { None } else { Some(accumulated_thinking) };
+                    return Ok((text, think_opt, streamed));
                 }
 
                 OllamaResponse::ToolUse(tool_calls) => {
@@ -321,21 +462,52 @@ impl<'a> ReactLoop<'a> {
                         tracing::info!("Tool call: {}", tool_name);
 
                         // Identical-repeat guard — the model called this exact
-                        // tool+args before; answer from the results instead.
+                        // tool+args before.
+                        //
+                        // Read-only lookups are exempt from the hard break for
+                        // one extra round: re-asking "what files exist?" is not a
+                        // runaway loop, it's a model checking its ground. Killing
+                        // the turn there strands it mid-task (observed: Luna ran
+                        // files -> files, got cut off before the read+propose
+                        // she was actually making progress toward). Anything that
+                        // MUTATES still breaks on the second identical call —
+                        // re-sending a message or re-running an upgrade is
+                        // exactly what this guard is for.
                         let sig = format!("{} {}", tool_name, tool_call.function.arguments);
-                        if used_calls.contains(&sig) {
-                            tracing::warn!(
-                                "Tool '{}' repeated with identical args — breaking loop",
+                        let repeats = used_calls.iter().filter(|s| **s == sig).count();
+                        if repeats > 0 {
+                            let readonly = matches!(
+                                tool_name.as_str(),
+                                "self_patch" | "system_update" | "read_file"
+                            );
+                            let hard_break = !readonly || repeats >= 2;
+                            if hard_break {
+                                tracing::warn!(
+                                    "Tool '{}' repeated with identical args — breaking loop",
+                                    tool_name
+                                );
+                                let fallback = self.synthesize_answer(&turn_messages);
+                                memory.push(Message::assistant(&fallback));
+                                let think_opt = if accumulated_thinking.trim().is_empty() { None } else { Some(accumulated_thinking) };
+                                return Ok((fallback, think_opt, false));
+                            }
+                            tracing::debug!(
+                                "Tool '{}' repeated (read-only, tolerating) — nudging onward",
                                 tool_name
                             );
-                            let fallback = self.synthesize_answer(&turn_messages);
-                            memory.push(Message::assistant(&fallback));
-                            return Ok((fallback, false));
+                            turn_messages.push(Message::tool(
+                                "You already ran that exact call this turn; the result above is \
+                                 still valid and will not change. Do not repeat it again — take \
+                                 the next step instead.",
+                            ));
+                            continue;
                         }
                         used_calls.push(sig);
 
+                        let mut call_failed = false;
                         let tool_result = match tools::execute(tool_call, &self.config).await {
                             Ok(o) => {
+                                had_success = true;
                                 if self.tui() {
                                     tracing::info!(
                                         "Tool {} succeeded: {}",
@@ -352,6 +524,7 @@ impl<'a> ReactLoop<'a> {
                                 o
                             }
                             Err(e) => {
+                                call_failed = true;
                                 if self.tui() {
                                     tracing::warn!("Tool {} failed: {}", tool_name, e);
                                 } else {
@@ -373,7 +546,27 @@ impl<'a> ReactLoop<'a> {
                             "<|tool_call|>{}<|/tool_call|>",
                             tool_name
                         )));
-                        turn_messages.push(Message::tool(tool_result));
+                        turn_messages.push(Message::tool(tool_result.clone()));
+
+                        // Same guard as the freeform path: work has already
+                        // landed this turn and the model is now failing, so
+                        // answer from what succeeded instead of burning the
+                        // remaining iterations. This is the path the 8B security
+                        // model actually takes (it emits native tool_calls).
+                        if call_failed && had_success {
+                            tracing::warn!(
+                                "Stopping turn: '{}' failed after an earlier success",
+                                tool_name
+                            );
+                            let fallback = self.synthesize_answer(&turn_messages);
+                            memory.push(Message::assistant(&fallback));
+                            let think_opt = if accumulated_thinking.trim().is_empty() {
+                                None
+                            } else {
+                                Some(accumulated_thinking)
+                            };
+                            return Ok((fallback, think_opt, false));
+                        }
                     }
                 }
             }
@@ -396,6 +589,135 @@ fn print_sources(tool_name: &str, result: &str, tui: bool) {
             println!("    ↳ {}", src);
         }
     }
+}
+
+/// The language tag of a fence that opens the message, lowercased, if any.
+///
+/// Only a fence at the very start counts. A fence midway through a response is
+/// one of several things being shown, and its tag says nothing about the whole
+/// message.
+fn leading_fence_language(text: &str) -> Option<String> {
+    let first = text.trim_start().lines().next()?.trim_start();
+    let rest = first.strip_prefix("```")?;
+    let lang = rest
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '+' && c != '#')
+        .to_ascii_lowercase();
+    if lang.is_empty() {
+        None
+    } else {
+        Some(lang)
+    }
+}
+
+/// Detect a tool call written with Python/JS call syntax and return the
+/// correction to send back, or `None` if the text is not that shape.
+///
+/// Observed live on the security tier, 2026-10-01, in the turn right after five
+/// `write_file` calls:
+///
+/// ```text
+/// write_file("/tmp/exploit.py", "import socket,subprocess,os;…")
+/// write_file("/tmp/exploit.sh", "python3 /tmp/exploit.py")
+/// chmod("/tmp/exploit.sh", 0o755)
+/// run_shell("/tmp/exploit.sh")
+/// notify("Exploit executed", "…")
+/// </tool_response>
+/// ```
+///
+/// The intent is unambiguous and every call is well-formed, so this is worth
+/// recovering — but it is deliberately **not** executed. Arguments here are
+/// positional, and `serde_json` is built without `preserve_order`, so a tool's
+/// declared parameter order is not recoverable from its schema: `write_file`'s
+/// properties come back alphabetical (`content`, `path`), and mapping position 1
+/// onto `content` would write a file whose body is the string `/tmp/exploit.py`
+/// — a wrong write that reports success. Guessing here would reintroduce exactly
+/// the class of bug this tier was built to eliminate: a fabricated success that
+/// reads like a real one.
+///
+/// So the model is told the shape and re-issues. That costs one iteration and
+/// produces a real, verified call, where guessing costs a silent bad write.
+///
+/// The detector is narrow for the same reason: the first line must begin with
+/// `registered_tool_name(`. Prose does not do that.
+fn positional_call_hint(text: &str) -> Option<String> {
+    let defs = crate::tools::tool_definitions();
+
+    // A fence tagged with a *programming* language means the model is showing
+    // code, not calling a tool. Caught by a test after it shipped: a response
+    // containing a ```python example that itself mentioned `write_file(...)`
+    // was being told to re-issue as JSON, which wastes an iteration to correct
+    // a model that did nothing wrong. A `json` fence is deliberately still
+    // checked — that spelling is how a tool call gets formatted, not how code
+    // gets demonstrated.
+    if let Some(lang) = leading_fence_language(text) {
+        const CODE_LANGS: &[&str] = &[
+            "python", "py", "js", "javascript", "ts", "typescript", "bash", "sh",
+            "shell", "zsh", "console", "c", "cpp", "rust", "go", "java", "ruby",
+            "php", "perl", "lua", "sql", "html", "css", "yaml", "toml",
+        ];
+        if CODE_LANGS.contains(&lang.as_str()) {
+            return None;
+        }
+    }
+
+    let body = strip_tool_call_decoration(text);
+    let first = body.lines().find(|l| !l.trim().is_empty())?.trim();
+
+    let open = first.find('(')?;
+    let name = first[..open].trim();
+    // Must be a bare identifier that names a real tool.
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    let def = defs.iter().find(|t| t.function.name == name)?;
+
+    let props = def
+        .function
+        .parameters
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|o| o.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let required: Vec<String> = def
+        .function
+        .parameters
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let req = if required.is_empty() {
+        "none".to_string()
+    } else {
+        required.join(", ")
+    };
+    let accepted = if props.is_empty() {
+        "none".to_string()
+    } else {
+        props.join(", ")
+    };
+
+    Some(format!(
+        "Error: `{}` was written as a function call with positional arguments, not as a \
+         tool call, so NOTHING was executed. Positional arguments are not mapped to \
+         parameters automatically, because a wrong mapping would run the wrong \
+         operation and report success. Re-issue it as a single JSON object with named \
+         keys, for example: {name} {{\"key\": \"value\"}}. Required parameter(s): {req}. \
+         Accepted parameter(s): {accepted}. One tool call per message, and do not add a \
+         closing tag after it.",
+        def.function.name,
+    ))
 }
 
 fn parse_freeform_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> {
@@ -434,7 +756,13 @@ fn parse_freeform_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> 
         let inner = &text[start + 13..]; // len("<|tool_call|>") = 13
         if let Some(end) = inner.find("<|/tool_call|>") {
             let name = inner[..end].trim().to_string();
-            if !name.is_empty() {
+            // Only accept a BARE tool name (identifier chars only). If the
+            // content carries shell flags / args / paths (e.g. the 7B dumps
+            // `nmap_scan -p 80 -sV 10.0.0.1`), it is a raw CLI command, not a
+            // valid tool call. Reject it here so we never look up (and log
+            // "Unknown tool:") a giant multi-word garbage name — the model
+            // just gets its text back and can re-issue a proper call.
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                 return Some(ToolCall {
                     function: ToolCallFunction {
                         name,
@@ -453,7 +781,225 @@ fn parse_freeform_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> 
         return Some(call);
     }
 
+    // Pattern 5: a bare OpenAI-style tool call object, with the tool name
+    // INSIDE the JSON rather than before it:
+    //   {"name": "edit_file", "arguments": {"path": "...", ...}}
+    //
+    // Observed live on 2026-09-30 as the reason file editing silently did
+    // nothing: the model produced exactly this shape, `parse_json_tool_call`
+    // found no name before the opening brace and bailed, so the turn ended
+    // with the JSON rendered to the user as if it were prose. Nothing was
+    // edited, and the assistant appeared to have answered.
+    if let Some(call) = parse_bare_tool_call_object(text) {
+        return Some(call);
+    }
+
     None
+}
+
+/// Parse a self-contained `{"name": ..., "arguments": {...}}` object.
+///
+/// Deliberately strict, because the cost of a false positive here is high: a
+/// tool call is EXECUTED, and a bare JSON object is also the most likely shape
+/// of legitimate prose-adjacent output. So all of the following must hold:
+///   - the name is a real registered tool,
+///   - the name and arguments are both present,
+///   - the object is the WHOLE message, not a fragment of an explanation.
+///
+/// A model that writes "here is the call: {...}" and then keeps talking is
+/// better handled as prose than executed on a guess.
+fn parse_bare_tool_call_object(text: &str) -> Option<crate::llm::ollama::ToolCall> {
+    use crate::llm::ollama::{ToolCall, ToolCallFunction};
+
+    let trimmed = strip_tool_call_decoration(text);
+    // Cheap reject before any parsing: a real prose message is long.
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') || trimmed.len() > 16384 {
+        return None;
+    }
+
+    // Try strict first, then the repaired form. Models emitting code routinely
+    // put raw newlines inside a JSON string value (a multi-line python file is
+    // the whole payload), which is invalid JSON and fails to parse outright.
+    let strict: Option<serde_json::Value> = serde_json::from_str(trimmed).ok();
+    let (v, repaired) = match strict {
+        Some(v) => (v, false),
+        None => (serde_json::from_str(&escape_raw_newlines_in_strings(trimmed)).ok()?, true),
+    };
+    let _ = repaired;
+
+    let defs = crate::tools::tool_definitions();
+    let known: Vec<&str> = defs.iter().map(|t| t.function.name.as_str()).collect();
+
+    // Three name spellings, all observed in the wild:
+    //   {"name": "write_file", "arguments": {...}}          OpenAI
+    //   {"tool": "write_file", "arguments": {...}}          older local models
+    //   {"function": "write_file", "path": ..., ...}        inline-arg shape
+    let (name, args) = {
+        let name = v
+            .get("name")
+            .and_then(|n| n.as_str())
+            .or_else(|| v.get("tool").and_then(|n| n.as_str()))
+            .or_else(|| v.get("function").and_then(|n| n.as_str()))
+            .map(|s| s.to_string());
+        let name = name?;
+        if !known.contains(&name.as_str()) {
+            return None;
+        }
+        let args = match v.get("arguments") {
+            Some(a) if a.is_object() => a.clone(),
+            Some(_) => return None,
+            None => {
+                // Inline shape: the tool name sits alongside its arguments.
+                let mut o = v.as_object()?.clone();
+                o.remove("name");
+                o.remove("tool");
+                o.remove("function");
+                serde_json::Value::Object(o)
+            }
+        };
+        (name, args)
+    };
+
+    Some(ToolCall {
+        function: ToolCallFunction {
+            name,
+            arguments: args,
+        },
+    })
+}
+
+/// Strip the decoration a model wraps a tool call in, leaving the payload.
+///
+/// Measured 2026-10-01, N=8, security tier, Luna's real prompt: 3 of 8 runs
+/// produced a tool call that `parse_bare_tool_call_object` threw away, every one
+/// of them shaped like this —
+///
+/// ```json
+/// {"function": "write_file", "arguments": {"path": "/tmp/exploit.sh", …}}
+/// ```
+///
+/// The call was correct, and even named the right tool, but it arrived inside a
+/// markdown fence. The cheap reject (`starts_with('{')`) bailed on the backtick
+/// before any parsing happened, so the turn ended with the call rendered to the
+/// user as prose. The bare and prompt-only conditions made the identical call
+/// 8/8 through native `tool_calls` — so this is the fence costing the tool call,
+/// not the model declining to make it.
+///
+/// Also strips the `<tool_call>` / `</tool_response>` spellings, which stack with
+/// the fence, and tolerates a short prose lead-in. The tolerance is bounded at
+/// 200 bytes on purpose: a long explanation is prose, and prose must stay prose.
+fn strip_tool_call_decoration(text: &str) -> &str {
+    /// A prose lead-in longer than this means the message is an explanation,
+    /// not a decorated call.
+    const MAX_LEAD_IN: usize = 200;
+
+    let mut s = text.trim();
+
+    // A fenced block anywhere near the start. Checked before the tag/fence
+    // loop because the fence is the outermost decoration in practice.
+    if !s.starts_with('{') && !s.starts_with("```") {
+        if let Some(open) = s.find("```") {
+            if open <= MAX_LEAD_IN {
+                let body_start = open + 3;
+                let after_open = &s[body_start..];
+                // Skip the optional language tag and the newline after it.
+                let content_start = match after_open.find('\n') {
+                    Some(nl) => body_start + nl + 1,
+                    None => s.len(),
+                };
+                let content_end = match s[content_start..].find("```") {
+                    Some(rel) => content_start + rel,
+                    // Unterminated fence: the model was cut off mid-call. Take
+                    // the rest of the message; the JSON parse will decide.
+                    None => s.len(),
+                };
+                s = s[content_start..content_end].trim();
+            }
+        }
+    }
+
+    // Decoration stacks (`<tool_response>` + fence + JSON), so loop until fixed.
+    loop {
+        let before = s;
+
+        for (open, close) in [
+            ("<tool_response>", "</tool_response>"),
+            ("<|tool_response|>", "<|/tool_response|>"),
+            ("<tool_calls>", "</tool_calls>"),
+        ] {
+            if let Some(rest) = s.strip_prefix(open) {
+                s = rest.trim_start();
+            }
+            // Only when the closing tag is the tail. A mention mid-message is
+            // not decoration.
+            if s.ends_with(close) {
+                s = s[..s.len() - close.len()].trim_end();
+            }
+        }
+
+        if s.starts_with("```") {
+            s = match s.find('\n') {
+                Some(nl) => s[nl + 1..].trim_start(),
+                None => "",
+            };
+        }
+        if s.ends_with("```") {
+            s = s[..s.len() - 3].trim_end();
+        }
+
+        if s == before {
+            break;
+        }
+    }
+
+    s
+}
+
+/// Escape raw newlines, carriage returns and tabs that appear inside JSON
+/// string values, leaving the rest of the document byte-identical.
+///
+/// A model writing a multi-line file into a `write_file` call emits literal
+/// newlines inside the "content" string. That is invalid JSON, so every strict
+/// parser rejects the whole object and the call is silently rendered to the
+/// user as prose. Escaping only the control characters inside strings is enough
+/// to recover it, and is safe to apply unconditionally: a newline outside a
+/// string is structural whitespace and is left alone.
+///
+/// Not a substitute for correct escaping — this repairs the common case only,
+/// and a document it cannot repair simply fails to parse and stays prose.
+pub(crate) fn escape_raw_newlines_in_strings(src: &str) -> String {
+    let mut out = String::with_capacity(src.len() + 64);
+    let mut in_str = false;
+    let mut escaped = false;
+    for ch in src.chars() {
+        if in_str {
+            if escaped {
+                escaped = false;
+                out.push(ch);
+            } else {
+                match ch {
+                    '\\' => {
+                        escaped = true;
+                        out.push(ch);
+                    }
+                    '"' => {
+                        in_str = false;
+                        out.push(ch);
+                    }
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    _ => out.push(ch),
+                }
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_str = true;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Collapse embedded \n / \r / \t into spaces so tool-result dumps don't
@@ -581,7 +1127,30 @@ fn parse_json_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> {
             '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    let args: serde_json::Value = serde_json::from_str(&obj[..=i]).ok()?;
+                    let slice = &obj[..=i];
+                    // Doubled outer braces: `write_file {{"path": …}}`.
+                    //
+                    // Observed live on the security tier, 2026-10-01, as a 1-in-6
+                    // end-to-end failure — and the cause was Luna's own prompt.
+                    // The example was written with `format!`'s brace escaping
+                    // inside a `const` that `format!` never processes (the const
+                    // is substituted as a *value*), so `{{` reached the model
+                    // literally and it copied them into its reply. The prompt is
+                    // fixed, but this repair stays: it is one level and strictly
+                    // bounded, and a model that doubles braces for any other
+                    // reason would otherwise lose the call silently.
+                    let args: serde_json::Value = match serde_json::from_str(slice) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            // ONE brace from each end. Stripping the pair would
+                            // leave the bare key/value list with no object
+                            // around it, which does not parse either.
+                            let inner = slice
+                                .strip_prefix('{')
+                                .and_then(|s| s.strip_suffix('}'))?;
+                            serde_json::from_str(inner).ok()?
+                        }
+                    };
                     return Some(ToolCall {
                         function: ToolCallFunction {
                             name: name.to_string(),
@@ -599,6 +1168,62 @@ fn parse_json_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a loop with no client work — `synthesize_answer` is pure, so the
+    /// client is only borrowed, never called.
+    fn offline_loop<'a>(client: &'a super::super::ollama::OllamaClient) -> ReactLoop<'a> {
+        ReactLoop::new(client, 8, Vec::new(), &crate::config::LunaConfig::default())
+    }
+
+    /// The user-facing answer must describe what succeeded, not the last thing
+    /// that went wrong.
+    ///
+    /// Measured on the security tier: 6/6 exploit-authoring turns wrote the file
+    /// correctly, then answered
+    ///   "Here's what I found:\n\nError: write_file was called with no path"
+    /// because this took the last tool result unconditionally and the fumbled
+    /// follow-up call came after the good one. The file was on disk the whole
+    /// time and the user never heard about it.
+    #[test]
+    fn synthesized_answers_prefer_the_last_success() {
+        let client = super::super::ollama::OllamaClient::new(
+            "http://127.0.0.1:1",
+            "unused",
+            0.0,
+            1,
+        );
+        let loop_ = offline_loop(&client);
+        let msgs = vec![
+            Message::tool("SUCCESS\nwrote 215 bytes".to_string()),
+            Message::tool("Error: write_file was called with no path.".to_string()),
+        ];
+        let out = loop_.synthesize_answer(&msgs);
+        assert!(
+            out.contains("wrote 215 bytes"),
+            "answer hid the successful result: {out:?}"
+        );
+        assert!(
+            !out.contains("no path"),
+            "answer led with the later failure: {out:?}"
+        );
+    }
+
+    /// With no successful result to report, the last result is still better than
+    /// a bare "iteration limit".
+    #[test]
+    fn synthesized_answers_fall_back_to_the_last_result() {
+        let client = super::super::ollama::OllamaClient::new(
+            "http://127.0.0.1:1",
+            "unused",
+            0.0,
+            1,
+        );
+        let loop_ = offline_loop(&client);
+        let msgs = vec![Message::tool("Error: something failed".to_string())];
+        assert!(loop_.synthesize_answer(&msgs).contains("something failed"));
+        // No tool ran at all — say that rather than inventing a result.
+        assert!(loop_.synthesize_answer(&[]).contains("iteration limit"));
+    }
 
     #[test]
     fn detects_escalation_as_standalone_word() {
@@ -705,5 +1330,277 @@ mod tests {
         assert_eq!(call.function.name, "run_shell");
         let call = parse_freeform_tool_call("<|tool_call|>run_shell<|/tool_call|>").unwrap();
         assert_eq!(call.function.name, "run_shell");
+    }
+
+    // Regression: the 7B sometimes dumps a raw CLI command inside
+    // <|tool_call|>…<|/tool_call|> (e.g. "nmap_scan -p 3000 -sV 127.0.0.1").
+    // That must NOT be parsed as a tool named "nmap_scan -p 3000 …" (which
+    // caused "Unknown tool: nmap_scan -p 3000 …" in the log). Only bare
+    // identifier tool names are accepted.
+    #[test]
+    fn rejects_raw_cli_inside_tool_call_tags() {
+        let leak = "<|tool_call|>nmap_scan -p 3000 -sV -sC -oN out.txt 127.0.0.1<|/tool_call|>";
+        assert!(
+            parse_freeform_tool_call(leak).is_none(),
+            "a CLI dump inside tool_call tags must not parse as a tool call"
+        );
+        // A bare, valid tool name still parses.
+        let ok = parse_freeform_tool_call("<|tool_call|>nmap_scan<|/tool_call|>").unwrap();
+        assert_eq!(ok.function.name, "nmap_scan");
+    }
+
+    /// The fenced shape, verbatim from the security tier's run.
+    ///
+    /// Measured 2026-10-01: 3 of 8 runs under Luna's real prompt produced this
+    /// and the call was dropped. `parse_bare_tool_call_object`'s cheap reject
+    /// (`starts_with('{')`) bailed on the backtick, so a correct call naming a
+    /// registered tool was rendered to the user as prose. Under bare ollama and
+    /// under the prompt alone, the same request made the identical call 8/8 —
+    /// so the fence was the entire cause.
+    #[test]
+    fn a_fenced_json_tool_call_is_not_dropped() {
+        let raw = "```json\n{\"function\": \"write_file\", \"arguments\": {\"path\": \
+                   \"/tmp/exploit.sh\", \"content\": \"#!/bin/bash\\n\"}}\n```";
+        let c = parse_freeform_tool_call(raw).expect("a fenced tool call must be recovered");
+        assert_eq!(c.function.name, "write_file");
+        assert_eq!(c.function.arguments["path"], "/tmp/exploit.sh");
+    }
+
+    /// The decoration stacks in practice: a response tag wrapped around a fence
+    /// wrapped around the object, plus a short lead-in. Fixed-point stripping is
+    /// what makes this work, since no single pass removes all three layers.
+    #[test]
+    fn stacked_decoration_around_a_fenced_call_is_stripped() {
+        for raw in [
+            "<tool_response>\n```json\n{\"name\": \"write_file\", \"arguments\": \
+             {\"path\": \"/tmp/a.sh\"}}\n```\n</tool_response>",
+            "Here is the call:\n```json\n{\"name\": \"write_file\", \"arguments\": \
+             {\"path\": \"/tmp/a.sh\"}}\n```",
+            "<|tool_response|>\n{\"tool\": \"write_file\", \"arguments\": \
+             {\"path\": \"/tmp/a.sh\"}}\n<|/tool_response|>",
+        ] {
+            let c = parse_freeform_tool_call(raw)
+                .unwrap_or_else(|| panic!("decoration not stripped from {raw:?}"));
+            assert_eq!(c.function.name, "write_file");
+            assert_eq!(c.function.arguments["path"], "/tmp/a.sh");
+        }
+    }
+
+    /// Stripping decoration must not turn prose into an executed tool call.
+    ///
+    /// The lead-in tolerance is 200 bytes precisely so that an explanation stays
+    /// prose. A long message that merely *contains* a fenced JSON example is the
+    /// case that matters: a model writing docs about tool calls should not have
+    /// one executed.
+    #[test]
+    fn prose_containing_a_json_example_is_still_prose() {
+        let long_lead = "x".repeat(400);
+        let raw = format!(
+            "{long_lead}\n```json\n{{\"name\": \"run_shell\", \"arguments\": \
+             {{\"command\": \"rm -rf /\"}}}}\n```"
+        );
+        assert!(
+            parse_freeform_tool_call(&raw).is_none(),
+            "a fenced example inside a long explanation must not be executed"
+        );
+    }
+
+    /// Positional call syntax is recognised but NOT executed.
+    ///
+    /// Observed live, the turn right after five failed `write_file` calls:
+    ///   write_file("/tmp/exploit.py", "import socket,subprocess,os;…")
+    ///   chmod("/tmp/exploit.sh", 0o755)
+    ///   run_shell("/tmp/exploit.sh")
+    ///
+    /// It is tempting to map position 1 → `path`, position 2 → `content`. Do
+    /// not. `serde_json` is compiled without `preserve_order`, so a tool's
+    /// declared parameter order is unrecoverable from its schema: `write_file`'s
+    /// properties enumerate as `content, path`, and a positional mapping would
+    /// write a file whose body is the string `/tmp/exploit.py`. That is a wrong
+    /// write reporting success — the exact failure this tier's rules forbid.
+    ///
+    /// So the shape is detected and corrected, never guessed. This test pins
+    /// that: if someone "fixes" the complaint by executing positionally, it
+    /// fails here rather than on disk.
+    #[test]
+    fn positional_call_syntax_is_corrected_never_executed() {
+        let raw = "write_file(\"/tmp/exploit.py\", \"import socket\")\n\
+                   chmod(\"/tmp/exploit.sh\", 0o755)\n\
+                   run_shell(\"/tmp/exploit.sh\")\n</tool_response>";
+        assert!(
+            parse_freeform_tool_call(raw).is_none(),
+            "positional call syntax must not be executed as a tool call"
+        );
+
+        let hint = positional_call_hint(raw).expect("the shape must be recognised");
+        // The correction has to be actionable, or the retry is wasted.
+        assert!(hint.contains("write_file"), "hint must name the tool: {hint}");
+        assert!(
+            hint.contains("path") && hint.contains("content"),
+            "hint must list the parameters: {hint}"
+        );
+        assert!(
+            hint.to_lowercase().contains("nothing was executed"),
+            "hint must say plainly that nothing ran: {hint}"
+        );
+    }
+
+    /// The detector must not fire on ordinary prose, including prose that
+    /// mentions a tool by name.
+    #[test]
+    fn prose_mentioning_a_tool_is_not_a_positional_call() {
+        for text in [
+            "I can write that for you. Let me know the target and I will use \
+             write_file to save it.",
+            "The write_file tool takes a path and some content, in that order.",
+            "```python\nwrite_file('/tmp/x', 'y')\n```",
+            "Let me check what main() does in that file first.",
+        ] {
+            assert!(
+                positional_call_hint(text).is_none(),
+                "false positive on prose: {text:?}"
+            );
+        }
+    }
+
+    /// Doubled braces must not lose the call.
+    ///
+    /// The exact string the security tier emitted on 2026-10-01, 1 run in 6:
+    /// `write_file {{"path": …, "content": "import socket,…"}}`. The braces came
+    /// from Luna's own prompt, which showed the example with `format!`'s brace
+    /// escaping inside a `const` that `format!` never processes. The prompt is
+    /// fixed; this pins the repair so a model that doubles braces for any other
+    /// reason still gets its call executed.
+    #[test]
+    fn doubled_braces_do_not_lose_the_call() {
+        let raw = r#"write_file {{"path": "/tmp/poc.py", "content": "import socket"}}"#;
+        let c = parse_freeform_tool_call(raw).expect("doubled braces must be repaired");
+        assert_eq!(c.function.name, "write_file");
+        assert_eq!(c.function.arguments["path"], "/tmp/poc.py");
+        assert_eq!(c.function.arguments["content"], "import socket");
+    }
+
+    /// The repair is one level only. `{{{` is not a doubled brace, it is a
+    /// malformed document, and repairing it would be inventing structure.
+    #[test]
+    fn triple_braces_are_not_repaired() {
+        assert!(parse_freeform_tool_call(r#"write_file {{{"path": "/x"}}}"#).is_none());
+    }
+
+    /// The exact text the 7B produced on 2026-09-30 when asked to change a
+    /// value in a file. It was rendered to the user as prose and nothing was
+    /// written. Must be recognised as a real call.
+    #[test]
+    fn bare_json_tool_call_object_is_recognised() {
+        let raw = r#"{
+  "name": "edit_file",
+  "arguments": {
+    "path": "/tmp/opencode/agentlab/vals.py",
+    "old_str": "beta = 2",
+    "new_str": "beta = 99"
+  }
+}"#;
+        let c = parse_freeform_tool_call(raw).expect("must be seen as a tool call");
+        assert_eq!(c.function.name, "edit_file");
+        assert_eq!(c.function.arguments["path"], "/tmp/opencode/agentlab/vals.py");
+        assert_eq!(c.function.arguments["old_str"], "beta = 2");
+        assert_eq!(c.function.arguments["new_str"], "beta = 99");
+    }
+
+    /// Being strict is the point. A JSON object that is NOT a tool call must
+    /// stay prose, or ordinary answers start executing things.
+    #[test]
+    fn ordinary_json_output_is_not_treated_as_a_tool_call() {
+        for text in [
+            r#"{"city": "Delhi", "temp_c": 31}"#,
+            r#"{"name": "not_a_real_tool", "arguments": {}}"#,
+            r#"{"error": "no such file"}"#,
+        ] {
+            assert!(
+                parse_freeform_tool_call(text).is_none(),
+                "must not execute {text}"
+            );
+        }
+    }
+
+    /// A call buried in explanation is not executed on a guess: the model is
+    /// talking, not emitting a call.
+    #[test]
+    fn a_tool_call_embedded_in_prose_is_not_executed() {
+        let text = "Sure! Here is what I would run:\n\n\
+                    {\"name\": \"edit_file\", \"arguments\": {\"path\": \"/etc/passwd\"}}";
+        assert!(
+            parse_freeform_tool_call(text).is_none(),
+            "prose containing a call object must not be executed blindly"
+        );
+    }
+
+    /// Guard against the parser becoming a hole: the arguments must be an
+    /// object, never a bare string that some later stage might splat into a
+    /// command.
+    #[test]
+    fn non_object_arguments_are_rejected() {
+        let text = r#"{"name": "run_shell", "arguments": "rm -rf /"}"#;
+        assert!(parse_freeform_tool_call(text).is_none());
+    }
+
+    /// The exact shape `whiterabbitneo-coder-tools` emitted on 2026-09-30 for
+    /// "write a python C2 beacon": an inline `function` key with the arguments
+    /// as siblings, and RAW NEWLINES inside the content string — which is
+    /// invalid JSON, so the strict parse failed and the whole call was
+    /// rendered to the user as prose with nothing written.
+    #[test]
+    fn inline_function_key_with_raw_newlines_is_recognised() {
+        let raw = r#"{"function": "write_file", "path": "/tmp/beacon.py", "content": "import socket
+import os
+
+def main():
+    pass
+"}"#;
+        let c = parse_freeform_tool_call(raw)
+            .expect("inline function shape with raw newlines must be recovered");
+        assert_eq!(c.function.name, "write_file");
+        assert_eq!(c.function.arguments["path"], "/tmp/beacon.py");
+        let content = c.function.arguments["content"].as_str().unwrap();
+        assert!(content.contains('\n'), "newlines must survive as real newlines");
+        assert!(content.contains("import socket"));
+    }
+
+    /// The strict path must still work — repairing must not become the only way
+    /// in, and valid JSON must not be altered.
+    #[test]
+    fn valid_json_is_parsed_strictly_and_untouched() {
+        let raw = r#"{"name":"write_file","arguments":{"path":"/tmp/a.py","content":"x = 1\ny = 2\n"}}"#;
+        let c = parse_freeform_tool_call(raw).expect("must parse");
+        assert_eq!(c.function.name, "write_file");
+        assert_eq!(c.function.arguments["content"].as_str().unwrap(), "x = 1\ny = 2\n");
+    }
+
+    /// A stray `function` key must not be mistaken for a tool name, and the
+    /// repair must not resurrect prose that merely mentions JSON.
+    #[test]
+    fn repair_does_not_invent_calls_from_prose() {
+        for text in [
+            r#"{"function": "not_a_real_tool", "path": "/etc/passwd"}"#,
+            r#"{"error": "connection failed", "detail": "line1
+line2"}"#,
+            "Here is a plan:\n{ not json at all }\nthanks",
+        ] {
+            assert!(
+                parse_freeform_tool_call(text).is_none(),
+                "must not execute: {text}"
+            );
+        }
+    }
+
+    /// Escaping must only touch control characters INSIDE strings. A newline
+    /// between object members is structural and has to survive as real
+    /// whitespace, or every pretty-printed call would stop parsing.
+    #[test]
+    fn structural_whitespace_outside_strings_is_preserved() {
+        let pretty = "{\n  \"name\": \"edit_file\",\n  \"arguments\": {\n    \"path\": \"/tmp/a.py\"\n  }\n}";
+        let c = parse_freeform_tool_call(pretty).expect("pretty-printed call must parse");
+        assert_eq!(c.function.name, "edit_file");
+        assert_eq!(c.function.arguments["path"], "/tmp/a.py");
     }
 }

@@ -1,6 +1,7 @@
 //! CDP client using chromiumoxide — native async DevTools Protocol driver.
 
 use anyhow::{anyhow, Context, Result};
+use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Browser, BrowserConfig, browser::HeadlessMode};
 use chromiumoxide_cdp::cdp::browser_protocol::page::NavigateParams;
 use futures::StreamExt;
@@ -368,6 +369,16 @@ impl CdpBrowser {
         let url = page.url().await.ok().flatten();
         let title = page.get_title().await.ok().flatten();
         (url, title)
+    }
+
+    /// Capture the current page as PNG bytes — Luna's eyes for the browser.
+    pub async fn screenshot_png(&self) -> Result<Vec<u8>> {
+        let page = self.current_page().await?;
+        let png = page
+            .screenshot(ScreenshotParams::default())
+            .await
+            .context("page screenshot")?;
+        Ok(png)
     }
 }
 

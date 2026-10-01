@@ -6,13 +6,16 @@
 //!   1. Process watchdog — scans /proc for RAM/CPU hogs and fires a
 //!      desktop notification with the exact kill command. Learned
 //!      daily-use processes are silently ignored.
-//!   2. Usage learning — idle non-daily processes become auto-kill
-//!      candidates: user-approved ones get terminated, others earn an
-//!      opt-in suggestion. Stateful apps are always protected.
+//!   2. Usage learning — idle non-daily processes are stopped autonomously
+//!      past `auto_stop_after_mins`, but only after one notify-send announcing
+//!      exactly what is about to stop (longest idle first) and one "done"
+//!      summary. Stateful apps are always protected; allowlisted apps still
+//!      stop earlier at `idle_kill_minutes`, others earn an opt-in suggestion.
 //!   3. Disk hygiene — measures reclaimable space; cleans only safe
 //!      locations and only in "auto" mode.
 
 pub mod cleanup;
+pub mod digest;
 pub mod tracker;
 pub mod watchdog;
 
@@ -23,7 +26,7 @@ use std::time::{Duration, Instant};
 use tracker::Tracker;
 
 /// One scan cycle's view of a process NAME (all pids merged)
-struct NameStats {
+pub(crate) struct NameStats {
     pids: Vec<u32>,
     total_jiffies: u64,
     max_rss_mb: u64,
@@ -163,6 +166,20 @@ pub async fn run(config: LunaConfig) -> Result<()> {
 // ── 6. Orphaned packages (grace-period auto-removal) ─────────────
         if let Err(e) = cleanup::orphans_cycle(&config).await {
             tracing::warn!("Orphaned-package check failed: {}", e);
+        }
+
+        // ── 6b. Daily system-check digest — Luna audits on her own ────────
+        // She looks around once a day and reports one concise state-of-the-
+        // system, on her own initiative (no prompt needed).
+        if config.daemon.system_digest_days > 0
+            && job_due("sys_digest", config.daemon.system_digest_days)
+        {
+            let body = digest::build(&config, &by_name).await;
+            if !body.is_empty() {
+                notify("Luna — system check", &body).await;
+                tracing::info!("System digest:\n{}", body);
+            }
+            job_done("sys_digest");
         }
 
         // ── 7. Monthly shell-history learning ────────────────────────────
@@ -313,6 +330,38 @@ async fn enforce_notif_cap(cap: u32) {
 
 // ── Idle handling ─────────────────────────────────────────────────────────────
 
+/// Idle-process policy (autonomous mode).
+///
+/// Any non-protected, non-important, non-daily-use process idle past
+/// `auto_stop_after_mins` gets stopped on Luna's own — but only after ONE
+/// notify-send announcing exactly what she is about to stop (full list,
+/// longest-idle first, "in order of time"), and a single "done" summary once
+/// the stops have run. Allowlisted processes still stop earlier at
+/// `idle_kill_minutes`. Every stop is fed back to the tracker so a quick
+/// Byte-exact protected-process matcher (the idle-kill short-circuit).
+///
+/// The comparison is deliberately a strict `==` against `/proc/<pid>/comm`:
+/// kernel comm is case-sensitive and NOT lowercased, so a config entry only
+/// protects a process when it byte-matches the comm string exactly. This is
+/// load-bearing — OnlyOffice's comm is `DesktopEditors` (camelCase) and its
+/// helpers are `editors_helper`; a lowercased `desktopeditors` entry does NOT
+/// protect them and they will be idle-killed. Any config for a protected app
+/// must byte-match the kernel comm (see the README Operating Notes).
+fn is_protected(config: &LunaConfig, name: &str) -> bool {
+    config
+        .daemon
+        .protected_processes
+        .iter()
+        .any(|p| p == name)
+}
+
+/// Any non-protected, non-important, non-daily-use process idle past
+/// `auto_stop_after_mins` gets stopped on Luna's own — but only after ONE
+/// notify-send announcing exactly what she is about to stop (full list,
+/// longest-idle first, "in order of time"), and a single "done" summary once
+/// the stops have run. Allowlisted processes still stop earlier at
+/// `idle_kill_minutes`. Every stop is fed back to the tracker so a quick
+/// reopen teaches her that the app matters.
 async fn handle_idle(
     config: &LunaConfig,
     procs: &[watchdog::ProcInfo],
@@ -322,94 +371,168 @@ async fn handle_idle(
     last_suggest: &mut HashMap<String, Instant>,
 ) -> u64 {
     let interval_mins = config.daemon.check_interval_mins.max(1);
-    let mut kills: u64 = 0;
+    let idle_kill = config.daemon.idle_kill_minutes;
+    let suggest_after = config.daemon.suggest_autokill_after_mins;
+    let auto_stop = config.daemon.auto_stop_after_mins;
+    let allowlist = tracker::load_allowlist();
 
-    for (name, stats) in by_name {
-        // Protected stateful apps are untouchable, full stop
-        if config
-            .daemon
-            .protected_processes
-            .iter()
-            .any(|p| p == name)
-        {
-            continue;
-        }
-        // Daily-use apps are doing their job just by existing
-        if tracker
+    fn daily_use(tracker: &Tracker, config: &LunaConfig, name: &str) -> bool {
+        tracker
             .classify_daily_use(name, config.daemon.daily_use_days_per_week, 3)
             .unwrap_or(false)
-        {
-            continue;
-        }
-
-        let idle_mins = tracker.idle_minutes(name, interval_mins);
-        if idle_mins < config.daemon.idle_kill_minutes.min(config.daemon.suggest_autokill_after_mins) {
-            continue;
-        }
-
-        let allowlisted = tracker::load_allowlist().iter().any(|a| a == name);
-
-        if allowlisted && idle_mins >= config.daemon.idle_kill_minutes {
-            // Escalate TERM -> KILL for pids that survived the previous cycle
-            let survivors: Vec<u32> = stats
-                .pids
-                .iter()
-                .filter(|pid| term_killed.contains(pid))
-                .copied()
-                .collect();
-            for pid in &survivors {
-                let _ = sh(&format!("kill -9 {} 2>/dev/null", pid)).await;
-                tracing::info!("SIGKILL idle process '{}' (pid {})", name, pid);
-                kills += 1;
-            }
-
-            // Fresh targets get SIGTERM
-            let targets: Vec<u32> = stats
-                .pids
-                .iter()
-                .filter(|pid| !term_killed.contains(pid))
-                .copied()
-                .collect();
-            for pid in &targets {
-                let _ = sh(&format!("kill -TERM {} 2>/dev/null", pid)).await;
-                tracing::info!("SIGTERM idle process '{}' (pid {})", name, pid);
-                kills += 1;
-            }
-            for pid in &stats.pids {
-                term_killed.insert(*pid);
-            }
-
-            if !targets.is_empty() || !survivors.is_empty() {
-                notify(
-                    "Luna daemon",
-                    &format!(
-                        "Ended idle '{}' ({} min without activity, {} MiB).",
-                        name, idle_mins, stats.max_rss_mb
-                    ),
-                )
-                .await;
-            }
-        } else if !allowlisted && idle_mins >= config.daemon.suggest_autokill_after_mins {
-            // Opt-in suggestion — at most once per day per process
-            let cooled = last_suggest
-                .get(name)
-                .map(|t| t.elapsed() > Duration::from_secs(24 * 3600))
-                .unwrap_or(true);
-            if cooled {
-                notify(
-                    "Luna daemon",
-                    &format!(
-                        "'{}' has been idle {} min ({} MiB).\nSay 'allow auto-kill {}' to let me \
-                         end it automatically when idle.",
-                        name, idle_mins, stats.max_rss_mb, name
-                    ),
-                )
-                .await;
-                last_suggest.insert(name.clone(), Instant::now());
-            }
-        }
-        let _ = procs; // pids come from by_name aggregation
     }
+    // Learned importance (usage intensity, keep markers, reopen-after-stop)
+    // plus the daily-use frequency rule → never targeted by idle policy.
+    fn important(tracker: &Tracker, config: &LunaConfig, name: &str) -> bool {
+        tracker.is_important(name) || daily_use(tracker, config, name)
+    }
+    // Will this name be handled by the autonomous/allowlist kill pass below?
+    let will_kill = |name: &str, idle_mins: u32| {
+        let allowlisted = allowlist.iter().any(|a| a == name);
+        (allowlisted && idle_kill > 0 && idle_mins >= idle_kill)
+            || (auto_stop > 0 && idle_mins >= auto_stop)
+    };
+
+    // ── Suggestion pass — processes not being stopped this cycle still earn
+    // the opt-in suggestion while they idle (at most once per day per name).
+    for (name, stats) in by_name {
+        if is_protected(config, name) || important(tracker, config, name) {
+            continue;
+        }
+        let idle_mins = tracker.idle_minutes(name, interval_mins);
+        if idle_mins < suggest_after || will_kill(name, idle_mins) {
+            continue;
+        }
+        let cooled = last_suggest
+            .get(name)
+            .map(|t| t.elapsed() > Duration::from_secs(24 * 3600))
+            .unwrap_or(true);
+        if cooled {
+            notify(
+                "Luna daemon",
+                &format!(
+                    "'{}' has been idle {} min ({} MiB).\nSay 'allow auto-kill {}' to let me \
+                     end it automatically when idle.",
+                    name, idle_mins, stats.max_rss_mb, name
+                ),
+            )
+            .await;
+            last_suggest.insert(name.clone(), Instant::now());
+        }
+    }
+
+    // ── Kill pass — collect this cycle's targets, announce intent ONCE
+    // (longest idle first), then act, then one done summary.
+    struct Target<'a> {
+        name: &'a str,
+        stats: &'a NameStats,
+        idle_mins: u32,
+    }
+    let mut targets: Vec<Target> = Vec::new();
+    for (name, stats) in by_name {
+        if is_protected(config, name) || important(tracker, config, name) {
+            continue;
+        }
+        let idle_mins = tracker.idle_minutes(name, interval_mins);
+        if !will_kill(name, idle_mins) {
+            continue;
+        }
+        targets.push(Target {
+            name,
+            stats,
+            idle_mins,
+        });
+    }
+    if targets.is_empty() {
+        return 0;
+    }
+
+    // "in order of time" — longest idle first
+    targets.sort_by(|a, b| b.idle_mins.cmp(&a.idle_mins));
+
+    let period = if auto_stop > 0 && auto_stop % 60 == 0 {
+        format!("{}h", auto_stop / 60)
+    } else {
+        format!("{} min", auto_stop.max(1))
+    };
+    let lines: Vec<String> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            format!(
+                "  {}. {} — idle {} ({} MiB)",
+                i + 1,
+                t.name,
+                fmt_idle_mins(t.idle_mins),
+                t.stats.max_rss_mb
+            )
+        })
+        .collect();
+    let names: Vec<&str> = targets.iter().map(|t| t.name).collect();
+
+    // ANNOUNCE BEFORE ACTING — one message listing everything about to stop
+    notify(
+        "Luna — about to act",
+        &format!(
+            "I am about to stop {} unused program(s) idle ≥ {}:\n{}",
+            targets.len(),
+            period,
+            lines.join("\n")
+        ),
+    )
+    .await;
+    tracing::info!(
+        "About to stop {} idle program(s): {}",
+        targets.len(),
+        names.join(", ")
+    );
+
+    // Act: SIGTERM fresh pids; SIGKILL survivors that ignored last cycle
+    let mut kills: u64 = 0;
+    for t in &targets {
+        let survivors: Vec<u32> = t
+            .stats
+            .pids
+            .iter()
+            .filter(|pid| term_killed.contains(pid))
+            .copied()
+            .collect();
+        for pid in &survivors {
+            let _ = sh(&format!("kill -9 {} 2>/dev/null", pid)).await;
+            tracing::info!("SIGKILL idle process '{}' (pid {})", t.name, pid);
+            kills += 1;
+        }
+        let fresh: Vec<u32> = t
+            .stats
+            .pids
+            .iter()
+            .filter(|pid| !term_killed.contains(pid))
+            .copied()
+            .collect();
+        for pid in &fresh {
+            let _ = sh(&format!("kill -TERM {} 2>/dev/null", pid)).await;
+            tracing::info!("SIGTERM idle process '{}' (pid {})", t.name, pid);
+            kills += 1;
+        }
+        for pid in &t.stats.pids {
+            term_killed.insert(*pid);
+        }
+        // Record the stop so a quick reopen teaches "this app matters"
+        tracker.mark_stopped(t.name);
+    }
+
+    // One done summary — replaces the old per-process confirmations
+    notify(
+        "Luna — done",
+        &format!(
+            "Stopped {} unused program(s): {}.",
+            targets.len(),
+            names.join(", ")
+        ),
+    )
+    .await;
+
+    let _ = procs; // pids come from by_name aggregation
     kills
 }
 
@@ -435,6 +558,15 @@ pub(crate) async fn notify(title: &str, body: &str) {
 /// "2h05m" / "47m" / "<1m" for the heartbeat digest
 fn fmt_uptime(d: Duration) -> String {
     let mins = d.as_secs() / 60;
+    if mins >= 60 {
+        format!("{}h{:02}m", mins / 60, mins % 60)
+    } else {
+        format!("{}m", mins.max(1))
+    }
+}
+
+/// "5h24m" / "47m" — idle-time formatter for the announce-before-act list
+fn fmt_idle_mins(mins: u32) -> String {
     if mins >= 60 {
         format!("{}h{:02}m", mins / 60, mins % 60)
     } else {
@@ -498,4 +630,67 @@ fn job_marker_age(name: &str) -> Option<u64> {
 /// Forget a job marker so its window starts fresh.
 fn job_forget(name: &str) {
     let _ = std::fs::remove_file(job_marker_path(name));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_time_formatting() {
+        assert_eq!(fmt_idle_mins(0), "1m");
+        assert_eq!(fmt_idle_mins(45), "45m");
+        assert_eq!(fmt_idle_mins(60), "1h00m");
+        assert_eq!(fmt_idle_mins(125), "2h05m");
+        assert_eq!(fmt_idle_mins(324), "5h24m");
+    }
+
+    // Regression guard: a byte-exact protected comm must NEVER be selected as
+    // an idle-kill target. This is the invariant whose absence let OnlyOffice
+    // (`DesktopEditors` + `editors_helper`) and `micro` get SIGTERM'd: the
+    // matcher is a strict, case-sensitive `==` against /proc/<pid>/comm, and a
+    // lowercased config entry silently fails to protect the real camelCase
+    // process. If a future edit makes the matcher case-insensitive (or the
+    // defaults drop these names), this test fails.
+    #[test]
+    fn protected_comms_are_never_kill_targets() {
+        // Use the SHIPPED defaults so the exact names that bit us are locked in.
+        let config = LunaConfig::default();
+
+        // Every protected default is recognized as protected (byte-exact).
+        for p in &config.daemon.protected_processes {
+            assert!(
+                is_protected(&config, p),
+                "default protected comm {:?} must be recognized as protected",
+                p
+            );
+        }
+
+        // The names that were actually SIGTERM'd must be in the defaults and
+        // must be recognized byte-exactly.
+        for comm in ["DesktopEditors", "editors_helper", "micro"] {
+            assert!(
+                config.daemon.protected_processes.iter().any(|p| p == comm),
+                "default protected_processes must contain byte-exact {:?}",
+                comm
+            );
+            assert!(
+                is_protected(&config, comm),
+                "{:?} must be recognized as protected (byte-exact comm)",
+                comm
+            );
+        }
+
+        // The matcher is case-sensitive: a lowercased comm is NOT the same
+        // process, so it must NOT be treated as protected by the camelCase
+        // entry. (This documents the exact trap; if someone "fixes" the matcher
+        // to be case-insensitive, the assertion below flips and CI catches it.)
+        assert!(
+            !is_protected(&config, "desktopeditors"),
+            "lowercase 'desktopeditors' must not be protected by the camelCase entry"
+        );
+
+        // An unknown process is not protected.
+        assert!(!is_protected(&config, "definitely-not-a-real-process"));
+    }
 }

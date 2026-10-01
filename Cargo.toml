@@ -70,6 +70,16 @@ sha2 = "0.10"       # PKCE S256 code_challenge for Spotify OAuth
 ratatui = "0.30.2"
 crossterm = "0.29.0"
 
+# ── Desktop overlay ("she's listening" indicator) — pure Rust Wayland ─────────
+# wlr-layer-shell overlay surface + manual shared-memory buffers + software
+# text so the listening/thinking indicator is drawn by Luna herself with no
+# extra window, no compositor hacks, and no Python.
+wayland-client = "0.31"
+wayland-protocols = "0.32"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+memmap2 = "0.9"
+fontdue = "0.9"
+
 
 # ── Build profiles ────────────────────────────────────────────────────────────
 [profile.dev]

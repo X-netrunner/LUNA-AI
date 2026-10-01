@@ -6,10 +6,15 @@
 //!   daily-use  — seen on enough of the last 7 days that the user clearly
 //!                relies on them. These are dynamically excluded from
 //!                watchdog notifications (Luna "learns to ignore" them).
+//!   important  — learned self-signals, no config: heavy active use (hours
+//!                of real work even on irregular days), "never kill" pushback,
+//!                or the app being reopened shortly after Luna stopped it.
+//!                Important processes are never auto-stopped or suggested.
 //!   idle       — running but consuming no CPU across scan cycles.
-//!                Allowlisted idle processes are auto-terminated after
-//!                `idle_kill_minutes`; everything else only earns an
-//!                opt-in suggestion notification.
+//!                Idle processes past `auto_stop_after_mins` are stopped
+//!                autonomously (announcing intent first); allowlisted ones
+//!                stop earlier at `idle_kill_minutes`; everything else only
+//!                earns an opt-in suggestion notification.
 //!
 //! State persists in ~/.local/share/luna/process_stats.json so learning
 //! survives reboots. The auto-kill allowlist is a separate plain-text
@@ -34,6 +39,25 @@ pub struct ProcessStats {
     /// Lifetime observed CPU jiffies
     #[serde(default)]
     pub total_jiffies: u64,
+    // ── Importance learning (usage intensity + feedback signals) ──
+    /// Total scan cycles this process was observed alive
+    #[serde(default)]
+    pub observed_cycles: u64,
+    /// Scan cycles where the process actually consumed CPU
+    #[serde(default)]
+    pub active_cycles: u64,
+    /// Epoch of the most recent cycle that consumed CPU (recency weighting)
+    #[serde(default)]
+    pub last_active_epoch: u64,
+    /// "Never auto-stop this" — learned (reopen) or explicit (user pushback)
+    #[serde(default)]
+    pub keep: bool,
+    /// Epoch when the daemon last stopped this process (0 = never)
+    #[serde(default)]
+    pub stopped_at: u64,
+    /// App was reopened shortly after being stopped → clearly matters
+    #[serde(default)]
+    pub reopen_after_stop: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -52,6 +76,20 @@ fn data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("luna")
 }
+
+// ── Importance-learning thresholds ────────────────────────────────────────────
+
+/// "Intensive" use: actively worked in across this many scan cycles (≈ hours
+/// of real work at typical scan intervals) counts as important by intensity.
+pub const INTENSIVE_ACTIVE_CYCLES: u64 = 8;
+/// Intensity alone only protects apps used on at least this many distinct days.
+const INTENSIVE_MIN_DAYS: usize = 2;
+/// An intensively-used app stays important while last used within this window
+/// (stops protecting apps abandoned weeks ago).
+const RECENCY_WINDOW_SECS: u64 = 21 * 86400;
+/// Bringing an app back within this window after Luna stopped it teaches
+/// "this one matters".
+const REOPEN_WINDOW_SECS: u64 = 36 * 3600;
 
 impl Tracker {
     pub fn load() -> Self {
@@ -79,6 +117,8 @@ impl Tracker {
             entry.first_seen_epoch = ts;
         }
 
+        entry.observed_cycles = entry.observed_cycles.saturating_add(1);
+
         // Did this process do any work since we last looked?
         let advanced = jiffies_now > entry.total_jiffies;
         entry.last_seen_epoch = ts;
@@ -96,6 +136,22 @@ impl Tracker {
 
         if advanced {
             entry.idle_cycles = 0;
+            entry.active_cycles = entry.active_cycles.saturating_add(1);
+            entry.last_active_epoch = ts;
+            // Reopen-after-stop: the user brought this app back shortly after
+            // Luna stopped it — that means it matters to them. Learn it.
+            let since_stopped = ts.saturating_sub(entry.stopped_at);
+            if entry.stopped_at > 0 && since_stopped < REOPEN_WINDOW_SECS {
+                if !entry.keep {
+                    tracing::info!(
+                        "Learned '{}' is important: reopened {}s after being stopped",
+                        name,
+                        since_stopped
+                    );
+                }
+                entry.keep = true;
+                entry.reopen_after_stop = true;
+            }
         } else {
             entry.idle_cycles = entry.idle_cycles.saturating_add(1);
         }
@@ -120,6 +176,44 @@ impl Tracker {
             .filter(|d| d.as_str() > week_ago.as_str())
             .count() as u32;
         Some(seen_last_week >= days_per_week)
+    }
+
+    /// Is this process "important" to the user — learned, not configured?
+    ///
+    /// True when any of these hold:
+    ///   - a keep marker was set: user pushback ("never kill X") or the
+    ///     reopen-after-stop signal learned via `observe`
+    ///   - it has been intensively used: heavy active-CPU time (`active_cycles`)
+    ///     spread across several days and used within the last 3 weeks — this
+    ///     covers irregular-but-heavy apps that fail the "5 days/week" test
+    pub fn is_important(&self, name: &str) -> bool {
+        let Some(s) = self.data.processes.get(name) else {
+            return false;
+        };
+        if s.keep {
+            return true;
+        }
+        let ts = now_epoch();
+        s.days_seen.len() >= INTENSIVE_MIN_DAYS
+            && s.active_cycles >= INTENSIVE_ACTIVE_CYCLES
+            && s.last_active_epoch > 0
+            && ts.saturating_sub(s.last_active_epoch) < RECENCY_WINDOW_SECS
+    }
+
+    /// Persist a keep marker (daemon: reopen learning; tool: user said
+    /// "never kill X"). Important processes are never auto-stopped.
+    pub fn mark_keep(&mut self, name: &str) {
+        let entry = self.data.processes.entry(name.to_string()).or_default();
+        entry.keep = true;
+        self.dirty = true;
+    }
+
+    /// Record that the daemon stopped this process — feeds reopen-after-stop
+    /// learning when the user brings it back while `stopped_at` is fresh.
+    pub fn mark_stopped(&mut self, name: &str) {
+        let entry = self.data.processes.entry(name.to_string()).or_default();
+        entry.stopped_at = now_epoch();
+        self.dirty = true;
     }
 
     /// How many consecutive minutes has this process been idle?
@@ -205,9 +299,100 @@ fn write_allowlist(list: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Persist a keep marker for `name` — called by the `deny_autokill` tool when
+/// the user says "never kill X", so the learning survives daemon restarts.
+pub fn persist_keep(name: &str) -> Result<()> {
+    let mut t = Tracker::load();
+    t.mark_keep(name);
+    t.save_if_dirty();
+    Ok(())
+}
+
 fn now_epoch() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh() -> Tracker {
+        Tracker {
+            path: PathBuf::from("/tmp/luna-tracker-importance-test.json"),
+            data: TrackerData::default(),
+            dirty: false,
+        }
+    }
+
+    #[test]
+    fn old_stats_json_without_importance_fields_still_parses() {
+        let old = r#"{"processes":{"spotify":{"first_seen_epoch":1,"last_seen_epoch":2,"days_seen":["2026-09-01"],"idle_cycles":3,"total_jiffies":99}}}"#;
+        let data: TrackerData = serde_json::from_str(old).unwrap();
+        let s = &data.processes["spotify"];
+        assert_eq!(s.observed_cycles, 0);
+        assert_eq!(s.active_cycles, 0);
+        assert_eq!(s.keep, false);
+    }
+
+    #[test]
+    fn keep_marker_makes_important_forever() {
+        let mut t = fresh();
+        t.observe("app", 1000); // one active observation, <2 days seen
+        assert!(!t.is_important("app"));
+        t.mark_keep("app");
+        assert!(t.is_important("app"));
+    }
+
+    #[test]
+    fn intensive_usage_protects_irregular_apps() {
+        let mut t = fresh();
+        // 10 active observations spread over 2 distinct days
+        for i in 0..10u64 {
+            t.observe("thesis-app", 1000 + i * 10);
+        }
+        // force a second day marker
+        let s = t.data.processes.get_mut("thesis-app").unwrap();
+        s.days_seen.push("2099-01-01".to_string());
+        assert!(t.is_important("thesis-app"));
+    }
+
+    #[test]
+    fn reopen_after_stop_teaches_keep() {
+        let mut t = fresh();
+        t.observe("chat-app", 500);
+        t.mark_stopped("chat-app");
+        // user reopens it right away and it does work again
+        assert!(t.observe("chat-app", 600));
+        let s = t.data.processes.get("chat-app").unwrap();
+        assert!(s.keep);
+        assert!(s.reopen_after_stop);
+        assert!(t.is_important("chat-app"));
+    }
+
+    #[test]
+    fn idle_usage_never_counts_as_intensive() {
+        let mut t = fresh();
+        t.observe("idle-runner", 42); // first look only establishes the baseline
+        for _ in 0..12 {
+            t.observe("idle-runner", 42); // jiffies never advance again
+        }
+        let s = t.data.processes.get("idle-runner").unwrap();
+        assert_eq!(s.active_cycles, 1); // just the baseline look
+        assert!(!t.is_important("idle-runner"));
+    }
+
+    #[test]
+    fn stopped_app_reopened_after_window_is_not_learned() {
+        let mut t = fresh();
+        t.observe("spotify", 500);
+        t.mark_stopped("spotify");
+        let s = t.data.processes.get_mut("spotify").unwrap();
+        s.stopped_at = now_epoch() - (REOPEN_WINDOW_SECS + 1); // stale stop
+        t.observe("spotify", 600);
+        let s = t.data.processes.get("spotify").unwrap();
+        assert!(!s.keep);
+    }
 }

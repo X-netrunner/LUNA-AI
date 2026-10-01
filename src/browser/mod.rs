@@ -77,6 +77,21 @@ pub async fn run(task: &str, config: &LunaConfig) -> Result<String> {
     ))
 }
 
+/// Screenshot the automation Chromium's current page as PNG bytes — Luna's
+/// browser eyes. Reuses/launches the same instance as `run`, and leaves it
+/// open afterward.
+pub async fn current_page_png(config: &LunaConfig) -> Result<Vec<u8>> {
+    let browser = cdp::ensure_browser(&config.browser)
+        .await
+        .context("ensure chromium for eyes")?;
+    let png = browser
+        .screenshot_png()
+        .await
+        .context("capture current page")?;
+    browser.detach();
+    Ok(png)
+}
+
 // Re-export for tests and internal use
 pub use planner::Step;
 

@@ -1,7 +1,7 @@
 //! Plan executor — runs steps in the browser, handles retries and re-planning.
 
 use anyhow::{Context, Result};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -11,7 +11,7 @@ const MAX_RETRIES: u32 = 3;
 const STEP_TIMEOUT_SECS: u64 = 30;
 
 /// Execute a single step in the browser.
-async fn execute_step(browser: &CdpBrowser, step: &Step, step_index: u64) -> Result<ActionResult> {
+async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step: &Step, step_index: u64) -> Result<ActionResult> {
     let action_name = step.action.clone();
 
     match step.action.as_str() {
@@ -79,6 +79,59 @@ async fn execute_step(browser: &CdpBrowser, step: &Step, step_index: u64) -> Res
             let url = format!("https://duckduckgo.com/?q={}", percent_encode(query));
             browser.navigate(&url).await?;
             Ok(ActionResult::ok(action_name, step_index, 1))
+        }
+        "fillform" => {
+            let _instructions = step.target.as_deref().unwrap_or("use sensible sample values");
+            // 1. Extract form schema
+            let schema = browser.eval(dom::dom_form_schema_expr()).await?;
+            let fields = schema.get("fields").cloned().unwrap_or(json!([]));
+            // 2. Ask planner LLM for values
+            let values = planner.form_values(goal, &fields).await?;
+            // 3. Fill the form
+            let fill_expr = dom::dom_form_fill_expr(&serde_json::to_string(&values)?);
+            let result = browser.eval(&fill_expr).await?;
+            if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                let filled = result.get("filled").cloned().unwrap_or(json!([]));
+                let note = format!("filled {} field(s): {}", filled.as_array().map(|a| a.len()).unwrap_or(0),
+                    serde_json::to_string(&filled).unwrap_or_default());
+                Ok(ActionResult::ok_note(action_name, step_index, 1, note))
+            } else {
+                Ok(dom::result_from(result, action_name, step_index, 1))
+            }
+        }
+        "pick_best" => {
+            let result = browser.eval(dom::dom_pick_best_expr()).await?;
+            if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                let clicked = result.get("clicked").cloned().unwrap_or(json!({}));
+                let note = format!("clicked best product: {}", serde_json::to_string(&clicked).unwrap_or_default());
+                Ok(ActionResult::ok_note(action_name, step_index, 1, note))
+            } else {
+                Ok(dom::result_from(result, action_name, step_index, 1))
+            }
+        }
+        "wait" | "pause" => {
+            let ms = step.value.as_deref().and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| step.target.as_deref().and_then(|s| s.parse::<u64>().ok()))
+                .unwrap_or(2000);
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            Ok(ActionResult::ok(action_name, step_index, 1))
+        }
+        "extract" | "read" => {
+            let target = step.target.as_deref().unwrap_or("body");
+            let expr = dom::dom_extract_text_expr(target);
+            let result = browser.eval(&expr).await?;
+            if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                let text = result.get("text").and_then(Value::as_str).unwrap_or("");
+                let note = format!("extracted text: {}", text);
+                Ok(ActionResult::ok_note(action_name, step_index, 1, note))
+            } else {
+                Ok(dom::result_from(result, action_name, step_index, 1))
+            }
+        }
+        "back" => {
+            let result = browser.eval("(() => { window.history.back(); return { ok: true }; })()").await?;
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            Ok(dom::result_from(result, action_name, step_index, 1))
         }
         other => Ok(ActionResult::fail(action_name, step_index, 1, format!("unsupported action '{other}'"))),
     }
@@ -173,7 +226,7 @@ pub async fn execute_plan(
         let step = steps[current_step].clone();
 
         // Execute with timeout
-        let result = timeout(Duration::from_secs(STEP_TIMEOUT_SECS), execute_step(browser, &step, current_step as u64))
+        let result = timeout(Duration::from_secs(STEP_TIMEOUT_SECS), execute_step(browser, planner, goal, &step, current_step as u64))
             .await
             .context("step timed out")??;
 
@@ -227,10 +280,16 @@ fn describe_step(step: &Step, result: &ActionResult) -> String {
         "press" => format!("press {}", step.target.as_deref().unwrap_or("Enter")),
         "scroll" => format!("scroll {}", step.target.as_deref().unwrap_or("down")),
         "search" => format!("search for \"{}\"", step.target.as_deref().unwrap_or("")),
+        "fillform" => format!("fill form ({})", step.target.as_deref().unwrap_or("auto")),
+        "pick_best" => "pick best product".to_string(),
         other => other.to_string(),
     };
     if result.success {
-        format!("  ✔ {base}")
+        if let Some(note) = &result.note {
+            format!("  ✔ {base} — {note}")
+        } else {
+            format!("  ✔ {base}")
+        }
     } else {
         format!(
             "  ✘ {base} — {}",

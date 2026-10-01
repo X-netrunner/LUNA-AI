@@ -56,7 +56,152 @@ pub struct LunaConfig {
 
     #[serde(default)]
     pub desktop: DesktopConfig,
+
+    #[serde(default)]
+    pub vision: VisionConfig,
+
+    #[serde(default)]
+    pub wake: WakeConfig,
+
+    #[serde(default)]
+    pub selfpatch: SelfPatchConfig,
+
+    #[serde(default)]
+    pub updates: UpdatesConfig,
+
+    #[serde(default)]
+    pub external: ExternalActionConfig,
 }
+
+// ── Gate on actions that leave this machine ───────────────────────────────────
+//
+// The incident that motivated this: asked to fix a log-rotation bug, Luna
+// proposed a patch, got an error, and then wandered off and closed three of the
+// user's real Todoist tasks — unprompted, mid-task, with no human in the loop.
+// The tasks were only recoverable by hand, via an endpoint the tool didn't
+// expose.
+//
+// The lesson is not "she got confused". It is that the tools which act on the
+// world had no gate at all, so a derailment became real damage. Reading and
+// searching stay open — the useful half of every one of these tools is
+// read-only. What is gated is the half that sends, closes, posts, or clicks.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ExternalActionConfig {
+    /// HUMAN GATE. While false, every tool in `gated_tools` refuses. The model
+    /// cannot open this: there is no argument that sets it, and the flag is not
+    /// in any tool schema. Only a human editing luna.toml can.
+    pub allow_external_actions: bool,
+    /// Tools refused while the gate is closed. Read-only counterparts (e.g.
+    /// `todoist_list` vs `todoist_complete`) are deliberately absent.
+    pub gated_tools: Vec<String>,
+}
+
+impl Default for ExternalActionConfig {
+    fn default() -> Self {
+        Self {
+            allow_external_actions: false,
+            gated_tools: vec![
+                // Sends a real message to a real person. Irreversible.
+                "whatsapp_send".into(),
+                // Destroys task state. Demonstrated harm: 3 real tasks closed.
+                "todoist_complete".into(),
+                // Writes into the user's real task list. Demonstrated harm: a
+                // "list my todos, read only" request produced two duplicate
+                // "Buy this for her" tasks, because the model was only half
+                // obeying. Same failure shape as todoist_complete, so it gets
+                // the same gate — reading still works via todoist_list.
+                "todoist_add".into(),
+                // Can type, click, submit, and purchase on the web/desktop.
+                "browser_do".into(),
+                "desktop_do".into(),
+                // Rewrites firewall/sysctl/audit posture on a live machine.
+                "sysmode".into(),
+                // Acts on the user's Spotify account.
+                "spotify".into(),
+                // Writes into her own skill/memory store, which changes how she
+                // behaves in later sessions without review.
+                "create_skill".into(),
+                "forget_skill".into(),
+            ],
+        }
+    }
+}
+
+impl ExternalActionConfig {
+    pub fn is_gated(&self, tool: &str) -> bool {
+        self.gated_tools.iter().any(|t| t == tool)
+    }
+
+    /// Read-only tools that could serve the same need as a refused one, so the
+    /// refusal can offer a way forward instead of a dead end. Matched on a
+    /// shared word stem (`todoist_complete` -> `todoist_list`), because that is
+    /// how the tool families are actually named.
+    pub fn read_only_alternatives(&self, tool: &str) -> Vec<&'static str> {
+        let stem: Vec<&str> = tool.split('_').collect();
+        let mut out: Vec<&'static str> = READ_ONLY_TOOLS
+            .iter()
+            .copied()
+            .filter(|cand| {
+                cand.split('_').any(|w| w.len() > 2 && stem.contains(&w))
+            })
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+/// Tools that are explicitly safe to leave open: they only read, compute, or
+/// affect Luna's own local state — nothing leaves the machine and nothing the
+/// user owns is destroyed.
+///
+/// This list exists to make the *other* list trustworthy. The first version of
+/// the gate was a hand-written denylist, and it was wrong within minutes: a
+/// "list my todos, read only" request created two real tasks because
+/// `todoist_add` had been overlooked. Enumerating dangerous tools from memory
+/// does not scale, so every tool must now appear in exactly one of the two
+/// lists, and a test fails the build if a new tool is added to neither.
+pub const READ_ONLY_TOOLS: &[&str] = &[
+    "read_file",
+    "find_file",
+    "write_file",   // local files only; her own source is blocked separately
+    "edit_file",    // ditto — opens a visible editor, i.e. user-mediated
+    "run_shell",    // see README: this is the known escape hatch, by design
+    "web_search",
+    "fetch_page",
+    "dns_lookup",
+    "hash_file",
+    "nmap_scan",
+    "analyze_pcap",
+    "decode_payload",
+    "process_stats",
+    "system_info",
+    "index_system",
+    "learn_topic",
+    "search_history",
+    "memory_report",
+    "remember",
+    "forget",
+    "list_memories",
+    "use_skill",
+    "list_skills",
+    "set_debug",
+    "run_safety_check",
+    "backup",
+    "notify",
+    "media_info",
+    "see",
+    "clipboard",
+    "set_reminder",
+    "list_reminders",
+    "cancel_reminder",
+    "allow_autokill",
+    "deny_autokill",
+    "todoist_list",
+    "self_patch", // read actions only; `apply` has its own separate gate
+    "system_update", // `check` only; `apply` has its own separate gate
+];
 
 // ── Agent behaviour ───────────────────────────────────────────────────────────
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -87,14 +232,14 @@ impl Default for AgentConfig {
                             and short factual questions, while a full 7B model handles \
                             everything else including tool use. When asked about your \
                             capabilities or speed, be honest about this. \
-                            FILE INSPECTION RULE: To find and read a file, always use \
-                            run_shell with: cat $(find /path -name filename 2>/dev/null | head -1) \
-                            Never use edit_file to inspect code — edit_file is for opening \
-                            files in a GUI editor for the USER to edit, not for Luna to read. \
-                            Use read_file when you know the exact path. Use run_shell with \
-                            find+cat when you need to locate and read in one step. \
-                            After reading code, diagnose the error yourself and fix it \
-                            with write_file — never ask the user to fix it. \
+                            FILE INSPECTION & CREATION RULE: To find and read a file, use \
+                            read_file or run_shell. To write or create a new code file, use \
+                            write_file(path, content). To edit existing code in a file, use \
+                            edit_file(path, old_str, new_str) to replace target code snippets, \
+                            or edit_file(path, content) to update the file content. \
+                            Never use edit_file without edit parameters just to inspect code. \
+                            After reading code, diagnose errors yourself and apply fixes \
+                            with edit_file or write_file — never ask the user to fix it. \
                             SOURCE VALIDATION RULE: When asked to verify if a website is \
                             legitimate or a scam, ALWAYS search Reddit for user experiences. \
                             Use web_search with queries like 'site:reddit.com [site name] \
@@ -128,9 +273,92 @@ pub struct LlmConfig {
     /// Optional large model for complex reasoning / code (e.g. qwen3:8b).
     /// Queries needing deep thought are routed here instead of `model`.
     pub deep_model: Option<String>,
+    /// Model for offensive-security work on the user's own systems — exploit and
+    /// PoC authoring, reverse shells, wireless testing, lab attack tooling.
+    ///
+    /// This exists because the general models refuse that work outright, and the
+    /// refusal is in the weights rather than the prompt: measured 2026-09-30,
+    /// qwen2.5:7b-instruct and qwen2.5-coder:14b refused 10/10 across framings
+    /// that included stripping every one of Luna's rules. A model trained not
+    /// to refuse is the only thing that fixes it.
+    ///
+    /// Must be a model that actually supports tool calls. A completion-only
+    /// model here would answer security questions while being unable to run a
+    /// single tool — Luna would describe scans it never performed. Verify with
+    /// `ollama show <model> | grep -A2 Capabilities` before setting this.
+    pub security_model: Option<String>,
+    /// Context window for `security_model`.
+    ///
+    /// Separate from `num_ctx` because the security tier is an 8B-class model
+    /// on a 6 GB card: the full 16k context does not fit alongside the weights
+    /// in VRAM, and the difference between 8k and 16k is several GB of KV cache.
+    #[serde(default = "default_security_num_ctx")]
+    pub security_num_ctx: u32,
+    /// Drop the authorisation-scope clause from the security tier's prompt.
+///
+/// Default false, which keeps the tier scoped to the user's own systems. Set
+/// true to remove the authorisation test entirely — the model then writes
+/// exploit tooling without evaluating who owns the target.
+///
+/// This is a real capability change, not a wording preference, so it is a flag
+/// rather than a line buried in the prompt: `security_react` drives
+/// `run_shell` (which has the sudo password), unrestricted `write_file`, and
+/// `allow_external_actions` includes outbound network actions. Scoping is the
+/// only thing limiting a prompt-injected instruction from reaching those.
+///
+/// Exists partly as an experiment. Hypothesis under test 2026-10-01: the model
+/// refuses some requests by *reasoning about authorisation*, and removing the
+/// clause removes the refusal. Measured by flipping this key and re-running the
+/// same prompts — see the note on `build_security_prompt`.
+#[serde(default)]
+pub security_unrestricted: bool,
+    /// Where the security tier should write generated scripts.
+    ///
+    /// Set because the model was choosing paths itself, and `/tmp` is the wrong
+    /// answer for anything the user wants to keep: the 2026-10-01 run wrote a
+    /// reverse shell to `/tmp/reverse_shell.sh` and four more beside it, and
+    /// `/tmp` is gone on reboot. An explicit default under Documents means the
+    /// output lands somewhere that survives and is easy to find.
+    ///
+    /// The path is injected into the tier's prompt, so it is honoured as a
+    /// default rather than a rule — a request for a specific path still wins.
+    /// `~` is expanded at load time. Empty or unset falls back to
+    /// [`default_security_scripts_dir`].
+    #[serde(default = "default_security_scripts_dir")]
+    pub security_scripts_dir: String,
     /// Local embedding model used for semantic memory recall (RAG-lite).
     /// Pull once with: ollama pull nomic-embed-text
     pub embedding_model: String,
+    /// Ollama context window. Must comfortably exceed the system prompt plus
+    /// the full tool schema (~8k tokens), or Ollama silently context-shifts
+    /// and Luna loses the file she just read. Lower it only for the small
+    /// `fast_model`, which never sees the tool schema.
+    #[serde(default = "default_num_ctx")]
+    pub num_ctx: u32,
+}
+
+fn default_num_ctx() -> u32 {
+    16384
+}
+
+fn default_security_num_ctx() -> u32 {
+    8192
+}
+
+/// Default home for security-tier scripts: `~/Documents/luna-scripts`.
+///
+/// `XDG_DOCUMENTS_DIR` is honoured when set, because on Arch the user may well
+/// have moved Documents (a symlink into another partition is common) and a
+/// hard-coded path would then write somewhere the user does not look.
+pub fn default_security_scripts_dir() -> String {
+    if let Ok(docs) = std::env::var("XDG_DOCUMENTS_DIR") {
+        let docs = docs.trim();
+        if !docs.is_empty() {
+            return format!("{}/luna-scripts", docs.trim_end_matches('/'));
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/netrunner".to_string());
+    format!("{}/Documents/luna-scripts", home.trim_end_matches('/'))
 }
 
 impl Default for LlmConfig {
@@ -143,7 +371,12 @@ impl Default for LlmConfig {
             enable_thinking: true,
             fast_model: None,
             deep_model: None,
+            security_model: None,
+            security_num_ctx: default_security_num_ctx(),
+            security_unrestricted: false,
+            security_scripts_dir: default_security_scripts_dir(),
             embedding_model: "nomic-embed-text".into(),
+            num_ctx: default_num_ctx(),
         }
     }
 }
@@ -159,13 +392,16 @@ pub enum VoiceMode {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct VoiceConfig {
     pub mode: VoiceMode,
     pub piper_bin: PathBuf,
     pub piper_model: PathBuf,
     #[serde(default = "default_whisper_model")]
     pub whisper_model: PathBuf,
+    #[serde(default = "default_rvc_model")]
     pub rvc_model: Option<PathBuf>,
+    #[serde(default = "default_rvc_script")]
     pub rvc_script: Option<PathBuf>,
 }
 
@@ -173,6 +409,16 @@ fn default_whisper_model() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/root"))
         .join(".local/share/luna/models/ggml-small.en.bin")
+}
+
+fn default_rvc_model() -> Option<PathBuf> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+    Some(home.join(".local/share/luna/voices/Jinx.pth"))
+}
+
+fn default_rvc_script() -> Option<PathBuf> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+    Some(home.join(".local/share/luna/scripts/rvc_infer.py"))
 }
 
 impl Default for VoiceConfig {
@@ -183,8 +429,8 @@ impl Default for VoiceConfig {
             piper_bin: PathBuf::from("/usr/bin/piper"),
             piper_model: home.join(".local/share/luna/voices/basic.onnx"),
             whisper_model: default_whisper_model(),
-            rvc_model: None,
-            rvc_script: None,
+            rvc_model: default_rvc_model(),
+            rvc_script: default_rvc_script(),
         }
     }
 }
@@ -241,6 +487,39 @@ impl Default for AudioConfig {
             conversation_timeout_mins: 5,
             conversation_window_secs: 15,
             voice_mode_idle_mins: 5,
+        }
+    }
+}
+
+// ── Wake-word daemon settings ─────────────────────────────────────────────────
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct WakeConfig {
+    /// Run `luna --wake-daemon` (systemd: luna-wake.service). When false the
+    /// daemon exits immediately.
+    pub enabled: bool,
+    /// How to start Luna on "hey luna":
+    ///   * "headless" — in-process voice session, no windows (final product)
+    ///   * "tui"      — spawn a terminal running the full TUI (debugging)
+    pub launch_mode: String,
+    /// Terminal emulator to launch for launch_mode = "tui". Empty = auto-detect
+    /// (ghostty, kitty, alacritty, foot, konsole, in that order).
+    pub terminal_cmd: String,
+    /// Draw the "she's listening" animation on the desktop (Wayland only).
+    pub overlay_enabled: bool,
+    /// Debounce between activations (seconds) — leftover audio must not
+    /// instantly re-trigger after a session ends.
+    pub min_interval_secs: u64,
+}
+
+impl Default for WakeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            launch_mode: "headless".into(),
+            terminal_cmd: String::new(),
+            overlay_enabled: true,
+            min_interval_secs: 15,
         }
     }
 }
@@ -403,8 +682,17 @@ pub struct DaemonConfig {
     pub daily_use_days_per_week: u32,
     /// Allowlisted processes get SIGTERM after being idle this many minutes
     pub idle_kill_minutes: u32,
+    /// Daily "Luna — system check" self-audit: disk, reclaimable space,
+    /// updates, orphans, backup status and RAM hogs, on her own initiative.
+    /// 0 = off.
+    pub system_digest_days: u32,
     /// Non-allowlisted processes idle longer than this trigger an opt-in suggestion
     pub suggest_autokill_after_mins: u32,
+    /// Autonomous idle stop: any non-protected, non-daily-use process idle
+    /// this long gets stopped on Luna's own, announcing intent first via
+    /// notify-send (full list, longest idle first), then one "done" summary.
+    /// 0 = never stop autonomously (legacy opt-in-only behavior).
+    pub auto_stop_after_mins: u32,
     /// Stateful apps never auto-killed even when allowlisted
     #[serde(default)]
     pub protected_processes: Vec<String>,
@@ -465,6 +753,8 @@ impl Default for DaemonConfig {
             daily_use_days_per_week: 5,
             idle_kill_minutes: 30,
             suggest_autokill_after_mins: 45,
+            auto_stop_after_mins: 120,
+            system_digest_days: 1,
             protected_processes: [
                 // GUI apps that hold unsaved user state — NEVER auto-killed
                 "firefox",
@@ -476,6 +766,7 @@ impl Default for DaemonConfig {
                 "alacritty",
                 "konsole",
                 "foot",
+                "ghostty",
                 "obs",
                 "gimp",
                 "krita",
@@ -486,6 +777,15 @@ impl Default for DaemonConfig {
                 "discord",
                 "telegram-desktop",
                 "slack",
+                // OnlyOffice — byte-exact /proc/<pid>/comm names (camelCase matters)
+                "DesktopEditors",
+                "editors_helper",
+                // terminal editors that hold unsaved buffers
+                "micro",
+                "helix",
+                "hx",
+                "nvim",
+                "vim",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -539,6 +839,83 @@ impl Default for SysmodeConfig {
         Self {
             enabled: true,
             bin: "sysmode".into(),
+        }
+    }
+}
+
+// ── Guarded package updates ───────────────────────────────────────────────────
+// The apply gate is a HUMAN decision, not a model decision.
+//
+// Observed in the wild: asked only to "check" for updates, Luna checked, saw
+// that 6 of 33 pending updates were breaking (systemd 261 -> 262), and then
+// four seconds later called apply with confirm_breaking=true — unprompted, with
+// no human in the loop. Nothing in the tool stopped her: the confirmation flag
+// was a plain model-settable argument, so "the user approved" was just
+// something the model asserted about itself.
+//
+// So the flag is gone from the tool schema entirely, and applying now requires
+// this config switch, which only a human editing the file can flip.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct UpdatesConfig {
+    /// Whether the system_update tool is offered at all.
+    pub enabled: bool,
+    /// HUMAN GATE. While false, `action=apply` always refuses — the model
+    /// cannot install packages no matter what arguments it invents. Flip this
+    /// to true yourself, in this file, when you actually want an upgrade to
+    /// happen. Then put it back.
+    pub allow_apply: bool,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self { enabled: true, allow_apply: false }
+    }
+}
+
+// ── Gated self-modification ───────────────────────────────────────────────────
+// Luna can propose changes to her own source, but nothing reaches the real tree
+// until the change passes `cargo test` against a scratch copy AND the user
+// approves. The protected list is the safety/identity core: the files that
+// define her constitution, her routing, and the guards that keep her in bounds.
+// She may improve everything else; she may not edit her own rules.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SelfPatchConfig {
+    /// Master switch. When false the self_patch tool refuses to do anything.
+    pub enabled: bool,
+    /// Root of her own source tree.
+    pub source_dir: String,
+    /// Whether a *validated* proposal may actually be installed. Set false for
+    /// a read-only "she may propose but never apply" posture.
+    pub allow_apply: bool,
+    /// Files/directories self-modification may never touch.
+    pub protected_files: Vec<String>,
+}
+
+impl Default for SelfPatchConfig {
+    fn default() -> Self {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/netrunner".into());
+        Self {
+            enabled: true,
+            source_dir: format!("{home}/Projects/luna-stable"),
+            allow_apply: true,
+            protected_files: [
+                // Her constitution and identity, config parsing, dependencies.
+                "src/config.rs",
+                "Cargo.toml",
+                "Cargo.lock",
+                // Her guardrails: model routing + the freeform tool-call parser.
+                "src/llm/escalation.rs",
+                "src/llm/react.rs",
+                // The self-modification gate and the other gated/dangerous tools.
+                "src/tools/selfpatch.rs",
+                "src/tools/safety.rs",
+                "src/tools/pkgupdate.rs",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         }
     }
 }
@@ -618,6 +995,32 @@ impl Default for DesktopConfig {
     }
 }
 
+// ── Vision ("eyes") ───────────────────────────────────────────────────────────
+// Pure-Rust eyes: screenshots (grim for the desktop, CDP for the browser) are
+// described by a small local VLM served by the same Ollama the planner uses.
+// No Python, no external server. The model is loaded on demand and swaps with
+// the planner in VRAM; use a small model (qwen2.5vl:3b) so it fits the 6GB card.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct VisionConfig {
+    /// Whether the see tool is available at all
+    pub enabled: bool,
+    /// Ollama vision model used to describe screenshots
+    pub model: String,
+    /// Screenshot tool for the desktop (grim on Wayland, import on X11, ...)
+    pub screenshot_cmd: String,
+}
+
+impl Default for VisionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "qwen2.5vl:3b".into(),
+            screenshot_cmd: "grim".into(),
+        }
+    }
+}
+
 // ── Loading logic ─────────────────────────────────────────────────────────────
 impl LunaConfig {
     pub fn load() -> Result<Self> {
@@ -637,6 +1040,13 @@ impl LunaConfig {
             toml::from_str(&raw).context("Failed to parse luna.toml — check for syntax errors")?;
 
         config.resolve_secrets();
+
+        if config.voice.rvc_model.is_none() {
+            config.voice.rvc_model = default_rvc_model();
+        }
+        if config.voice.rvc_script.is_none() {
+            config.voice.rvc_script = default_rvc_script();
+        }
 
         tracing::info!("Config loaded from {:?}", config_path);
         Ok(config)
@@ -681,10 +1091,32 @@ impl LunaConfig {
                 .context("Failed to restrict config file permissions")?;
         }
 
+        Self::restart_daemons_if_running();
         Ok(())
     }
 
-    fn config_path() -> PathBuf {
+    /// Restart active Luna daemons (luna-daemon.service and luna-wake.service)
+    /// via systemd user services when configuration changes.
+    pub fn restart_daemons_if_running() {
+        std::thread::spawn(|| {
+            for service in ["luna-daemon.service", "luna-wake.service"] {
+                let is_active = std::process::Command::new("systemctl")
+                    .args(["--user", "is-active", service])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
+                    .unwrap_or(false);
+
+                if is_active {
+                    tracing::info!("Restarting {} after config update...", service);
+                    let _ = std::process::Command::new("systemctl")
+                        .args(["--user", "restart", service])
+                        .status();
+                }
+            }
+        });
+    }
+
+    pub fn config_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("luna")
@@ -793,6 +1225,115 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A config written before the security tier existed must still load, with
+    /// the tier simply inactive. `security_model: None` means `build_security_
+    /// client` returns None and `classify`'s Security arm falls back to the
+    /// general model — degraded, not broken.
+    #[test]
+    fn a_config_without_the_security_tier_still_parses() {
+        let cfg: LlmConfig = toml::from_str(
+            r#"
+base_url = "http://localhost:11434"
+model = "qwen2.5:7b-instruct"
+temperature = 0.7
+max_tokens = 2048
+enable_thinking = true
+embedding_model = "nomic-embed-text"
+"#,
+        )
+        .expect("a pre-security-tier config must still load");
+        assert_eq!(cfg.security_model, None);
+        // Falls back to the general window rather than inheriting 16384, which
+        // would put the KV cache of an 8B model on a 6 GB card entirely in RAM.
+        assert_eq!(cfg.security_num_ctx, 8192);
+    }
+
+    /// The security tier has its own context budget because it is the only tier
+    /// whose weights plus KV cache can exceed VRAM. Silently giving it the
+    /// global 16384 is the exact regression the separate field exists to stop.
+    #[test]
+    fn the_security_tier_defaults_to_its_own_smaller_window() {
+        let cfg = LlmConfig::default();
+        assert_eq!(cfg.num_ctx, 16384);
+        assert!(
+            cfg.security_num_ctx < cfg.num_ctx,
+            "security window ({}) must be smaller than the general one ({}): \
+             an 8B model at 16k on a 6 GB card spills the whole KV cache to RAM",
+            cfg.security_num_ctx,
+            cfg.num_ctx
+        );
+    }
+
+    /// Round-trips the new keys through TOML so a typo in a hand-written config
+    /// is a load error rather than a silently ignored line.
+    #[test]
+    fn the_security_tier_keys_round_trip() {
+        let src = r#"
+base_url = "http://localhost:11434"
+model = "qwen2.5:7b-instruct"
+temperature = 0.7
+max_tokens = 2048
+enable_thinking = true
+deep_model = "qwen2.5-coder:14b"
+security_model = "whiterabbitneo-coder-tools"
+security_num_ctx = 8192
+embedding_model = "nomic-embed-text"
+num_ctx = 16384
+"#;
+        let cfg: LlmConfig = toml::from_str(src).unwrap();
+        assert_eq!(cfg.security_model.as_deref(), Some("whiterabbitneo-coder-tools"));
+        assert_eq!(cfg.security_num_ctx, 8192);
+    }
+
+    /// Regression guard for a bug that failed *silently*.
+    ///
+    /// `num_ctx` was hardcoded to 8192. The 9-clause Constitution plus the
+    /// 47-tool schema is ~8.0k tokens before Luna sees a user message, and a
+    /// `files` + `read` round-trip measured 9326. Ollama does not error when a
+    /// prompt overflows the window — it context-shifts, and we measured a real
+    /// request silently dropping 8156 -> 4098 tokens. Luna then lost the file
+    /// she had just read and started inventing paths.
+    ///
+    /// Nothing about that failure looks like a context problem from the
+    /// outside, so it needs a test that fails the build instead.
+    #[test]
+    fn default_num_ctx_fits_the_system_prompt_and_tool_schema() {
+        let tools = crate::tools::tool_definitions();
+        let tools_chars = serde_json::to_string(&tools).unwrap().len();
+        let prompt_chars = AgentConfig::default().system_prompt.len() + tools_chars;
+
+        // ~4 chars/token is a deliberately conservative estimate: under-counting
+        // tokens here would make this test pass while the real prompt overflows.
+        let est_tokens = (prompt_chars / 4) as u32;
+
+        assert!(
+            est_tokens > 6_000,
+            "prompt estimate collapsed to {est_tokens} tokens — the measurement \
+             this guard is based on is stale, re-measure before trusting it"
+        );
+
+        let headroom = default_num_ctx().checked_sub(est_tokens).expect(
+            "num_ctx must exceed the static prompt, otherwise every request \
+             context-shifts and Luna loses tool schemas mid-task",
+        );
+        assert!(
+            headroom >= 4_096,
+            "num_ctx {} leaves only {headroom} tokens for the conversation \
+             after a {est_tokens}-token prompt; measured need was 4096",
+            default_num_ctx()
+        );
+    }
+
+    /// The fast tier is the one client that legitimately runs on a small
+    /// window — it never receives the tool schema. Guard that it stays small,
+    /// because a 16k KV cache on the 3B would waste RAM for no benefit.
+    #[test]
+    fn fast_tier_window_is_deliberately_small() {
+        // Mirrors the literal in agent::build_fast_client.
+        const FAST_NUM_CTX: u32 = 4096;
+        assert!(FAST_NUM_CTX < default_num_ctx());
+    }
 
     #[test]
     fn save_merge_preserves_comments_and_updates_values() {

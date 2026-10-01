@@ -34,11 +34,20 @@ pub async fn synthesize_to_file(text: &str, config: &crate::config::LunaConfig) 
 
     let voices_bin = model.replace("kokoro-v1.0.onnx", "voices-v1.0.bin");
 
-    let python = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".local/share/luna/tts_env/bin/python3")
-        .to_string_lossy()
-        .into_owned();
+    let home = dirs::home_dir().unwrap_or_default();
+    let tts_env_python = home.join(".local/share/luna/tts_env/bin/python3");
+    let rvc_env_python = home.join(".local/share/luna/rvc_env/bin/python3");
+    let system_python = std::path::Path::new("/usr/bin/python3");
+
+    let python = if tts_env_python.exists() {
+        tts_env_python.to_string_lossy().into_owned()
+    } else if rvc_env_python.exists() {
+        rvc_env_python.to_string_lossy().into_owned()
+    } else if system_python.exists() {
+        system_python.to_string_lossy().into_owned()
+    } else {
+        "python3".to_string()
+    };
 
     let out = out_path.clone();
 

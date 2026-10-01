@@ -29,6 +29,29 @@ enable_thinking = true
 fast_model = "qwen2.5:3b"   # Non-reasoning small model — instant replies, no hidden thinking block
 deep_model = "qwen2.5:7b-instruct-q4_K_M"   # Large model for code, reasoning, analysis (fits fully in 6GB VRAM)
                                  # Remove or comment out to disable the two-model split
+# security_model = "whiterabbitneo-coder-tools"   # Offensive-security tier: PoCs, exploits,
+#                                 # scanners, CTF on your own lab. Checked BEFORE deep, so
+#                                 # "write a python exploit" is not claimed by the coder.
+#                                 # MUST support tool calls — verify with:
+#                                 #   ollama show <model> | grep -A3 Capabilities
+#                                 # A completion-only model here would let Luna describe
+#                                 # scans she never ran. Remove to disable the tier.
+# security_num_ctx = 8192           # Security tier only, default 8192. Smaller than num_ctx
+#                                 # on purpose: an 8B model's KV cache at 16k will not fit
+#                                 # beside its weights on a 6GB card.
+#                                 # NOTE: 47 tool definitions are ~42kB (~10.5k tokens), so
+#                                 # the tier depends on tool subsetting to fit. If that stops
+#                                 # firing, security turns return HTTP 500 rather than
+#                                 # degrading — check the "Tool subset:" debug line.
+# security_unrestricted = false     # false = the tier is scoped to systems you own or are
+#                                 # contracted to test. true = it writes exploit tooling
+# security_scripts_dir = "~/Documents/luna-scripts"
+#                                 # Default output directory for security-tier scripts,
+#                                 # created at startup. Exists because the model was picking
+#                                 # /tmp on its own, which is wiped on reboot. A request that
+#                                 # names a path still wins; this is only the default.
+#                                 # Defaults to $XDG_DOCUMENTS_DIR/luna-scripts, else
+#                                 # ~/Documents/luna-scripts.
 embedding_model = "nomic-embed-text"  # Semantic memory recall (RAG-lite).
                                       # One-time: ollama pull nomic-embed-text
 

@@ -38,11 +38,20 @@ async fn convert(input_wav: &str, output_wav: &str, config: &crate::config::Luna
         .replace(".pth", ".index")
         .replace("Jinx", "added_Jinx_v2");
 
-    let python = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".local/share/luna/rvc_env/bin/python3")
-        .to_string_lossy()
-        .into_owned();
+    let home = dirs::home_dir().unwrap_or_default();
+    let rvc_env_python = home.join(".local/share/luna/rvc_env/bin/python3");
+    let tts_env_python = home.join(".local/share/luna/tts_env/bin/python3");
+    let system_python = std::path::Path::new("/usr/bin/python3");
+
+    let python = if rvc_env_python.exists() {
+        rvc_env_python.to_string_lossy().into_owned()
+    } else if tts_env_python.exists() {
+        tts_env_python.to_string_lossy().into_owned()
+    } else if system_python.exists() {
+        system_python.to_string_lossy().into_owned()
+    } else {
+        "python3".to_string()
+    };
 
     tracing::info!("Running RVC conversion: {} → {}", input_wav, output_wav);
 
