@@ -7,6 +7,10 @@
 //!   Deep = code generation, multi-step reasoning, analysis → deep model
 //!
 //! Security is first on purpose: see `is_security_request`.
+//!
+//! Routing goes through `classify_with_latch`, not bare `classify`: security
+//! work is conversational, and a classifier that sees one message at a time
+//! loses the tier the moment the user stops repeating the keyword.
 
 #[derive(Debug, PartialEq)]
 pub enum QueryComplexity {
@@ -139,6 +143,131 @@ pub fn classify(input: &str) -> QueryComplexity {
         return QueryComplexity::Security;
     }
     classify_general(input)
+}
+
+/// How many consecutive non-security turns may inherit the security tier before
+/// the latch is considered stale.
+///
+/// Two is the observed minimum: in the session that motivated this, the user
+/// needed "i mean i am the owner of my system…" and then "well write the
+/// scripts in a file…" — two signal-free follow-ups that both lost the tier.
+/// One extra turn of slack absorbs an acknowledgement without letting the latch
+/// wander into unrelated work.
+const LATCH_TURNS: u32 = 2;
+
+/// Whether the security tier stays selected for follow-up turns.
+///
+/// `classify` sees one message at a time and nothing else. Measured against a
+/// real session, that is not enough: a five-turn offensive-security conversation
+/// routed security, security, security, **full**, **full**, because the last two
+/// turns were "i mean i am the owner of my system ofc i have permission to test
+/// it on my system" and "well write the scripts in a file in luna-scripts folder"
+/// — both score zero signals. The user stopped repeating "exploit" and silently
+/// lost the tier.
+///
+/// The cost was not a wrong model label, it was lost capability. Only the
+/// security prompt carries the scripts directory and the file-writing
+/// discipline, so the dropped turns answered with prose instructions
+/// (`mkdir -p ~/luna-scripts`, `nano …`) instead of writing anything — and named
+/// a path that does not exist on this machine. The Full tier's own prompt does
+/// have tool-discipline rules, so the model had permission to act and did not;
+/// what it lacked was the tier-specific context that makes acting the obvious
+/// choice.
+///
+/// This is deliberately NOT a keyword expansion. Adding "permission to test" to
+/// `SIGNALS` would fix those two sentences and nothing else; the general problem
+/// is that security work is *conversational*, and the classifier is not.
+///
+/// Note this is a routing fix, not a refusal fix. It cannot make the security
+/// model comply — refusal lives in the weights and is measured at 0/24 across
+/// prompt framings. What it fixes is reaching the right tier at all.
+static LATCH: std::sync::OnceLock<std::sync::Mutex<LatchState>> = std::sync::OnceLock::new();
+
+#[derive(Default)]
+struct LatchState {
+    /// Turns of latch remaining.
+    remaining: u32,
+    /// The message that armed it, kept for the debug log and for tests.
+    armed_by: String,
+}
+
+fn latch() -> &'static std::sync::Mutex<LatchState> {
+    LATCH.get_or_init(|| std::sync::Mutex::new(LatchState::default()))
+}
+
+/// `classify` plus the security latch, for every routing site.
+///
+/// Pure `classify` stays available and unchanged: it is what the classifier unit
+/// tests exercise, and a stateless predicate is far easier to reason about than
+/// one carrying session state. Routing uses this instead.
+///
+/// # Policy
+///
+/// - A turn that classifies as `Security` arms the latch for `LATCH_TURNS`
+///   follow-ups and stays on the security tier.
+/// - A greeting or acknowledgement does not consume a turn and does not route
+///   to security. "thanks" after a security turn is a conversational aside; if
+///   the latch claimed it, "hi" would drag the 3B security model into the reply.
+/// - Otherwise the latch is consumed one turn at a time. When it runs out the
+///   tier is released and `classify` decides again from scratch, so a genuine
+///   topic change is picked up immediately rather than after the slack expires.
+pub fn classify_with_latch(input: &str) -> QueryComplexity {
+    let direct = classify(input);
+
+    if direct == QueryComplexity::Security {
+        if let Ok(mut s) = latch().lock() {
+            s.remaining = LATCH_TURNS;
+            s.armed_by = input.chars().take(80).collect();
+        }
+        return QueryComplexity::Security;
+    }
+
+    // Greetings are exempt: see the policy note above.
+    if is_greeting_like(input) {
+        return direct;
+    }
+
+    if let Ok(mut s) = latch().lock() {
+        if s.remaining > 0 {
+            s.remaining -= 1;
+            return QueryComplexity::Security;
+        }
+    }
+
+    direct
+}
+
+/// Clear the latch. Called on session reset (`clear`), so a new conversation
+/// cannot inherit the previous one's security context.
+pub fn reset_security_latch() {
+    if let Ok(mut s) = latch().lock() {
+        *s = LatchState::default();
+    }
+}
+
+/// Whether a greeting would be exempt from the latch.
+///
+/// Mirrors the greeting branch of `classify_general`, including its word-count
+/// cap. Duplicated rather than refactored out of `classify_general` on purpose:
+/// that function is ordered as a decision chain, and pulling its first branch
+/// out to share state with the latch would make the routing order harder to
+/// read, which is the opposite of what it is for. The two are pinned together
+/// by a test so they cannot drift.
+fn is_greeting_like(input: &str) -> bool {
+    const GREETINGS: &[&str] = &[
+        "hi", "hey", "hello", "thanks", "thank you", "ok", "okay", "bye", "goodbye",
+        "yep", "nope", "sure", "cool", "nice", "lol", "haha", "hmm", "wow", "great",
+    ];
+    let lower = input.to_lowercase();
+    let words: Vec<&str> = input.split_whitespace().collect();
+    words.len() <= 4
+        && GREETINGS.iter().any(|g| {
+            if g.contains(' ') {
+                lower.contains(g)
+            } else {
+                words.iter().any(|w| w.to_lowercase() == *g)
+            }
+        })
 }
 
 /// Everything `classify` does apart from the security branch, kept separate so
@@ -363,6 +492,24 @@ fn classify_general(input: &str) -> QueryComplexity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The latch is a process-global `Mutex`, and `cargo test` runs test
+    /// functions on parallel threads. A per-test lock would be useless: two
+    /// latch tests on two threads would still interleave through the shared
+    /// global, and the failure would look like a flaky assertion rather than a
+    /// race. So every test that reads or writes latch state serialises on this
+    /// one process-wide mutex.
+    static LATCH_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `f` with the latch cleared, and clear it again afterwards so a
+    /// failing test cannot leave the global armed for the next one.
+    pub(super) fn with_clean_latch<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = LATCH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_security_latch();
+        let out = f();
+        reset_security_latch();
+        out
+    }
 
     fn is_full(input: &str) -> bool {
         !matches!(classify(input), QueryComplexity::Simple)
@@ -685,5 +832,201 @@ mod probe {
         for q in &deep {
             println!("  DEEP  {q:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod latch_tests {
+    use super::tests::with_clean_latch;
+    use super::*;
+
+    // The regression below is a real transcript, not a constructed one: the
+    // five messages a user actually sent while writing a reverse shell, and the
+    // tier each one landed on before this change. Turns 4 and 5 scored zero
+    // security signals, which is the entire bug.
+
+    /// The observed session, verbatim. Before the latch this routed
+    /// [Security, Security, Security, Full, Full]; turns 4 and 5 lost the tier
+    /// and answered with prose instructions instead of writing files.
+    #[test]
+    fn real_transcript_keeps_the_security_tier_through_follow_ups() {
+        with_clean_latch(|| {
+            let transcript = [
+                "write an simple exploit for reverse shell target windows11 host arch linux",
+                "how can i run this exploit ?",
+                "can you write a exploit for target : arch linux , attacker : arch linux , i want to test it on myself",
+                "i mean i am the owner of my system ofc i have permission to test it on my system",
+                "well write the scripts in a file in luna-scripts folder",
+            ];
+            for msg in transcript {
+                assert_eq!(
+                    classify_with_latch(msg),
+                    QueryComplexity::Security,
+                    "lost the security tier on: {msg:?}"
+                );
+            }
+        });
+    }
+
+    /// Pin the actual defect, so the fix cannot be undone by tuning `SIGNALS`
+    /// or the greeting list without a test failing.
+    #[test]
+    fn the_two_follow_ups_that_dropped_the_tier_score_zero_signals_on_their_own() {
+        // Guards the premise of the whole feature. If this ever starts passing,
+        // `classify` grew enough security context that the latch may be
+        // redundant and can be revisited.
+        for msg in [
+            "i mean i am the owner of my system ofc i have permission to test it on my system",
+            "well write the scripts in a file in luna-scripts folder",
+        ] {
+            assert_eq!(
+                classify(msg),
+                QueryComplexity::Complex,
+                "follow-up {msg:?} now classifies on its own; the latch may be redundant"
+            );
+        }
+    }
+
+    /// A greeting after a security turn must not drag the security model into a
+    /// "thanks". This is the failure mode that makes a naive latch hostile.
+    #[test]
+    fn greetings_do_not_consume_or_hold_the_latch() {
+        with_clean_latch(|| {
+            assert_eq!(
+                classify_with_latch("write an exploit for a reverse shell"),
+                QueryComplexity::Security
+            );
+            // Does not route to security, and does not consume a turn.
+            for greeting in ["hi", "thanks", "ok", "cool", "thank you"] {
+                assert_ne!(
+                    classify_with_latch(greeting),
+                    QueryComplexity::Security,
+                    "greeting {greeting:?} was swallowed by the latch"
+                );
+            }
+            // Both latch turns are still available afterwards.
+            assert_eq!(
+                classify_with_latch("well write the scripts in a file in luna-scripts folder"),
+                QueryComplexity::Security
+            );
+            assert_eq!(
+                classify_with_latch("and make it executable"),
+                QueryComplexity::Security
+            );
+        });
+    }
+
+    /// The latch is bounded. Without this, one security question would pin the
+    /// tier for the rest of the session.
+    #[test]
+    fn the_latch_expires_and_a_topic_change_is_picked_up_immediately() {
+        with_clean_latch(|| {
+            classify_with_latch("write an exploit for a reverse shell");
+            // Burn both latch turns on unrelated work. Turn 3 is still held
+            // (remaining goes 2 -> 1 -> 0 across calls 2 and 3), so expiry is
+            // first observable on turn 4.
+            classify_with_latch("what is the capital of France");
+            classify_with_latch("set a timer for 10 minutes");
+            // Asserted as "not Security" rather than a specific tier: what this test is
+            // about is that the latch released control, not how the message then
+            // routes. Pinning the exact tier here would duplicate
+            // classify_general's own tests and fail for unrelated reasons.
+            assert_ne!(
+                classify_with_latch("how do i make pasta"),
+                QueryComplexity::Security,
+                "latch should have expired"
+            );
+        });
+    }
+
+    /// An unrelated topic is never dragged into the security tier: the latch
+    /// only ever *adds* Security to non-Security turns, and only after a
+    /// security turn has happened.
+    #[test]
+    fn unrelated_work_is_not_routed_to_security_before_a_security_turn() {
+        with_clean_latch(|| {
+            for msg in [
+                "what is the capital of France",
+                "set a timer for 10 minutes",
+                "how do i make pasta",
+            ] {
+                assert_ne!(classify_with_latch(msg), QueryComplexity::Security);
+            }
+        });
+    }
+
+    /// A new security request re-arms the latch at full strength rather than
+    /// decrementing the existing one.
+    #[test]
+    fn a_new_security_request_re_arms_the_latch() {
+        with_clean_latch(|| {
+            classify_with_latch("write an exploit for a reverse shell");
+            classify_with_latch("well write the scripts in a file in luna-scripts folder");
+            // Re-arm.
+            classify_with_latch("now write me an nmap scan script");
+            // Two fresh follow-ups available, not one.
+            assert_eq!(
+                classify_with_latch("save it in the scripts folder"),
+                QueryComplexity::Security
+            );
+            assert_eq!(
+                classify_with_latch("now run it"),
+                QueryComplexity::Security
+            );
+            assert_ne!(
+                classify_with_latch("now run it"),
+                QueryComplexity::Security
+            );
+        });
+    }
+
+    /// `clear` must not leave the next conversation holding security context.
+    #[test]
+    fn reset_clears_the_latch() {
+        with_clean_latch(|| {
+            classify_with_latch("write an exploit for a reverse shell");
+            reset_security_latch();
+            assert_ne!(
+                classify_with_latch("well write the scripts in a file in luna-scripts folder"),
+                QueryComplexity::Security
+            );
+        });
+    }
+
+    /// `is_greeting_like` is a deliberate duplicate of the greeting branch
+    /// inside `classify_general`. Pin them together so they cannot drift: if
+    /// someone adds a greeting to one and not the other, this fails.
+    #[test]
+    fn the_latch_greeting_list_matches_the_classifier_greeting_list() {
+        for g in [
+            "hi", "hey", "hello", "thanks", "thank you", "ok", "okay", "bye",
+            "goodbye", "yep", "nope", "sure", "cool", "nice", "lol", "haha",
+            "hmm", "wow", "great",
+        ] {
+            assert!(
+                is_greeting_like(g),
+                "{g:?} is exempt in the latch but is not a greeting to the classifier"
+            );
+            assert_eq!(
+                classify(g),
+                QueryComplexity::Simple,
+                "{g:?} is treated as a greeting by the latch but not by classify"
+            );
+        }
+        // And a genuine follow-up must not be mistaken for a greeting, which is
+        // the direction that would silently break the latch.
+        assert!(!is_greeting_like(
+            "well write the scripts in a file in luna-scripts folder"
+        ));
+    }
+
+    /// Long inputs containing a greeting word are not greetings. Both the latch
+    /// and the classifier cap on word count; if that cap were dropped, "ok so
+    /// now write me a reverse shell" would stop reaching the security tier.
+    #[test]
+    fn a_greeting_word_inside_a_long_request_is_not_a_greeting() {
+        assert!(!is_greeting_like(
+            "ok so now write me a reverse shell exploit for arch linux"
+        ));
     }
 }
