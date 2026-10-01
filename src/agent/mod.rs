@@ -2108,6 +2108,32 @@ mod tests {
         assert_eq!(got.len(), 4, "expected 4 sentences, got {got:?}");
     }
 
+    /// The two offensive turns that were answered by the general model with a
+    /// narrated list of `nmap`/`hydra`/`sqlmap` commands and no tool call.
+    ///
+    /// Pinned here rather than only in `escalation` because this asserts the
+    /// tier *reached*, which is the thing that actually broke — the signals
+    /// existed, they just sat in a list that security returns early past. The
+    /// user's literal text, typos included.
+    #[test]
+    fn the_measured_offensive_requests_now_reach_the_security_tier() {
+        for p in [
+            "i have a honeypot setup on my laptop try to find vurnerabilities on my laptop \
+             and try to pretent you are an external attacker to test out my defenses and honeypot",
+            "i want you to try to attack my laptop",
+            "test the recon-deceiver on my laptop",
+            "find vulnerabilities on my server",
+            "pretend you are an attacker and try to get in",
+            "can you test my defenses against a real attack",
+        ] {
+            assert_eq!(
+                crate::llm::escalation::classify(p),
+                crate::llm::escalation::QueryComplexity::Security,
+                "should route to the security tier: {p:?}"
+            );
+        }
+    }
+
     /// End-to-end proof that the security tier is reachable through the REAL
     /// routing path, not just through `classify()` in isolation.
     ///

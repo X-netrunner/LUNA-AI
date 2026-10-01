@@ -43,7 +43,13 @@ pub enum QueryComplexity {
 fn is_security_request(lower: &str) -> bool {
     const SIGNALS: &[&str] = &[
         // Exploit / PoC authoring
-        "exploit", "poc", "proof of concept", "proof-of-concept",
+        // "exploit" is deliberately NOT a bare signal here. It is the single most
+        // over-capturing English word in a programming context: "exploit the
+        // cache locality to make this faster" is a performance question, and it
+        // matched. It is covered as a *verb* in `OFFENSIVE_VERB`, which only
+        // fires alongside a breakable object — so "exploit the host" routes
+        // here and "exploit the cache" does not.
+        "poc", "proof of concept", "proof-of-concept",
         "reverse shell", "bind shell", "shellcode", "meterpreter",
         "command and control", "c2 beacon", "c2 server", "beacon",
         "persistence mechanism", "privilege escalation", "privesc",
@@ -68,6 +74,40 @@ fn is_security_request(lower: &str) -> bool {
         "ctf", "capture the flag", "my own lab", "home lab", "my lab machine",
         "pentest", "pen test", "pen-test", "red team", "red-team",
     ];
+    // Offensive *intent* expressed without naming a technique.
+    //
+    // Measured 2026-10-01: "i have a honeypot setup on my laptop try to find
+    // vulnerabilities" and "i want you to try to attack my laptop" both
+    // classified `Complex`, so they were answered by the general model with a
+    // narrated list of `nmap`/`hydra`/`sqlmap` commands and no tool call at
+    // all. The cause was placement, not vocabulary: "honeypot", "attacker",
+    // "attacks" and "intrusion" were in `TOOL_SIGNALS`, which returns
+    // `Complex` — and because this function is tested first and returns early,
+    // a signal that only exists in the tool list can never win. "port scan" and
+    // "recon-deceiver" were already here and routed correctly, which is why the
+    // intent was understood but sent to the wrong tier.
+    //
+    // Phrases alone cannot do this job, and the attempt to write them proved it:
+    // "break into the" caught "break into the codebase and find where time is
+    // spent", "hack the" would catch "hack the code", and "attack the target"
+    // would catch a marketing audience. The fix was not more phrases. It was to
+    // match the two parts separately and require both.
+    //
+    // "attack the codebase" and "breach the contract" are not offensive requests
+    // because there is no machine on the other end. That distinction is
+    // grammatical, not vocabulary, so it survives phrasing nobody anticipated —
+    // which is the whole reason the user rejected a keyword patch for this in
+    // the first place. Adding a new object noun is one line; adding every new
+    // way to say "attack my stuff" is unbounded.
+    if INTENT
+        .iter()
+        .any(|phrase| contains_word(lower, phrase))
+        || exploit_as_noun(lower)
+        || (OFFENSIVE_VERB.iter().any(|v| contains_word(lower, v))
+            && OFFENSIVE_OBJECT.iter().any(|o| contains_word(lower, o)))
+    {
+        return true;
+    }
     // Word-boundary matching, NOT substring.
     //
     // Measured cause: a plain `contains` on the short signal "rce" matches the
@@ -78,10 +118,131 @@ fn is_security_request(lower: &str) -> bool {
     //
     // Any signal here is a substring of some ordinary English word sooner or
     // later, so every one has to be delimited on both sides.
-    SIGNALS
-        .iter()
-        .any(|sig| contains_word(lower, sig))
+    SIGNALS.iter().any(|sig| contains_word(lower, sig))
 }
+
+/// Requests that are offensive regardless of the words around them, so they
+/// need no verb/object pair.
+///
+/// Typos are included on purpose. "vurnerabilities" was the literal text the
+/// user typed, and a list matching only correct spelling fails on exactly the
+/// casual requests a security tier exists to serve.
+const INTENT: &[&str] = &[
+    "find vulnerabilities",
+    "find vulnerabilites",
+    "find vulnabilties",
+    "find vulns",
+    "vulnerability scan",
+    "vuln scan",
+    "test my defenses",
+    "test my defence",
+    "test the defenses",
+    "test the defence",
+    "test my security",
+    "pretend you are an attacker",
+    "act as an attacker",
+    "simulate an attacker",
+    "as an external attacker",
+    "red team my",
+    "honeypot",
+    "honeypots",
+    "cowrie",
+    "recon-deceiver",
+    "recon receiver",
+    "decoy",
+    "decoy server",
+];
+
+/// Words that mean "exploit" is the thing being asked for, not an action being
+/// described.
+const EXPLOIT_NOUN_NEXT: &[&str] = &[
+    "for", "code", "payload", "script", "shellcode", "type", "kind", "cve",
+    "vulnerability", "vulnerabilities", "vuln", "vulns", "poc", "sample",
+    "template", "chain", "primer", "target",
+];
+
+/// True when "exploit" is a NOUN — the artefact the user wants built.
+///
+/// This is separate from `OFFENSIVE_VERB` because the two senses need opposite
+/// treatment, and collapsing them breaks something either way:
+///
+/// - bare `"exploit"` in `SIGNALS` over-captured. "exploit the cache locality
+///   to make this faster" is a performance question and routed to the 7B
+///   security model.
+/// - dropping it broke `security_wins_over_coding_when_both_match`, because
+///   "write a python exploit" is the signature security request in the suite
+///   and the verb rule cannot see it — there is no object, the exploit *is*
+///   the object.
+/// - anchoring on the article ("a exploit") does not work either, because
+///   `contains_word` cannot match across an adjective: the real input is "a
+///   PYTHON exploit".
+///
+/// So the noun is recognised positionally: it ends the request, or a word
+/// meaning "the exploit" follows it. "write a python exploit" ends in it;
+/// "write a python payload decoder exploit" does too. "exploit the cache
+/// locality" is followed by "the", which is not in the list, and is the verb
+/// sense — it only routes if a breakable object appears, which "cache" is not.
+fn exploit_as_noun(lower: &str) -> bool {
+    const ARTICLES: &[&str] = &["a", "an", "the"];
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    for (i, w) in words.iter().enumerate() {
+        if !contains_word(w, "exploit") {
+            continue;
+        }
+        if i + 1 == words.len() {
+            return true; // "write a python exploit"
+        }
+        // An article immediately before it: "an exploit as a shell script".
+        // The article has to be adjacent, not merely somewhere earlier, or
+        // "a python exploit" would be matched by its own leading article.
+        if i > 0 && ARTICLES.iter().any(|a| contains_word(words[i - 1], a)) {
+            return true;
+        }
+        if EXPLOIT_NOUN_NEXT
+            .iter()
+            .any(|n| contains_word(words[i + 1], n))
+        {
+            return true; // "an exploit for cve-2021-44228"
+        }
+    }
+    false
+}
+
+/// Verbs that mean *intrude on*, which are ordinary English in a technical
+/// sentence and offensive only when something breakable is the object.
+const OFFENSIVE_VERB: &[&str] = &[
+    "attack",
+    "hack",
+    "breach",
+    "break into",
+    "intrude",
+    // NOT "break in": that is the ordinary English idiom for interrupting
+    // ("how do I break in the new API auth"), and it fired on the measured
+    // probe. "break into" carries the intrusion sense and is kept.
+    "compromise",
+    "penetrate",
+    "infiltrate",
+    "get into",
+    "crack",
+    "exploit",
+    "scan",
+    "port scan",
+    "enumerate",
+    "brute force",
+    "bruteforce",
+];
+
+/// Nouns that can be broken into. A verb from `OFFENSIVE_VERB` plus one of
+/// these is an intrusion request; a verb plus anything else is a metaphor or a
+/// different job ("crack the egg timer", "exploit the cache locality").
+const OFFENSIVE_OBJECT: &[&str] = &[
+    "laptop", "server", "servers", "network", "networks", "machine", "machines",
+    "host", "hosts", "target", "box", "vm", "vms", "pi", "router", "routers",
+    "wifi", "wi-fi", "phone", "device", "devices", "camera", "nas", "honeypot",
+    "firewall", "site", "app", "api", "endpoint", "endpoints", "inbox",
+    "account", "accounts", "password", "passwords", "ssh", "rdp", "port",
+    "ports", "service", "services", "service account", "container", "kernel",
+] ;
 
 /// True when `needle` occurs in `haystack` on word boundaries.
 ///
@@ -539,6 +700,85 @@ mod tests {
             "write a sql injection payload tester for my lab box",
         ] {
             assert!(is_security(q), "should route to security: {q:?}");
+        }
+    }
+
+    /// "exploit" is both the noun the security tier exists for and an ordinary
+    /// verb in performance talk. Both senses have to route correctly at once,
+    /// and each fix alone broke the other:
+    ///
+    /// - bare `"exploit"` signal  -> catches "exploit the cache locality"
+    /// - verb + breakable object  -> misses "write a python exploit"
+    /// - article anchor           -> misses "a PYTHON exploit", because
+    ///   `contains_word` cannot match across the adjective
+    ///
+    /// So the noun is positional. Pinned both ways so neither can regress
+    /// silently into sending exploit requests to the coder.
+    #[test]
+    fn the_noun_and_the_verb_exploit_route_differently() {
+        for q in [
+            "write a python exploit",
+            "write an exploit as a shell script",
+            "write a python payload decoder exploit",
+            "give me an exploit for cve-2021-44228",
+            "build an exploit payload",
+            "exploit the host at 192.168.1.50",
+            "exploit my server",
+        ] {
+            assert!(
+                is_security(q),
+                "security request misrouted: {q:?} (is_deep={})",
+                is_deep(q)
+            );
+        }
+        for q in [
+            "exploit the cache locality to make this faster",
+            "how do I exploit this parallelism in the renderer",
+            "we should exploit the existing connection pool",
+        ] {
+            assert!(
+                !is_security(q),
+                "performance talk misrouted to the security tier: {q:?}"
+            );
+        }
+    }
+
+    /// The verb/object pairing, pinned because a phrase list was tried first
+    /// and over-captured immediately: "break into the" caught "break into the
+    /// codebase", "hack the" would catch "hack the code", and "break in" caught
+    /// "how do I break in the new API auth". The object requirement is what
+    /// makes the difference grammatical rather than lexical.
+    #[test]
+    fn offensive_verbs_need_a_breakable_object() {
+        for q in [
+            "attack my laptop",
+            "hack my router",
+            "breach the firewall on my host",
+            "can you compromise my vm",
+            "try to break into my network",
+            "get into the wifi network and capture the handshake",
+            "scan my ports and tell me what's open",
+            "write a script to brute force my own ssh",
+            "act as an attacker and try to get into my nas",
+            "penetrate my firewall and drop a shell",
+        ] {
+            assert!(is_security(q), "should route to security: {q:?}");
+        }
+        for q in [
+            "attack the problem from another angle",
+            "how do i attack this performance bottleneck",
+            "break into the codebase and find where time is spent",
+            "hack the code to be cleaner",
+            "crack the egg timer component we built",
+            "breach the contract renewal date",
+            "penetrate the market with this pricing",
+            "how do i break in the new API auth",
+            "exploit the cache locality to make this faster",
+        ] {
+            assert!(
+                !is_security(q),
+                "ordinary English must not drag in the security tier: {q:?}"
+            );
         }
     }
 
