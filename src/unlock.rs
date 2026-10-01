@@ -161,6 +161,26 @@ pub(crate) fn scratch_receipt(label: &str) -> PathBuf {
         .join("security-unlock.sig")
 }
 
+/// Open the gate for the duration of a test, returning the public key to put
+/// in `security_dev_public_key` and a guard that closes it again.
+///
+/// Exists so tests in other modules can exercise the *real* gate rather than
+/// asserting against a stand-in. The alternative — treating "gate open" as a
+/// boolean the test sets itself — would let these tests pass while the actual
+/// signature path was broken, which is the same class of mistake as testing
+/// `classify` in isolation while the tier was dead.
+///
+/// The returned guard must be bound to a name, not dropped: it removes the
+/// receipt on drop. Dropping it immediately would lock the gate before the test
+/// ran.
+#[cfg(test)]
+pub(crate) fn open_gate_for_test(label: &str) -> (String, TestReceipt) {
+    let (pk, sk) = generate_keypair();
+    let guard = test_receipt(scratch_receipt(label));
+    unlock(&pk, &sk).expect("test gate should unlock with a matching keypair");
+    (pk, guard)
+}
+
 /// The XDG state directory, where receipts belong.
 ///
 /// State rather than config, deliberately: the receipt has to survive a config

@@ -217,10 +217,26 @@ async fn main() -> Result<()> {
     // it is requested-but-locked that is visible too. Someone auditing a machine
     // should not have to run `--security-status` to find out.
     match config.llm.security_gate_state() {
-        crate::unlock::GateState::Unlocked => tracing::warn!(
-            "Security tier NO-REFUSAL MODE IS ON. The model will not evaluate authorisation and \
-             will not refuse. To disable: `luna --lock-security`."
-        ),
+        crate::unlock::GateState::Unlocked => {
+            // Name the model that will actually serve. Unlocking selects a
+            // different set of weights, and "no-refusal mode" is otherwise
+            // unreadable: it reads like a prompt setting, which is the
+            // misreading that produced 8/8 refusals with the clause active.
+            let model = crate::agent::security_model_in_effect(&config);
+            match model.as_deref() {
+                Some(m) => tracing::warn!(
+                    "Security tier NO-REFUSAL MODE IS ON, served by an abliterated model: {}. \
+                     Refusal is removed in the weights, not argued out by a prompt. \
+                     To disable: `luna --lock-security`.",
+                    m
+                ),
+                None => tracing::warn!(
+                    "Security tier no-refusal gate is unlocked but NO security model is \
+                     configured — the tier is inactive. Set `security_model` (and, for the \
+                     gate to change behaviour, `security_model_abliterated`)."
+                ),
+            }
+        }
         crate::unlock::GateState::Locked => tracing::info!(
             "Security tier no-refusal mode requested but NOT active — no valid developer \
              signature at {}. The security tier remains scoped. Unlock with \

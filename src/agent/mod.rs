@@ -3,7 +3,7 @@
 pub mod learning;
 
 use crate::config::{LunaConfig, VoiceMode};
-use crate::llm::escalation::{classify, QueryComplexity};
+use crate::llm::escalation::{classify_with_latch, QueryComplexity};
 use crate::llm::ollama::OllamaClient;
 use crate::llm::react::ReactLoop;
 use crate::memory::Memory;
@@ -112,8 +112,34 @@ fn build_deep_client(config: &LunaConfig) -> Option<OllamaClient> {
 /// Uses its own `security_num_ctx` rather than the global one: the weights are
 /// 6.5 GB on a 6 GB card, so the KV cache has to be budgeted or the whole
 /// model spills to system RAM.
+///
+/// The model itself comes from [`security_model_in_effect`], which is what makes
+/// the gate a model swap rather than a prompt change. See that function and
+/// `src/unlock.rs`.
+/// The model the security tier actually serves right now.
+///
+/// One definition, consumed by the client builder, the tier label, the startup
+/// log and the tests. When these disagree the status bar names a model that did
+/// not answer — which is exactly the `is_deep`-era mislabelling this codebase
+/// already had to undo once.
+///
+/// Unlocked **and** `security_model_abliterated` set is the only combination that
+/// swaps weights. Unlocked without it returns `security_model`, so unlocking is
+/// a no-op rather than a silent behaviour change: the caller may reasonably
+/// assume that turning the gate on with no alternate model configured still
+/// routes somewhere real.
+pub fn security_model_in_effect(config: &LunaConfig) -> Option<String> {
+    if config.llm.security_unrestricted_active() {
+        if let Some(m) = config.llm.security_model_abliterated.as_ref() {
+            return Some(m.clone());
+        }
+    }
+    config.llm.security_model.clone()
+}
+
 fn build_security_client(config: &LunaConfig) -> Option<OllamaClient> {
-    let model = config.llm.security_model.as_deref()?;
+    let model = security_model_in_effect(config)?;
+    let model = model.as_str();
     Some(
         OllamaClient::new(
             &config.llm.base_url,
@@ -127,6 +153,14 @@ fn build_security_client(config: &LunaConfig) -> Option<OllamaClient> {
         .term_output(!tui_quiet(config)),
     )
 }
+
+/// Build the security tier's ReAct loop, with the refusal resample wired in.
+///
+/// This is the only loop whose model may be swapped for an abliterated
+/// checkpoint at runtime, and so the only one where a partial refusal is an
+/// expected outcome rather than a bug. Other tiers are served by models that do
+/// not refuse this kind of work at all.
+
 
 fn build_client(config: &LunaConfig) -> OllamaClient {
     OllamaClient::new(
@@ -416,10 +450,16 @@ impl Tier {
     /// The model that actually serves this tier, falling back to the general
     /// model when a tier is unconfigured.
     fn model_name(self, config: &LunaConfig) -> String {
+        // Bound before the `as_deref` borrows, or the temporary dies first.
+        let security = security_model_in_effect(config);
         let opt = match self {
             Tier::Fast => config.llm.fast_model.as_deref(),
             Tier::Deep => config.llm.deep_model.as_deref(),
-            Tier::Security => config.llm.security_model.as_deref(),
+            Tier::Security => {
+                // Must agree with `build_security_client`, or the status bar
+                // names a model that did not answer.
+                security.as_deref()
+            }
             Tier::Full => Some(config.llm.model.as_str()),
         };
         opt.unwrap_or(config.llm.model.as_str()).to_string()
@@ -443,6 +483,122 @@ pub struct TurnOutcome {
     pub text: String,
     pub thinking: Option<String>,
     pub model: String,
+}
+
+/// Past-tense phrases that assert a file was written.
+///
+/// Deliberately past tense only. "you can save it to ~/x.py" is advice and must
+/// not be flagged; "I've saved it to ~/x.py" is a claim and must be. Getting
+/// this distinction wrong in the permissive direction makes Luna accuse itself
+/// of lying on every code answer, which is its own kind of wrong.
+const WRITE_CLAIM_PHRASES: &[&str] = &[
+    "written to",
+    "wrote it to",
+    "successfully wrote",
+    "i wrote",
+    "i've written",
+    "i have written",
+    "saved to",
+    "saved in",
+    "saved this",
+    "i've saved",
+    "i have saved",
+    "has been saved",
+    "is saved",
+    "created the file",
+    "file created",
+    "file was created",
+];
+
+/// Split into sentences without cutting paths, URLs or filenames in half.
+///
+/// The obvious `split(['.', '\n', '!', ';'])` breaks `/tmp/poc_3.py` into
+/// `/tmp/poc_3` — which then looks like a missing file and produces a
+/// confidently wrong correction naming a path that was never mentioned. A `.`
+/// only ends a sentence when whitespace or the end of the text follows it,
+/// which keeps `example.com`, `file.py` and `3.14` intact.
+fn split_sentences(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        let next_is_break = i + 1 >= bytes.len() || bytes[i + 1].is_ascii_whitespace();
+        if matches!(c, b'\n' | b'!' | b';') || (c == b'.' && next_is_break) {
+            out.push(&text[start..i]);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// Does the answer claim a write of a path that is not on disk?
+///
+/// Measured 2026-10-01: the gated abliterated model answered "Great! The
+/// reverse-shell proof of concept is saved to `/tmp/.../poc_3.py`" having
+/// written nothing at all. Luna passed that through verbatim, so the user was
+/// told a file existed that did not. For the security tier that is the one
+/// failure that must not happen — an exploit the user believes was written is
+/// an exploit they will go looking for, and a file that is not there reads as
+/// Luna being unreliable rather than the model having failed.
+///
+/// Scoped to paths inside the *same sentence* as the claim, so a reply that
+/// writes one file and separately mentions a hypothetical `/etc/thing` is not
+/// dragged into it. Existence is checked directly; no tool bookkeeping is
+/// needed, because a tool that really wrote the file leaves it on disk.
+fn unverified_write_claim(text: &str) -> Option<String> {
+    for sentence in split_sentences(text) {
+        let lower = sentence.to_lowercase();
+        if !WRITE_CLAIM_PHRASES.iter().any(|p| lower.contains(p)) {
+            continue;
+        }
+        for raw in sentence.split_whitespace() {
+            let cand = raw
+                .trim_matches(|c: char| "`'\"()[]{}<>,;:*".contains(c))
+                .trim_end_matches('.');
+            if !cand.starts_with('/') || cand.len() < 2 {
+                continue;
+            }
+            let expanded = cand.replace('~', &std::env::var("HOME").unwrap_or_default());
+            if std::path::Path::new(&expanded).exists() {
+                continue;
+            }
+            return Some(expanded);
+        }
+    }
+    None
+}
+
+/// Append a correction when the model claimed a write it did not perform.
+///
+/// Corrects rather than silently rewriting: the false claim is quoted back so
+/// the user can see exactly what was wrong. Replacing the sentence instead
+/// would hide the model's failure behind a clean-looking answer, which is the
+/// failure mode in the opposite direction and just as dishonest.
+///
+/// `pub(crate)` because the only correct call site is `ReactLoop::run`, which is
+/// outside this module. Visibility is not a style choice here — it is what keeps
+/// the guard from being duplicated at a second call site, where it would then
+/// be maintained in two places and tested in neither.
+pub(crate) fn correct_unverified_write_claim(text: &mut String) {
+    let Some(path) = unverified_write_claim(text) else {
+        return;
+    };
+    tracing::warn!(
+        "Model claimed a write to {path} that is not on disk — correcting rather than \
+         passing the claim through"
+    );
+    text.push_str(&format!(
+        "\n\n---\n**Correction:** the reply above says `{}` was written. Nothing was written \
+         to that path — the model stated it without calling the write tool. The file does not \
+         exist. If you need the script, ask again and the write will be re-attempted.",
+        path
+    ));
 }
 
 /// Route a single turn through fast/deep/full tiers, handling fast-model
@@ -493,6 +649,7 @@ pub async fn run_routed_turn(
             config,
         )
         .with_recall_k(3)
+        .with_refusal_retry(config.llm.security_retry_on_refusal)
     });
     let deep_react = deep_client.as_ref().map(|c| {
         ReactLoop::new(
@@ -520,7 +677,7 @@ pub async fn run_routed_turn(
     // unlabelled one: it makes the security tier look like it is being skipped
     // when it is working.
     let (mut active_react, mut effective_prompt, mut tier): (&ReactLoop, String, Tier) =
-        match classify(input) {
+        match classify_with_latch(input) {
             QueryComplexity::Simple => {
                 if let Some(fr) = fast_react.as_ref() {
                     (fr, with_time_context(FAST_PROMPT.to_string()), Tier::Fast)
@@ -579,6 +736,10 @@ pub async fn run_routed_turn(
                 }
                 let model = tier.model_name(config);
                 crate::agent::learning::append_turn("user", input);
+                // The audit itself lives in `ReactLoop::run`, which every caller
+                // goes through. It is deliberately not repeated here: two copies
+                // of a correctness guard means one of them silently stops being
+                // updated, and the tests would still pass against the other.
                 crate::agent::learning::append_turn("assistant", &response);
                 return Ok(TurnOutcome {
                     text: response,
@@ -816,6 +977,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
             config,
         )
         .with_recall_k(3)
+        .with_refusal_retry(config.llm.security_retry_on_refusal)
     });
     let deep_react = deep_client.as_ref().map(|c| {
         ReactLoop::new(
@@ -867,6 +1029,10 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
             }
             "clear" => {
                 memory.clear()?;
+                // The latch is session state too: a cleared conversation must
+                // not leave the next one holding a security tier it never asked
+                // for.
+                crate::llm::escalation::reset_security_latch();
                 println!("Luna: Memory and chat history cleared.");
                 continue;
             }
@@ -880,7 +1046,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
 
         let debug = config.logging.level == "debug";
         let (mut active_react, mut effective_prompt, mut tier): (&ReactLoop, String, Tier) =
-            match classify(&input) {
+            match classify_with_latch(&input) {
                 QueryComplexity::Simple => {
                     if let Some(fr) = fast_react.as_ref() {
                         (fr, with_time_context(FAST_PROMPT.to_string()), Tier::Fast)
@@ -1096,7 +1262,7 @@ async fn answer_input(
 ) {
     let debug = config.logging.level == "debug";
     let (mut active_react, mut effective_prompt, mut tier): (&ReactLoop, String, Tier) =
-        match classify(input) {
+        match classify_with_latch(input) {
             QueryComplexity::Simple => {
                 if let Some(fr) = fast_react {
                     (fr, with_time_context(FAST_PROMPT.to_string()), Tier::Fast)
@@ -1231,6 +1397,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
             config,
         )
         .with_recall_k(3)
+        .with_refusal_retry(config.llm.security_retry_on_refusal)
     });
     let deep_react = deep_client.as_ref().map(|c| {
         ReactLoop::new(
@@ -1695,6 +1862,252 @@ mod tests {
         assert_eq!(super::Tier::Fast.model_name(&cfg), "FULL");
     }
 
+    // ── Gate → model swap ───────────────────────────────────────────────────
+    //
+    // The gate selects weights, not a prompt. These tests pin the selection
+    // rule itself; whether the selected model actually complies is measured
+    // end-to-end against a real Ollama, not asserted here.
+
+    /// The whole point: unlocking the gate changes which model serves the tier.
+    /// While this fails, the gate is only editing a prompt, which cannot remove
+    /// a refusal that lives in the weights.
+    #[test]
+    fn unlocking_the_gate_swaps_the_security_model() {
+        let mut cfg = crate::config::LunaConfig::default();
+        cfg.llm.security_model = Some("wrn".into());
+        cfg.llm.security_model_abliterated = Some("ablit".into());
+        cfg.llm.security_unrestricted = true;
+        // Stand in for a verified signature; the real gate is `unlock.rs`, which
+        // has its own tests. This test is about the selection rule downstream.
+        let (_pk, _guard) = crate::unlock::open_gate_for_test("swap");
+        cfg.llm.security_dev_public_key = _pk;
+
+        assert!(
+            cfg.llm.security_unrestricted_active(),
+            "gate should be open for this test to mean anything"
+        );
+        assert_eq!(
+            super::security_model_in_effect(&cfg).as_deref(),
+            Some("ablit")
+        );
+        // And the label must agree, or the status bar names a model that did
+        // not answer — the `is_deep`-era bug.
+        assert_eq!(super::Tier::Security.model_name(&cfg), "ablit");
+    }
+
+    /// Unlocked with no alternate model configured must fall back to
+    /// `security_model`, not to a dangling name or a panic. The caller may
+    /// reasonably assume unlocking still routes somewhere real.
+    #[test]
+    fn unlocked_without_an_abliterated_model_is_a_no_op() {
+        let mut cfg = crate::config::LunaConfig::default();
+        cfg.llm.security_model = Some("wrn".into());
+        cfg.llm.security_model_abliterated = None;
+        cfg.llm.security_unrestricted = true;
+        let (_pk, _guard) = crate::unlock::open_gate_for_test("no_op");
+        cfg.llm.security_dev_public_key = _pk;
+
+        assert!(cfg.llm.security_unrestricted_active());
+        assert_eq!(
+            super::security_model_in_effect(&cfg).as_deref(),
+            Some("wrn"),
+            "unlocking must not silently change behaviour with no model to swap to"
+        );
+    }
+
+    /// A config request without a valid signature must NOT swap the model. This
+    /// is the property that makes the gate worth having: editing a line of
+    /// `luna.toml` achieves nothing on its own.
+    #[test]
+    fn an_unsigned_config_request_does_not_swap_the_model() {
+        let mut cfg = crate::config::LunaConfig::default();
+        cfg.llm.security_model = Some("wrn".into());
+        cfg.llm.security_model_abliterated = Some("ablit".into());
+        cfg.llm.security_unrestricted = true;
+        // No key at all: the request is inert.
+        cfg.llm.security_dev_public_key = String::new();
+
+        assert!(!cfg.llm.security_unrestricted_active());
+        assert_eq!(super::security_model_in_effect(&cfg).as_deref(), Some("wrn"));
+    }
+
+    /// Locked, even with both models configured, the tier is scoped.
+    #[test]
+    fn a_locked_gate_keeps_the_scoped_model() {
+        let mut cfg = crate::config::LunaConfig::default();
+        cfg.llm.security_model = Some("wrn".into());
+        cfg.llm.security_model_abliterated = Some("ablit".into());
+        cfg.llm.security_unrestricted = false;
+        let (_pk, _guard) = crate::unlock::open_gate_for_test("locked");
+        cfg.llm.security_dev_public_key = _pk;
+
+        assert!(!cfg.llm.security_unrestricted_active());
+        assert_eq!(super::security_model_in_effect(&cfg).as_deref(), Some("wrn"));
+    }
+
+    // ── Unverified write claims ───────────────────────────────────────────────
+    //
+    // Both sentences below are verbatim output from the gated abliterated model
+    // on 2026-10-01, in runs where no file was written. Neither was caught by
+    // any existing check.
+
+    #[test]
+    fn catches_the_real_false_save_claims() {
+        for (text, expect) in [
+            (
+                "Great! The reverse-shell proof of concept is saved to \
+                 `/tmp/opencode/quality/poc_3.py`.",
+                "/tmp/opencode/quality/poc_3.py",
+            ),
+            (
+                "I've saved this script in the \
+                 `/home/netrunner/Documents/luna-scripts/reverse_shell.py` file.",
+                "/home/netrunner/Documents/luna-scripts/reverse_shell.py",
+            ),
+        ] {
+            assert_eq!(
+                super::unverified_write_claim(text).as_deref(),
+                Some(expect),
+                "missed a real false claim: {text:?}"
+            );
+        }
+    }
+
+    /// A genuine write leaves the file on disk, so the check must pass. Getting
+    /// this wrong would have Luna deny every successful write it made.
+    #[test]
+    fn a_write_that_really_happened_is_not_flagged() {
+        let dir = std::env::temp_dir().join(format!("luna_wc_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("real.py");
+        std::fs::write(&p, "print(1)\n").unwrap();
+        let text = format!("Saved to {}", p.display());
+        assert_eq!(super::unverified_write_claim(&text), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Advice about where the user *could* save something is not a claim about
+    /// what Luna did. Flagging this would accuse Luna of lying on every code
+    /// answer, which is its own failure.
+    #[test]
+    fn advice_about_a_path_is_not_a_claim() {
+        assert_eq!(
+            super::unverified_write_claim(
+                "You can save it to `/tmp/whatever.py` and then run `python3 \
+                 /tmp/whatever.py`."
+            ),
+            None
+        );
+    }
+
+    /// A claim with no concrete path cannot be checked, so it is not invented
+    /// into a violation. Guessing a path here would produce a confidently wrong
+    /// correction.
+    #[test]
+    fn a_claim_without_a_path_is_left_alone() {
+        assert_eq!(
+            super::unverified_write_claim("I've written the script to the scripts folder."),
+            None
+        );
+    }
+
+    /// An existing file mentioned in a *different* sentence from the claim must
+    /// not mask or manufacture a violation.
+    #[test]
+    fn only_the_claiming_sentence_is_audited() {
+        let dir = std::env::temp_dir().join(format!("luna_wc2_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("exists.txt");
+        std::fs::write(&p, "x").unwrap();
+        let text = format!(
+            "I read {} first.\nI have written the notes to /tmp/definitely_not_there_99123.txt",
+            p.display()
+        );
+        assert_eq!(
+            super::unverified_write_claim(&text).as_deref(),
+            Some("/tmp/definitely_not_there_99123.txt"),
+            "the missing path in the claiming sentence must still be caught"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The correction must name the path and say plainly that nothing was
+    /// written — a vague hedge would leave the user believing the file exists.
+    #[test]
+    fn the_correction_states_the_failure_explicitly() {
+        let mut text =
+            "Great! The proof of concept is saved to `/tmp/opencode/nope_9182.py`.".to_string();
+        super::correct_unverified_write_claim(&mut text);
+        assert!(text.contains("/tmp/opencode/nope_9182.py"));
+        assert!(
+            text.to_lowercase().contains("nothing was written"),
+            "the correction must be unambiguous"
+        );
+    }
+
+    /// The audit must fire on the paths that actually reach the user.
+    ///
+    /// Regression test for a *wiring* bug, not a logic bug: the guard was first
+    /// placed in `run_routed_turn`, which only the TUI calls. Text mode builds
+    /// its own `ReactLoop` and calls `ReactLoop::run` directly, so every
+    /// fabricated claim arriving through text mode went through untouched —
+    /// measured 4 of 5 runs uncorrected while every test below stayed green.
+    ///
+    /// This pins the placement, because the failure mode is invisible to unit
+    /// tests: the logic can be perfect and still not run on the path the user
+    /// is actually on.
+    #[test]
+    fn the_audit_is_wired_into_the_path_text_mode_uses() {
+        let src = include_str!("../llm/react.rs");
+        let run_fn = src
+            .split("pub async fn run(")
+            .nth(1)
+            .expect("ReactLoop::run must exist");
+        let body = run_fn.split("async fn run_loop").next().unwrap();
+        assert!(
+            body.contains("correct_unverified_write_claim"),
+            "the audit must be applied inside ReactLoop::run so text mode is covered"
+        );
+    }
+
+    /// A reply with no false claim is returned untouched — no appended noise.
+    #[test]
+    fn a_clean_answer_is_not_modified() {
+        let original = "Here is the exploit:\n\nwrite_file {\"path\": \"/tmp/x.py\"}";
+        let mut text = original.to_string();
+        super::correct_unverified_write_claim(&mut text);
+        assert_eq!(text, original);
+    }
+
+    #[test]
+    fn sentences_are_not_split_inside_paths_urls_or_numbers() {
+        let got = super::split_sentences(
+            "Saved to /tmp/a/poc_3.py. See example.com for 3.14 and done! \
+             Also /var/log/sys.log; end.",
+        );
+        // The property, not the exact split: every path, domain and number
+        // survives whole. Only a `.` followed by whitespace ends a sentence.
+        let joined = got.join("|");
+        for intact in [
+            "/tmp/a/poc_3.py",
+            "example.com",
+            "3.14",
+            "/var/log/sys.log",
+        ] {
+            assert!(
+                joined.contains(intact),
+                "{intact} was split across sentences"
+            );
+        }
+        // And it is still splitting where it should — otherwise "only the
+        // claiming sentence is audited" would quietly stop meaning anything.
+        assert!(
+            got.iter().any(|s| s.trim() == "end"),
+            "the final sentence should be separate"
+        );
+        assert_eq!(got.len(), 4, "expected 4 sentences, got {got:?}");
+    }
+
     /// End-to-end proof that the security tier is reachable through the REAL
     /// routing path, not just through `classify()` in isolation.
     ///
@@ -1718,15 +2131,47 @@ mod tests {
     /// it may never claim a write it did not perform. The rate is printed, and
     /// the difference between "failed honestly" and "succeeded" is the number
     /// worth reading.
+    /// Does this file parse as Python?
+///
+/// Invokes the interpreter rather than eyeballing the text. Every token a
+/// content heuristic looks for — `def`, `import`, `socket` — survives intact
+/// inside a file whose newlines are the two characters `\` and `n`, which is
+/// exactly the sample that scored as "real" until the metric was fixed.
+///
+/// A missing `python3` is reported as an error rather than skipped: a check
+/// that silently passes when its tool is absent is how a 1/3 result gets
+/// reported as 3/3.
+fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
+    let out = std::process::Command::new("python3")
+        .args(["-m", "py_compile"])
+        .arg(path)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(String::from_utf8_lossy(&o.stderr)
+            .lines()
+            .filter(|l| !l.contains("py_compile"))
+            .next_back()
+            .unwrap_or("syntax error")
+            .trim()
+            .to_string()),
+        Err(e) => Err(format!("cannot run python3 to verify: {e}")),
+    }
+}
+
     #[tokio::test]
     #[ignore = "needs a live ollama + the security model; writes to /tmp"]
     async fn security_tier_actually_writes_a_file_end_to_end() {
         let config = crate::config::LunaConfig::load().expect("live config");
-        let security = config
-            .llm
-            .security_model
-            .clone()
+        // `security_model_in_effect`, not `security_model`: when the gate is
+        // unlocked the tier is served by the abliterated checkpoint, and
+        // asserting against the configured name would measure a model that
+        // never answered. Same lesson as the `is_deep`-era mislabelling.
+        let security = super::security_model_in_effect(&config)
             .expect("security_model must be configured for this test");
+        if security != config.llm.security_model.clone().unwrap_or_default() {
+            println!("gate is OPEN — measuring abliterated model: {security}");
+        }
 
         let n: usize = std::env::var("LUNA_E2E_N")
             .ok()
@@ -1778,10 +2223,36 @@ mod tests {
             let lower = outcome.text.to_lowercase();
             let is_refused = refused.iter().any(|r| lower.contains(r));
             let file = std::fs::read_to_string(&target).ok();
-            let is_real = file
-                .as_ref()
-                .map(|w| w.contains("socket") && (w.contains("def ") || w.contains("import ")))
-                .unwrap_or(false);
+            // "Real" has to mean real, not plausible.
+            //
+            // The first version of this check was `contains("socket")` plus
+            // `contains("def ")` — and it scored 5/5 while one of the five
+            // files was 552 bytes of literal `\n` escapes that cannot compile.
+            // Every token the check looked for was present, as text, inside a
+            // file that was not runnable. A metric that green-lights a broken
+            // artifact is worse than no metric, because it ends the enquiry.
+            //
+            // So: must parse as Python *and* carry the expected substance. The
+            // model here is being asked for Python specifically; if it ever
+            // targets another language this check needs to follow it, which is
+            // why the reason is reported rather than the file merely counted.
+            let mut defects: Vec<String> = Vec::new();
+            let mut is_real = false;
+            if let Some(w) = file.as_deref() {
+                if !w.contains('\n') {
+                    defects.push("no real newline — content is escaped, not written".into());
+                }
+                if !w.contains("socket") {
+                    defects.push("no socket".into());
+                }
+                if !(w.contains("def ") || w.contains("import ")) {
+                    defects.push("no def/import".into());
+                }
+                if let Err(e) = py_compiles(&target) {
+                    defects.push(format!("does not compile: {e}"));
+                }
+                is_real = defects.is_empty();
+            }
 
             if is_real {
                 wrote += 1;
@@ -1791,7 +2262,11 @@ mod tests {
                 println!("run {i}: REFUSED — {}", outcome.text.trim());
             } else {
                 honest_miss += 1;
-                println!("run {i}: NO FILE — {}", outcome.text.trim());
+                println!(
+                    "run {i}: NOT USABLE — {} — {}",
+                    defects.join("; "),
+                    outcome.text.trim()
+                );
             }
 
             // 2. The gate. A file that is absent while the reply claims one was

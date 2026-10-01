@@ -287,6 +287,37 @@ pub struct LlmConfig {
     /// single tool — Luna would describe scans it never performed. Verify with
     /// `ollama show <model> | grep -A2 Capabilities` before setting this.
     pub security_model: Option<String>,
+    /// Security model used when the no-refusal gate is unlocked.
+    ///
+    /// This is a **model swap, not a prompt change**, and that distinction is
+    /// the whole reason the field exists. Refusal in these models is mediated by
+    /// a direction in the residual stream (Arditi et al. 2024), which prompt
+    /// framing does not reach: measured 2026-10-01, the security tier refused
+    /// 8/8 with the unrestricted clause active, and the tier wrote no file. So
+    /// the gate selects a different set of weights — an abliterated checkpoint,
+    /// where refusal is removed in the weights rather than argued out of them.
+    ///
+    /// Must also support tool calls, for the same reason `security_model` must:
+    /// a completion-only model answers security questions while being unable to
+    /// run anything.
+    ///
+    /// When unset, the unlocked gate falls back to `security_model` — which
+    /// means unlocking changes nothing and the refusal behaviour is unchanged.
+    /// That is deliberate: the default is the status quo, not a surprise
+    /// capability change. Logged at startup either way.
+    #[serde(default)]
+    pub security_model_abliterated: Option<String>,
+    /// Retry once at higher temperature when a security turn comes back as a
+    /// refusal.
+    ///
+    /// Abliteration reduces refusal; it does not guarantee zero. When a prompt
+    /// slips past it, the honest response is to say so rather than to paper over
+    /// it with a different model — see `refusal_handling` in `src/agent/mod.rs`.
+    ///
+    /// Defaults true. Set false once a measured refusal rate makes the extra
+    /// round trip a poor trade.
+    #[serde(default = "default_true")]
+    pub security_retry_on_refusal: bool,
     /// Context window for `security_model`.
     ///
     /// Separate from `num_ctx` because the security tier is an 8B-class model
@@ -419,6 +450,8 @@ impl Default for LlmConfig {
             fast_model: None,
             deep_model: None,
             security_model: None,
+            security_model_abliterated: None,
+            security_retry_on_refusal: true,
             security_num_ctx: default_security_num_ctx(),
             security_unrestricted: false,
             security_scripts_dir: default_security_scripts_dir(),
