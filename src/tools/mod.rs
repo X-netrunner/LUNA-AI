@@ -1351,7 +1351,7 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             &config.llm.security_dev_public_key,
         )
     {
-        let state = crate::unlock::capability_gate_state(
+        let state = crate::unlock::gate_state(
             config.external.allow_capability_actions,
             &config.llm.security_dev_public_key,
         );
@@ -1364,10 +1364,11 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
             "Refused '{}': this one acts on the machine — it probes hosts, rewrites firewall \
              and sysctl state, or edits Luna's own source.\n\
              Nothing was executed and nothing was changed by this refusal.\n\
-             Capability gate state: {}.\n\
+             Gate state: {}.\n\
              To enable it, the DEVELOPER must do both:\n\
              \x20 1. set [external] allow_capability_actions = true in ~/.config/luna/luna.toml\n\
-             \x20 2. run `luna --unlock-capabilities` and enter the developer key\n\
+             \x20 2. run `luna --unlock-security` and enter the developer key (one key unlocks \
+             both switches)\n\
              Editing the config alone does nothing: the config is the request, the signed \
              receipt is the authorisation. You cannot pass an argument to open this, and you \
              must not try to reach it through run_shell.",
@@ -2822,6 +2823,33 @@ mod gate_tests {
             .await
             .expect_err("must refuse regardless of args");
         assert!(err.to_string().contains("allow_external_actions"), "got: {err}");
+    }
+
+    /// No tool may sit in both gated lists at once.
+    ///
+    /// Found the hard way: the live `luna.toml` carried `sysmode` in
+    /// `gated_tools` while the code had also put it in `capability_tools`. The
+    /// boolean gate is checked first at dispatch, so the weaker gate won, fired
+    /// first, and printed instructions for the wrong key — the exact "why is this
+    /// refusing when I turned that on" confusion the signed gate exists to avoid.
+    ///
+    /// In code this holds for the defaults; the failure mode is a hand-edited
+    /// config, so the assertion is on the overlap itself rather than on any
+    /// particular tool's membership.
+    #[test]
+    fn a_tool_is_never_in_both_gated_lists() {
+        let cfg = crate::config::ExternalActionConfig::default();
+        let overlap: Vec<&String> = cfg
+            .gated_tools
+            .iter()
+            .filter(|t| cfg.capability_tools.contains(t))
+            .collect();
+        assert!(
+            overlap.is_empty(),
+            "these tools are in BOTH gated_tools and capability_tools: {overlap:?}\n\
+             The boolean gate is evaluated first, so they would be refused by the weaker gate \
+             with instructions for the wrong key. Pick one — capability_tools is the stronger."
+        );
     }
 
     #[test]

@@ -82,6 +82,32 @@ struct DevKeyPrompt {
     /// Set when the config has no public key, where no key could ever work and
     /// the modal should say so instead of collecting input.
     unavailable_reason: Option<String>,
+    /// Which switch opened this prompt.
+    ///
+    /// There is one signature, so one key unlocks both switches — but it must
+    /// still know which one the user was trying to turn on, because verifying
+    /// the key only authorises the gate; the switch itself is a separate config
+    /// flag, and a prompt that forgot which flag to set would leave the user
+    /// staring at an unchanged menu.
+    pending: PendingSwitch,
+}
+
+/// Which config switch a `DevKeyPrompt` was opened for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PendingSwitch {
+    /// `llm.security_unrestricted` — answer without refusing.
+    NoRefusal,
+    /// `external.allow_capability_actions` — act on the machine.
+    Capability,
+}
+
+impl PendingSwitch {
+    fn label(self) -> &'static str {
+        match self {
+            PendingSwitch::NoRefusal => "No-Refusal Mode",
+            PendingSwitch::Capability => "Capability Actions",
+        }
+    }
 }
 
 /// State for the interactive luna.toml editor modal.
@@ -427,6 +453,23 @@ impl SettingsMenuState {
                             config.llm.security_gate_state().as_str().to_string(),
                         ),
                     },
+                    SettingItem {
+                        key: "external.allow_capability_actions",
+                        label: "Capability Actions",
+                        description: "DEVELOPER KEY REQUIRED — the same key as No Refusal. Lets \
+                                      Luna act on the machine: scan hosts, rewrite firewall and \
+                                      sysctl state, or edit her own source. Show the real gate \
+                                      state, not the raw switch, so a ticked box with no valid \
+                                      signature on disk cannot read as ON.",
+                        setting_type: SettingType::Value(
+                            crate::unlock::gate_state(
+                                config.external.allow_capability_actions,
+                                &config.llm.security_dev_public_key,
+                            )
+                            .as_str()
+                            .to_string(),
+                        ),
+                    },
                 ],
             },
             SettingCategory {
@@ -476,18 +519,20 @@ impl SettingsMenuState {
         }
     }
 
+    /// Space/Enter on the item under the cursor.
+    ///
+    /// The signed switches are not toggles. Flipping the config boolean alone
+    /// would put Luna in a state where the config says ON and the tool is still
+    /// refused, which is exactly the confusion the gate exists to prevent. So
+    /// they report the real state and, if it is off, say what would unlock it —
+    /// resolved before the mutable borrow of `categories` below.
     pub fn toggle_selected(&mut self) {
+        if let Some(key) = self.signed_item_key() {
+            self.describe_signed_gate(key);
+            return;
+        }
         if let Some(cat) = self.categories.get_mut(self.cat_index) {
             if let Some(item) = cat.items.get_mut(self.item_index) {
-                // The no-refusal switch is not a toggle. Flipping the config
-                // boolean would put Luna in a state where the config says ON and
-                // the model is still scoped, which is exactly the confusion the
-                // gate exists to prevent. Space/Enter on this item reports the
-                // real state and, if it is off, says what would unlock it.
-                if item.key == "llm.security_unrestricted" {
-                    self.describe_security_gate();
-                    return;
-                }
                 match &mut item.setting_type {
                     SettingType::Toggle(ref mut b) => {
                         *b = !*b;
@@ -533,81 +578,137 @@ impl SettingsMenuState {
         }
     }
 
-    /// Is the cursor on the no-refusal switch?
+    /// Is the cursor on one of the two signed switches?
     pub fn is_on_security_item(&self) -> bool {
+        self.signed_item_key().is_some()
+    }
+
+    /// The signed switch under the cursor, if any.
+    pub fn signed_item_key(&self) -> Option<&'static str> {
         self.categories
             .get(self.cat_index)
             .and_then(|c| c.items.get(self.item_index))
-            .map(|i| i.key == "llm.security_unrestricted")
-            .unwrap_or(false)
+            .and_then(|i| match i.key {
+                "llm.security_unrestricted" => Some("llm.security_unrestricted"),
+                "external.allow_capability_actions" => Some("external.allow_capability_actions"),
+                _ => None,
+            })
     }
 
-    /// Report the true state of the no-refusal switch.
+    /// The effective gate state of either signed switch.
+    fn gate_state_of(&self, key: &str) -> crate::unlock::GateState {
+        if key == "external.allow_capability_actions" {
+            crate::unlock::gate_state(
+                self.config.external.allow_capability_actions,
+                &self.config.llm.security_dev_public_key,
+            )
+        } else {
+            self.config.llm.security_gate_state()
+        }
+    }
+
+    /// Report the true state of whichever signed switch is under the cursor.
     ///
     /// Deliberately does not flip the config boolean. The switch is only ON when a
     /// valid signature is on disk, so a tick mark that could mean "asked for" is
     /// a lie. This says which of the four states it is in and, for the two
     /// unlockable ones, what the user has to do.
-    fn describe_security_gate(&mut self) {
+    fn describe_signed_gate(&mut self, key: &'static str) {
         use crate::unlock::GateState;
-        let st = self.config.llm.security_gate_state();
+        let st = self.gate_state_of(key);
+        let cap = key == "external.allow_capability_actions";
+        let label = if cap { "Capability Actions" } else { "No-Refusal Mode" };
+        let other = if cap {
+            "It shares the developer key with No-Refusal Mode, but has its own switch: Luna may \
+             still scan hosts, harden the system, or edit her own source."
+        } else {
+            "It shares the developer key with Capability Actions, but has its own switch: Luna \
+             may still refuse to scan hosts, harden the system, or edit her own source."
+        };
         self.status = match st {
             GateState::Unlocked => format!(
-                "🔓 No-Refusal Mode: ON. The security tier will not evaluate authorisation and \
-                 will not refuse. [S] to save · press again to LOCK"
+                "🔓 {label}: ON. {} [S] to save · press again to LOCK",
+                if cap {
+                    "Luna may act on the machine."
+                } else {
+                    "The security tier will not evaluate authorisation and will not refuse."
+                }
             ),
             GateState::Locked => format!(
-                "🔒 No-Refusal Mode: OFF — requested but not unlocked (no valid developer \
-                 signature at {}). Unlock it with: luna --unlock-security, or press T and set \
-                 [llm] security_unrestricted = false to drop the request.",
+                "🔒 {label}: OFF — requested but not unlocked (no valid developer signature at {}). \
+                 Unlock it with: luna --unlock-security, or press T and set the switch to false to \
+                 drop the request. {other}",
                 crate::unlock::receipt_path_display()
             ),
-            GateState::NotRequested => {
-                "🔒 No-Refusal Mode: OFF. To enable: run `luna --gen-dev-key`, put the public \
-                 key in luna.toml as [llm] security_dev_public_key, then run \
-                 `luna --unlock-security` with the private key."
-                    .to_string()
-            }
-            GateState::Unavailable => {
-                "⛔ No-Refusal Mode: permanently unavailable — no developer public key is \
-                 configured, so no key can ever unlock it. Run `luna --gen-dev-key` and set \
-                 [llm] security_dev_public_key in luna.toml first."
-                    .to_string()
-            }
+            GateState::NotRequested => format!(
+                "🔒 {label}: OFF. To enable: run `luna --gen-dev-key`, put the public key in \
+                 luna.toml as [llm] security_dev_public_key, then run `luna --unlock-security` with \
+                 the private key."
+            ),
+            GateState::Unavailable => format!(
+                "⛔ {label}: permanently unavailable — no developer public key is configured, so \
+                 no key can ever unlock it. Run `luna --gen-dev-key` and set [llm] \
+                 security_dev_public_key in luna.toml first."
+            ),
         };
     }
 
-    /// Enable or disable the no-refusal mode, subject to the gate.
+    /// Enable or disable one of the two signed switches.
     ///
     /// Returns `true` when the caller should open the key prompt, because a key
     /// is needed and one was supplied by nobody yet.
-    pub fn set_security_unrestricted(&mut self, want: bool) -> bool {
+    ///
+    /// The asymmetry from the two-gate version: turning a switch OFF no longer
+    /// deletes the receipt, because the receipt is shared and deleting it would
+    /// silently revoke the *other* switch too. It doesn't need to — a switch that
+    /// is false reports `NotRequested` and is inactive regardless of what is on
+    /// disk, so "off" is genuinely off. What the receipt would still buy is a
+    /// re-enable without re-entering the key, so the status line says so and
+    /// points at `--lock-security` for a real revocation.
+    pub fn set_signed_switch(&mut self, key: &'static str, want: bool) -> bool {
         use crate::unlock::GateState;
-        self.config.llm.security_unrestricted = want;
+        let cap = key == "external.allow_capability_actions";
+        let label = if cap { "Capability Actions" } else { "No-Refusal Mode" };
+
+        if cap {
+            self.config.external.allow_capability_actions = want;
+        } else {
+            self.config.llm.security_unrestricted = want;
+        }
 
         if !want {
-            // Turning it off must actually take effect, not merely be recorded as
-            // a request. The receipt goes too, so a stale signature cannot
-            // re-enable it later.
-            if let Err(e) = crate::unlock::lock() {
-                self.status = format!("⚠ Turned off, but could not remove the receipt: {e}");
-                return false;
-            }
-            self.refresh_security_item();
+            self.refresh_signed_items();
             self.modified = true;
-            self.status = String::from(
-                "🔒 No-Refusal Mode: OFF. Receipt deleted. [Press S to save]",
-            );
+            let other_is_on = if cap {
+                self.config.llm.security_unrestricted_active()
+            } else {
+                crate::unlock::capabilities_active(
+                    self.config.external.allow_capability_actions,
+                    &self.config.llm.security_dev_public_key,
+                )
+            };
+            self.status = if other_is_on {
+                format!(
+                    "🔒 {label}: OFF. The developer receipt was NOT deleted — \
+                     {} is still on and shares it. Use `luna --lock-security` to revoke the key \
+                     for real. [Press S to save]",
+                    if cap { "No-Refusal Mode" } else { "Capability Actions" }
+                )
+            } else {
+                format!(
+                    "🔒 {label}: OFF. [Press S to save · `luna --lock-security` revokes the key \
+                     for real]"
+                )
+            };
             return false;
         }
 
-        match self.config.llm.security_gate_state() {
+        match self.gate_state_of(key) {
             GateState::Unlocked => {
-                self.refresh_security_item();
+                self.refresh_signed_items();
                 self.modified = true;
-                self.status = String::from(
-                    "🔓 No-Refusal Mode: ON (developer key verified). [Press S to save]",
-                );
+                self.status =
+                    format!("🔓 {label}: ON (developer key verified). [Press S to save]");
                 false
             }
             GateState::Unavailable => {
@@ -616,8 +717,8 @@ impl SettingsMenuState {
                 // the actual problem — that they asked and there is no key. The
                 // effective state is still off either way, so nothing is enabled
                 // by leaving it; and the status line explains the remedy.
-                self.refresh_security_item();
-                self.describe_security_gate();
+                self.refresh_signed_items();
+                self.describe_signed_gate(key);
                 false
             }
             _ => {
@@ -629,16 +730,38 @@ impl SettingsMenuState {
         }
     }
 
-    /// Re-read the gate and mirror it onto the menu item.
-    fn refresh_security_item(&mut self) {
-        let state = self.config.llm.security_gate_state().as_str().to_string();
+    /// Enable or disable the no-refusal mode, subject to the gate.
+    pub fn set_security_unrestricted(&mut self, want: bool) -> bool {
+        self.set_signed_switch("llm.security_unrestricted", want)
+    }
+
+    /// Re-read both signed gates and mirror them onto the menu items.
+    fn refresh_signed_items(&mut self) {
+        let no_refusal = self.config.llm.security_gate_state().as_str().to_string();
+        let cap = crate::unlock::gate_state(
+            self.config.external.allow_capability_actions,
+            &self.config.llm.security_dev_public_key,
+        )
+        .as_str()
+        .to_string();
         for cat in self.categories.iter_mut() {
             for item in cat.items.iter_mut() {
-                if item.key == "llm.security_unrestricted" {
-                    item.setting_type = SettingType::Value(state.clone());
+                match item.key {
+                    "llm.security_unrestricted" => {
+                        item.setting_type = SettingType::Value(no_refusal.clone())
+                    }
+                    "external.allow_capability_actions" => {
+                        item.setting_type = SettingType::Value(cap.clone())
+                    }
+                    _ => {}
                 }
             }
         }
+    }
+
+    /// Re-read the gate and mirror it onto the menu item.
+    fn refresh_security_item(&mut self) {
+        self.refresh_signed_items();
     }
 
     pub fn save(&mut self, app_config: &mut LunaConfig) -> bool {
@@ -1233,17 +1356,28 @@ impl TuiApp {
         }
     }
 
-    /// The one place the no-refusal switch is driven from the UI.
+    /// The one place the signed switches are driven from the UI.
     ///
-    /// Turning it ON requires a developer key, so this either opens the key
-    /// prompt or explains why it cannot. Turning it OFF deletes the receipt, so
-    /// "off" is off rather than "off until something re-enables it".
+    /// Turning one ON requires a developer key, so this either opens the key
+    /// prompt or explains why it cannot. Turning one OFF just drops the config
+    /// request; the shared receipt stays, because revoking it here would revoke
+    /// the other switch without being asked.
     fn press_security_item(&mut self) {
-        let want = !self.config.llm.security_unrestricted_active();
+        // Already unlocked → this press turns it OFF. Requested but locked →
+        // this press is a request for the key, so keep the request set and open
+        // the prompt rather than dropping it.
+        let (key, want) = match self.settings_menu.as_mut() {
+            Some(sm) => {
+                let Some(key) = sm.signed_item_key() else { return };
+                let want = sm.gate_state_of(key) != crate::unlock::GateState::Unlocked;
+                (key, want)
+            }
+            None => return,
+        };
         let Some(sm) = self.settings_menu.as_mut() else {
             return;
         };
-        if sm.set_security_unrestricted(want) {
+        if sm.set_signed_switch(key, want) {
             // A key is needed. When none is configured, say so in the modal
             // instead of collecting a key that could never work.
             let unavailable_reason = if !crate::unlock::has_public_key(
@@ -1263,6 +1397,11 @@ impl TuiApp {
                 input: String::new(),
                 error: None,
                 unavailable_reason,
+                pending: if key == "external.allow_capability_actions" {
+                    PendingSwitch::Capability
+                } else {
+                    PendingSwitch::NoRefusal
+                },
             });
         } else {
             self.dev_key_prompt = None;
@@ -1841,15 +1980,23 @@ impl TuiApp {
                 let cfg = &self.config;
                 match crate::unlock::unlock(&cfg.llm.security_dev_public_key, &p.input) {
                     Ok(()) => {
-                        // Verified. Now flip the request on and mirror the real
-                        // state onto the item so the user sees the effect rather
-                        // than having to infer it.
+                        // Verified. Now set the request the user actually asked for
+                        // and mirror the real state onto both items, so the user
+                        // sees the effect rather than having to infer it.
                         if let Some(sm) = self.settings_menu.as_mut() {
-                            sm.config.llm.security_unrestricted = true;
+                            match p.pending {
+                                PendingSwitch::NoRefusal => {
+                                    sm.config.llm.security_unrestricted = true
+                                }
+                                PendingSwitch::Capability => {
+                                    sm.config.external.allow_capability_actions = true
+                                }
+                            }
                             sm.refresh_security_item();
                             sm.modified = true;
-                            sm.status = String::from(
-                                "🔓 Developer key verified — No-Refusal Mode ON. [Press S to save]",
+                            sm.status = format!(
+                                "🔓 Developer key verified — {} ON. [Press S to save]",
+                                p.pending.label()
                             );
                         }
                         // `input` is dropped here at the end of scope.
@@ -1863,6 +2010,7 @@ impl TuiApp {
                             input: p.input,
                             error: Some(e.to_string()),
                             unavailable_reason: p.unavailable_reason,
+                            pending: p.pending,
                         });
                     }
                 }
@@ -2566,6 +2714,97 @@ mod security_gate_tests {
         );
     }
 
+    /// The capability switch exists in the menu, reports its real state, and is
+    /// not a plain toggle.
+    ///
+    /// The TUI was the one place the capability switch never got exposed, so the
+    /// only way to turn it on was hand-editing the config — exactly the path
+    /// that, combined with the boolean gate firing first, produced a confusing
+    /// refusal. Three properties asserted, because each fails differently:
+    /// present, honest, and non-toggleable.
+    #[test]
+    fn the_capability_switch_is_present_honest_and_not_a_plain_toggle() {
+        use crate::unlock;
+        let _receipt = unlock::test_receipt(unlock::scratch_receipt("tui_cap"));
+
+        let (pk, sk) = unlock::generate_keypair();
+        let mut sm = SettingsMenuState::load(crate::config::LunaConfig::default());
+        sm.config.llm.security_dev_public_key = pk.clone();
+
+        // Present.
+        assert!(
+            sm.categories
+                .iter()
+                .flat_map(|c| c.items.iter())
+                .any(|i| i.key == "external.allow_capability_actions"),
+            "the capability switch must be reachable from the menu"
+        );
+
+        // Honest before anything is requested: NOT "ON" off the back of the key.
+        let mut item = sm
+            .categories
+            .iter()
+            .flat_map(|c| c.items.iter())
+            .find(|i| i.key == "external.allow_capability_actions")
+            .map(|i| i.setting_type.clone())
+            .expect("just asserted");
+        assert!(
+            matches!(&item, crate::tui::app::SettingType::Value(v) if v == "OFF"),
+            "must show the gate state, not a boolean: {item:?}"
+        );
+
+        // Not toggleable: Space/Enter must not flip the config boolean, because
+        // that would produce "config says ON, tool still refused".
+        sm.config.external.allow_capability_actions = false;
+        for (ci, cat) in sm.categories.iter().enumerate() {
+            if let Some(ii) = cat
+                .items
+                .iter()
+                .position(|i| i.key == "external.allow_capability_actions")
+            {
+                sm.cat_index = ci;
+                sm.item_index = ii;
+            }
+        }
+        sm.modified = false;
+        assert_eq!(sm.signed_item_key(), Some("external.allow_capability_actions"));
+        sm.toggle_selected();
+        assert!(
+            !sm.config.external.allow_capability_actions,
+            "Space on the capability switch must report, not flip"
+        );
+        assert!(!sm.modified, "reporting a state is not an edit");
+
+        // Real unlock: requested + signed → ON.
+        unlock::unlock(&pk, &sk).expect("unlock must work in a test");
+        assert!(!sm.set_signed_switch("external.allow_capability_actions", true));
+        assert!(
+            unlock::capabilities_active(sm.config.external.allow_capability_actions, &pk),
+            "after a verified unlock the capability switch must actually be on"
+        );
+
+        // And the same key covers the other switch, which is the whole point of
+        // one signature: it authorises whichever switches are requested, and only
+        // those. Here the other switch was never requested, so it stays off.
+        assert!(!sm.set_signed_switch("llm.security_unrestricted", true));
+        assert!(
+            sm.config.llm.security_unrestricted_active(),
+            "a verified key should authorise the second switch too"
+        );
+        assert!(
+            sm.config.external.allow_capability_actions,
+            "the independent switch must not have been dropped"
+        );
+
+        // Revoking the one key closes both, which is the cost of sharing it.
+        unlock::lock().expect("locking must succeed");
+        assert!(!sm.config.llm.security_unrestricted_active());
+        assert!(
+            !unlock::capabilities_active(sm.config.external.allow_capability_actions, &pk),
+            "an explicit lock must revoke both switches"
+        );
+    }
+
     /// With a key configured but not unlocked, the request is kept — so that a
     /// successful unlock takes effect without a second press — but the effective
     /// state must stay off.
@@ -2587,13 +2826,22 @@ mod security_gate_tests {
         );
     }
 
-    /// Turning it off must actually turn it off, and must clear the receipt so a
-    /// stale signature cannot re-enable it later.
+    /// Turning a signed switch off drops the request, not the shared receipt.
+    ///
+    /// This is the one behaviour that genuinely changed when the two gates were
+    /// collapsed into one key. The old code deleted the receipt here, which was
+    /// safe when each gate had its own — but with one receipt, turning off
+    /// No-Refusal would silently revoke Capability Actions too, without the user
+    /// asking for that. So the request is dropped and the receipt stays, and the
+    /// status line says so and points at the real revocation.
+    ///
+    /// The property that makes off still *off*: a switch set to false reports
+    /// `NotRequested` and is inactive no matter what is on disk. Asserted below.
     ///
     /// Uses the shared test receipt guard, so the real `~/.local/state` is never
     /// written — otherwise this test would leave the real feature unlocked.
     #[test]
-    fn turning_it_off_clears_the_receipt() {
+    fn turning_one_off_drops_the_request_but_keeps_the_shared_receipt() {
         use crate::unlock;
         let _receipt = unlock::test_receipt(unlock::scratch_receipt("tui_off"));
 
@@ -2603,11 +2851,16 @@ mod security_gate_tests {
         let mut sm = SettingsMenuState::load(crate::config::LunaConfig::default());
         sm.config.llm.security_dev_public_key = pk.clone();
         sm.config.llm.security_unrestricted = true;
+        sm.config.external.allow_capability_actions = true;
 
-        // Precondition: genuinely on, so the assertion afterwards means something.
+        // Precondition: genuinely on, so the assertions afterwards mean something.
         assert!(
             sm.config.llm.security_unrestricted_active(),
             "test setup failed — never reached the ON state, so turning it off proves nothing"
+        );
+        assert!(
+            unlock::capabilities_active(sm.config.external.allow_capability_actions, &pk),
+            "test setup failed — capability switch never came on"
         );
 
         let needs_prompt = sm.set_security_unrestricted(false);
@@ -2617,18 +2870,37 @@ mod security_gate_tests {
             !sm.config.llm.security_unrestricted_active(),
             "still on after turning off"
         );
-        assert!(sm.status.contains("Receipt deleted"), "{}", sm.status);
-
-        // The receipt itself must be gone, not just the request. A surviving
-        // signature would let the mode come back on a later request.
+        // The switch really is off regardless of the surviving receipt.
+        assert_eq!(
+            unlock::gate_state(false, &pk),
+            unlock::GateState::NotRequested,
+            "a false switch must report NotRequested, whatever is on disk"
+        );
+        // And the user is told the receipt survived, and how to really revoke.
         assert!(
-            !unlock::is_unlocked(&pk),
-            "the receipt survived — off is not off"
+            sm.status.contains("NOT deleted") && sm.status.contains("--lock-security"),
+            "status must not imply the key was revoked: {}",
+            sm.status
         );
 
-        // And locking again must be safe: the UI can offer "off" whether or not a
-        // receipt existed.
-        unlock::lock().expect("locking twice must succeed");
+        // The receipt survives, so the OTHER switch is untouched — the reason
+        // this test exists.
+        assert!(
+            unlock::is_unlocked(&pk),
+            "the receipt must survive so the other switch keeps working"
+        );
+        assert!(
+            sm.config.llm.security_unrestricted_active()
+                || unlock::capabilities_active(sm.config.external.allow_capability_actions, &pk),
+            "turning one switch off must not have disabled both"
+        );
+
+        // The real revocation is explicit and affects both.
+        unlock::lock().expect("locking must succeed");
+        assert!(
+            !unlock::capabilities_active(true, &pk),
+            "an explicit lock must revoke the other switch too"
+        );
     }
 
     /// The UI must never be the thing that decides. If a receipt exists and

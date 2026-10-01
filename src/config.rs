@@ -95,24 +95,29 @@ pub struct ExternalActionConfig {
     /// Tools refused while the gate is closed. Read-only counterparts (e.g.
     /// `todoist_list` vs `todoist_complete`) are deliberately absent.
     pub gated_tools: Vec<String>,
-    /// Developer-signed capability gate: may Luna ACT on the machine.
+    /// May Luna ACT on the machine — probe hosts, rewrite firewall or sysctl
+    /// state, or edit her own source.
     ///
     /// Separate from `allow_external_actions` on purpose. That flag is a plain
     /// boolean, so anyone who can edit `luna.toml` can flip it — which is fine
-    /// for "may she text my contacts", and not fine for "may she scan a host,
-    /// rewrite firewall rules, or rewrite her own source". This one additionally
-    /// requires an Ed25519 receipt from the developer key
-    /// (`luna --unlock-capabilities`).
+    /// for "may she text my contacts", and not fine for "may she scan a host".
+    /// This one additionally requires an Ed25519 receipt from the developer key
+    /// (`luna --unlock-security`).
     ///
     /// Both halves are required: this flag is the *request*, the signature is
-    /// the *authorisation*. Editing the config alone does nothing, which is the
-    /// whole point.
+    /// the *authorisation*. Editing the config alone does nothing.
+    ///
+    /// It shares that one signature with `llm.security_unrestricted` rather than
+    /// having a key of its own. Two switches, one key: the split is kept because
+    /// a deployment can hand over the key and still decline to let Luna touch
+    /// the machine, not because there are two secrets to manage.
     #[serde(default)]
     pub allow_capability_actions: bool,
-    /// Tools refused unless the capability gate is unlocked.
+    /// Tools refused unless `allow_capability_actions` is requested AND the
+    /// developer key has been presented.
     ///
-    /// Not gated by `gated_tools`, because a different and much stronger gate
-    /// applies to them.
+    /// Not in `gated_tools`: those are gated by `allow_external_actions`, a plain
+    /// config boolean. These are not.
     #[serde(default = "default_capability_tools")]
     pub capability_tools: Vec<String>,
 }
