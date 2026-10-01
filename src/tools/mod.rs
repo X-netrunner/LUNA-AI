@@ -1336,6 +1336,46 @@ pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -
         );
     }
 
+    // ── Developer-signed capability gate ────────────────────────────────────────
+    // Placed at the same chokepoint and for the same reason as the gate above:
+    // one place, so no arm can forget it and no argument can pass it.
+    //
+    // Checked AFTER the external gate so a tool that is refused for both reasons
+    // reports the one the user has to act on first — and, more importantly, the
+    // capability gate's message must never be the *only* thing standing between
+    // a turn and a live host, since it is disabled by default and the message
+    // would then read as an invitation.
+    if config.external.is_capability_gated(name)
+        && !crate::unlock::capabilities_active(
+            config.external.allow_capability_actions,
+            &config.llm.security_dev_public_key,
+        )
+    {
+        let state = crate::unlock::capability_gate_state(
+            config.external.allow_capability_actions,
+            &config.llm.security_dev_public_key,
+        );
+        tracing::warn!(
+            "Refused '{}': capability gate is {:?} (args were not acted on)",
+            name,
+            state
+        );
+        anyhow::bail!(
+            "Refused '{}': this one acts on the machine — it probes hosts, rewrites firewall \
+             and sysctl state, or edits Luna's own source.\n\
+             Nothing was executed and nothing was changed by this refusal.\n\
+             Capability gate state: {}.\n\
+             To enable it, the DEVELOPER must do both:\n\
+             \x20 1. set [external] allow_capability_actions = true in ~/.config/luna/luna.toml\n\
+             \x20 2. run `luna --unlock-capabilities` and enter the developer key\n\
+             Editing the config alone does nothing: the config is the request, the signed \
+             receipt is the authorisation. You cannot pass an argument to open this, and you \
+             must not try to reach it through run_shell.",
+            name,
+            state.as_str()
+        );
+    }
+
     let sudo_pass = config.agent.sudo_password.as_deref();
 
     match name.as_str() {
@@ -2612,12 +2652,109 @@ mod gate_tests {
         );
     }
 
+    /// The tools that act on the machine must be behind the developer-signed gate,
+    /// and must be there BY DEFAULT.
+    ///
+    /// The default matters as much as the list: a capability that must be
+    /// enabled before it exists is the difference between "she can't" and "she
+    /// can, once". Asserting the default guards against someone adding a tool to
+    /// the list but leaving `allow_capability_actions` true in a config file that
+    /// gets copied around.
+    #[test]
+    fn capability_gated_tools_are_the_ones_that_act_on_the_machine() {
+        let cfg = crate::config::LunaConfig::default();
+        for t in ["nmap_scan", "sysmode", "self_patch", "system_update"] {
+            assert!(
+                cfg.external.is_capability_gated(t),
+                "{t} must be behind the capability gate"
+            );
+        }
+        // Read-only and everyday tools must NOT be swept up, or the gate just
+        // makes Luna useless instead of safe.
+        for t in [
+            "run_shell", "read_file", "write_file", "edit_file", "system_info",
+            "process_stats", "nmap_scan_no_such_tool",
+        ] {
+            assert!(
+                !cfg.external.is_capability_gated(t),
+                "{t} must not need the capability gate"
+            );
+        }
+        assert!(
+            !cfg.external.allow_capability_actions,
+            "capability actions must default to OFF"
+        );
+    }
+
+    /// The refusal must actually happen, through the real dispatch path.
+    ///
+    /// Asserting on the config list alone would pass while the check sat
+    /// somewhere unreachable — the same mistake as testing `classify` in
+    /// isolation while the tier was dead. This goes through `execute()` with the
+    /// gate closed and asserts the tool did not run.
+    #[tokio::test]
+    async fn a_capability_tool_is_refused_while_the_gate_is_closed() {
+        let cfg = crate::config::LunaConfig::default();
+        // No developer key at all: the strongest possible closed state.
+        let call = |name: &str, args: serde_json::Value| crate::llm::ollama::ToolCall {
+            function: crate::llm::ollama::ToolCallFunction {
+                name: name.to_string(),
+                arguments: args,
+            },
+        };
+
+        for (name, args) in [
+            ("nmap_scan", serde_json::json!({"target": "127.0.0.1"})),
+            ("sysmode", serde_json::json!({"action": "status"})),
+            ("self_patch", serde_json::json!({"instruction": "add a test"})),
+        ] {
+            let err = crate::tools::execute(&call(name, args), &cfg)
+                .await
+                .expect_err(&format!("{name} must be refused with the gate closed"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("capability") && msg.contains("Refused"),
+                "{name} refusal should name the capability gate, got: {msg}"
+            );
+            // Must not look like an invitation.
+            assert!(
+                !msg.contains("nothing was changed") || msg.contains("Nothing was executed"),
+                "{name} refusal must state nothing ran, got: {msg}"
+            );
+        }
+
+        // And an ungated tool is unaffected by the same closed config.
+        let ok = crate::tools::execute(
+            &call("system_info", serde_json::json!({})),
+            &cfg,
+        )
+        .await;
+        assert!(
+            ok.is_ok(),
+            "an ungated tool must still work with capabilities closed, got: {:?}",
+            ok.err().map(|e| e.to_string())
+        );
+    }
+
     #[test]
     fn the_tools_that_actually_caused_harm_are_gated() {
         let cfg = crate::config::ExternalActionConfig::default();
-        for t in ["todoist_complete", "whatsapp_send", "sysmode"] {
+        for t in ["todoist_complete", "whatsapp_send", "browser_do"] {
             assert!(cfg.is_gated(t), "{t} must be gated");
         }
+        // sysmode moved to the capability gate, which is stronger: it needs a
+        // developer signature, not a boolean in this file. Asserting it here
+        // again would pin it to the weaker gate.
+        assert!(
+            !cfg.is_gated("sysmode"),
+            "sysmode must not be on the boolean-only external gate"
+        );
+        assert!(
+            crate::config::LunaConfig::default()
+                .external
+                .is_capability_gated("sysmode"),
+            "sysmode must be behind the signed capability gate"
+        );
     }
 
     #[test]
@@ -2710,23 +2847,33 @@ mod gate_tests {
         // the exact mistake I made: hand-listing the dangerous tools and
         // forgetting one (todoist_add), which let a "read only" request create
         // two real tasks. A new tool must be consciously put in one list.
+        //
+        // Three lists, not two: `gated_tools` (a boolean in the config),
+        // `capability_tools` (needs a developer signature), and
+        // `READ_ONLY_TOOLS` (safe). The capability list exists because moving
+        // `sysmode` there made this test fail correctly -- it refused to accept
+        // a tool that was in neither list, which is exactly what should happen.
         let cfg = crate::config::ExternalActionConfig::default();
         let open: std::collections::HashSet<&str> =
             crate::config::READ_ONLY_TOOLS.iter().copied().collect();
         let mut unclassified: Vec<String> = Vec::new();
         for d in tool_definitions() {
             let n = d.function.name.as_str();
-            if cfg.is_gated(n) || open.contains(n) {
+            if cfg.is_gated(n) || cfg.is_capability_gated(n) || open.contains(n) {
                 continue;
             }
             unclassified.push(n.to_string());
         }
         assert!(
             unclassified.is_empty(),
-            "these tools are in NEITHER gated_tools nor READ_ONLY_TOOLS, so their safety is \
-             undecided: {unclassified:?}\n\
-             Add each to ExternalActionConfig::default().gated_tools (if it sends/closes/posts/clicks) \
-             or to config::READ_ONLY_TOOLS (if it only reads or touches local state)."
+            "these tools are in NEITHER gated_tools, capability_tools, nor READ_ONLY_TOOLS, so \
+             their safety is undecided: {unclassified:?}\n\
+             Add each to one of:\n  \
+             ExternalActionConfig::default().gated_tools        — sends/closes/posts/clicks; a \
+             boolean in luna.toml is enough\n  \
+             ExternalActionConfig::default().capability_tools   — acts on this machine (probes \
+             hosts, rewrites firewall state, edits her own source); needs the developer key\n  \
+             config::READ_ONLY_TOOLS                            — only reads or touches local state"
         );
     }
 

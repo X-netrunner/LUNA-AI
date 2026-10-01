@@ -95,12 +95,51 @@ pub struct ExternalActionConfig {
     /// Tools refused while the gate is closed. Read-only counterparts (e.g.
     /// `todoist_list` vs `todoist_complete`) are deliberately absent.
     pub gated_tools: Vec<String>,
+    /// Developer-signed capability gate: may Luna ACT on the machine.
+    ///
+    /// Separate from `allow_external_actions` on purpose. That flag is a plain
+    /// boolean, so anyone who can edit `luna.toml` can flip it — which is fine
+    /// for "may she text my contacts", and not fine for "may she scan a host,
+    /// rewrite firewall rules, or rewrite her own source". This one additionally
+    /// requires an Ed25519 receipt from the developer key
+    /// (`luna --unlock-capabilities`).
+    ///
+    /// Both halves are required: this flag is the *request*, the signature is
+    /// the *authorisation*. Editing the config alone does nothing, which is the
+    /// whole point.
+    #[serde(default)]
+    pub allow_capability_actions: bool,
+    /// Tools refused unless the capability gate is unlocked.
+    ///
+    /// Not gated by `gated_tools`, because a different and much stronger gate
+    /// applies to them.
+    #[serde(default = "default_capability_tools")]
+    pub capability_tools: Vec<String>,
+}
+
+fn default_capability_tools() -> Vec<String> {
+    [
+        // Actively probes hosts on the network.
+        "nmap_scan",
+        // Rewrites firewall/sysctl/audit posture on a live machine — the
+        // "harden" and "self-heal" half of the request.
+        "sysmode",
+        // Rewrites her own source. Highest blast radius of anything she holds.
+        "self_patch",
+        // Installs/updates packages system-wide.
+        "system_update",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 impl Default for ExternalActionConfig {
     fn default() -> Self {
         Self {
             allow_external_actions: false,
+            allow_capability_actions: false,
+            capability_tools: default_capability_tools(),
             gated_tools: vec![
                 // Sends a real message to a real person. Irreversible.
                 "whatsapp_send".into(),
@@ -115,8 +154,15 @@ impl Default for ExternalActionConfig {
                 // Can type, click, submit, and purchase on the web/desktop.
                 "browser_do".into(),
                 "desktop_do".into(),
-                // Rewrites firewall/sysctl/audit posture on a live machine.
-                "sysmode".into(),
+                // NOTE: `sysmode` used to be here. It rewrites firewall/sysctl/audit
+                // posture on a live machine, so it belongs to `capability_tools`
+                // below -- which is the strictly stronger gate, requiring a
+                // developer signature rather than a boolean in this file.
+                //
+                // Listing it in both was worse than either: the weaker gate runs
+                // first, so the refusal told the user to flip
+                // `allow_external_actions`, and only after they did would they
+                // meet the real gate. One tool, one gate, the strongest one.
                 // Acts on the user's Spotify account.
                 "spotify".into(),
                 // Writes into her own skill/memory store, which changes how she
@@ -131,6 +177,11 @@ impl Default for ExternalActionConfig {
 impl ExternalActionConfig {
     pub fn is_gated(&self, tool: &str) -> bool {
         self.gated_tools.iter().any(|t| t == tool)
+    }
+
+    /// Whether this tool is behind the developer-signed capability gate.
+    pub fn is_capability_gated(&self, tool: &str) -> bool {
+        self.capability_tools.iter().any(|t| t == tool)
     }
 
     /// Read-only tools that could serve the same need as a refused one, so the

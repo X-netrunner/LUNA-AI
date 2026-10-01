@@ -89,9 +89,27 @@ struct Args {
     #[arg(long)]
     lock_security: bool,
 
+    /// Unlock the developer-signed capability gate: letting Luna ACT on the
+    /// machine — scan hosts, harden the system, edit her own source — as
+    /// opposed to letting her answer without refusing.
+    ///
+    /// A separate grant from `--unlock-security`, with a separate challenge and
+    /// receipt. Also requires `[external] allow_capability_actions = true`.
+    #[arg(long)]
+    unlock_capabilities: bool,
+
+    /// Re-lock the capability gate: delete the receipt. The config keeps
+    /// asking, so it shows as OFF (locked) until unlocked again.
+    #[arg(long)]
+    lock_capabilities: bool,
+
     /// Print the no-refusal gate state and exit.
     #[arg(long)]
     security_status: bool,
+
+    /// Print the capability gate state and exit.
+    #[arg(long)]
+    capability_status: bool,
 
     /// Print a stored keyring secret to stdout (for verification).
     #[arg(long, value_name = "NAME")]
@@ -283,6 +301,69 @@ async fn main() -> Result<()> {
         if !crate::unlock::has_public_key(&config.llm.security_dev_public_key) {
             println!("\nNo developer key is configured, so this can never be enabled.");
             println!("Run `luna --gen-dev-key` and set [llm] security_dev_public_key.");
+        }
+        return Ok(());
+    }
+
+    if args.capability_status {
+        let requested = config.external.allow_capability_actions;
+        let state = crate::unlock::capability_gate_state(
+            requested,
+            &config.llm.security_dev_public_key,
+        );
+        println!("Capability gate — tools that act on the machine");
+        println!("  state               : {}", state.as_str());
+        println!("  requested in config : {}", requested);
+        println!("  effective           : {}", crate::unlock::capabilities_active(
+            requested,
+            &config.llm.security_dev_public_key
+        ));
+        println!("  covers              : {}", config.external.capability_tools.join(", "));
+        println!("  receipt             : {}", crate::unlock::capability_receipt_path_display());
+        if !crate::unlock::has_public_key(&config.llm.security_dev_public_key) {
+            println!("\nNo developer key is configured, so this can never be enabled.");
+            println!("Run `luna --gen-dev-key` and set [llm] security_dev_public_key.");
+        }
+        return Ok(());
+    }
+
+    if args.lock_capabilities {
+        crate::unlock::lock_capabilities()?;
+        println!("Receipt deleted. The capability gate is OFF.");
+        if config.external.allow_capability_actions {
+            println!(
+                "Note: [external] allow_capability_actions is still true in luna.toml, so it will \
+                 show as OFF (locked) until unlocked again."
+            );
+        }
+        return Ok(());
+    }
+
+    if args.unlock_capabilities {
+        if !crate::unlock::has_public_key(&config.llm.security_dev_public_key) {
+            anyhow::bail!(
+                "No developer public key in luna.toml ([llm] security_dev_public_key), so there \
+                 is nothing to unlock against. Run `luna --gen-dev-key` first."
+            );
+        }
+        // Read from the terminal without echoing, for the same reason as above:
+        // a key in argv is visible in `ps` and lands in shell history.
+        let key = rpassword::prompt_password("Developer key: ")
+            .context("Failed to read the developer key from the terminal")?;
+        crate::unlock::unlock_capabilities(&config.llm.security_dev_public_key, &key)?;
+        drop(key);
+        println!("✓ Developer key verified — capability receipt stored.");
+        println!(
+            "  Gated tools: {}",
+            config.external.capability_tools.join(", ")
+        );
+        if config.external.allow_capability_actions {
+            println!("  Capability actions are now permitted.");
+        } else {
+            println!(
+                "  Still OFF: [external] allow_capability_actions is false in luna.toml. Set it to \
+                 true to activate."
+            );
         }
         return Ok(());
     }

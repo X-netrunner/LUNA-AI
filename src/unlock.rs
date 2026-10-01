@@ -59,6 +59,50 @@ use std::path::PathBuf;
 /// invalidate outstanding unlocks without touching anyone's key.
 const CHALLENGE: &[u8] = b"luna/security-tier/unrestricted/v1";
 
+/// The signed challenge for the *capability* gate: letting Luna act on the
+/// machine, as opposed to letting her answer without refusing.
+///
+/// Deliberately a different challenge string AND a different receipt file from
+/// `CHALLENGE`. Reusing one would collapse two different permissions into one,
+/// and the asymmetry is the whole point: refusing to answer is a property of
+/// the model, while scanning a host, rewriting firewall rules, or editing her
+/// own source are actions on a live machine. Unlocking "don't refuse" must not
+/// silently hand over the second one, because the user asked for them behind
+/// the key separately and may well want one without the other.
+const CAPABILITY_CHALLENGE: &[u8] = b"luna/capability-actions/v1";
+
+/// Which gate a receipt belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// The no-refusal model swap.
+    SecurityTier,
+    /// Acting on the machine: scanning, hardening, self-modification.
+    Capability,
+}
+
+impl Scope {
+    fn challenge(self) -> &'static [u8] {
+        match self {
+            Scope::SecurityTier => CHALLENGE,
+            Scope::Capability => CAPABILITY_CHALLENGE,
+        }
+    }
+
+    fn receipt_file(self) -> &'static str {
+        match self {
+            Scope::SecurityTier => "security-unlock.sig",
+            Scope::Capability => "capability-unlock.sig",
+        }
+    }
+
+    fn what(self) -> &'static str {
+        match self {
+            Scope::SecurityTier => "security tier",
+            Scope::Capability => "capability actions",
+        }
+    }
+}
+
 /// Ed25519 sizes. `ring` will not hand back a wrong-length key, so these are
 /// checked before anything else touches the bytes.
 const SEED_LEN: usize = 32;
@@ -199,14 +243,20 @@ fn state_dir() -> PathBuf {
 }
 
 fn receipt_path() -> PathBuf {
+    scoped_receipt_path(Scope::SecurityTier)
+}
+
+fn scoped_receipt_path(scope: Scope) -> PathBuf {
     #[cfg(test)]
     if let Ok(guard) = receipt_override().lock() {
         if let Some(p) = guard.as_ref() {
-            return p.clone();
+            // Under test both scopes redirect into the same scratch directory,
+            // distinguished by filename, so one guard covers either.
+            return p.with_file_name(scope.receipt_file());
         }
     }
 
-    state_dir().join("luna").join("security-unlock.sig")
+    state_dir().join("luna").join(scope.receipt_file())
 }
 
 /// The exact bytes that get signed: the challenge plus the public key.
@@ -216,9 +266,10 @@ fn receipt_path() -> PathBuf {
 /// for one installation's key would verify against any other configured key,
 /// which would make the receipt a portable bypass rather than a per-install
 /// grant.
-fn signed_message(public_key: &[u8]) -> Vec<u8> {
-    let mut m = Vec::with_capacity(CHALLENGE.len() + public_key.len());
-    m.extend_from_slice(CHALLENGE);
+fn scoped_signed_message(scope: Scope, public_key: &[u8]) -> Vec<u8> {
+    let c = scope.challenge();
+    let mut m = Vec::with_capacity(c.len() + public_key.len());
+    m.extend_from_slice(c);
     m.extend_from_slice(public_key);
     m
 }
@@ -258,25 +309,37 @@ pub fn has_public_key(public_key: &str) -> bool {
 }
 
 /// Does a valid receipt exist for this public key?
+/// Whether a valid receipt exists for the no-refusal gate, independent of what
+/// the config currently requests.
+///
+/// Distinct from `unrestricted_active` on purpose: that one is false whenever
+/// the config does not ask, so it cannot distinguish "never unlocked" from
+/// "unlocked, then the request was turned off". Revocation tests need the
+/// receipt itself to be provably gone — a surviving signature would let the
+/// mode return on a later request. Hence `#[allow(dead_code)]`: the binary
+/// reaches the gate through `gate_state`, but the predicate is public API that
+/// callers and tests legitimately ask for.
+#[allow(dead_code)]
 pub fn is_unlocked(public_key: &str) -> bool {
-    verify_receipt(public_key).is_ok()
+    scoped_verify_receipt(Scope::SecurityTier, public_key).is_ok()
 }
 
-fn verify_receipt(public_key: &str) -> Result<()> {
+fn scoped_verify_receipt(scope: Scope, public_key: &str) -> Result<()> {
     let pk = parse_hex(public_key, PUBKEY_LEN, "developer public key").context(
         "the configured developer public key is not a valid 32-byte hex value, so no signature \
          can ever verify against it",
     )?;
-    let sig_path = receipt_path();
+    let sig_path = scoped_receipt_path(scope);
     let sig_hex = std::fs::read_to_string(&sig_path).with_context(|| {
         format!(
-            "no unlock receipt at {} — the security tier is not unlocked",
-            sig_path.display()
+            "no unlock receipt at {} — {} is not unlocked",
+            sig_path.display(),
+            scope.what()
         )
     })?;
     let sig = parse_hex(&sig_hex, SIG_LEN, "stored signature")?;
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &pk)
-        .verify(&signed_message(&pk), &sig)
+        .verify(&scoped_signed_message(scope, &pk), &sig)
         .map_err(|_| {
             anyhow::anyhow!(
                 "the unlock receipt at {} does not verify against the configured public key",
@@ -288,13 +351,17 @@ fn verify_receipt(public_key: &str) -> Result<()> {
 /// The one function the rest of Luna asks. Cheap enough to call per request,
 /// and it reads a small file rather than doing key math when nothing is set.
 pub fn gate_state(security_unrestricted: bool, public_key: &str) -> GateState {
-    if !security_unrestricted {
+    scoped_gate_state(Scope::SecurityTier, security_unrestricted, public_key)
+}
+
+fn scoped_gate_state(scope: Scope, requested: bool, public_key: &str) -> GateState {
+    if !requested {
         return GateState::NotRequested;
     }
     if !has_public_key(public_key) {
         return GateState::Unavailable;
     }
-    if is_unlocked(public_key) {
+    if scoped_verify_receipt(scope, public_key).is_ok() {
         GateState::Unlocked
     } else {
         GateState::Locked
@@ -316,6 +383,35 @@ pub fn unrestricted_active(security_unrestricted: bool, public_key: &str) -> boo
 /// The key is used and dropped. It is not stored, not logged, and not written
 /// anywhere. Only its signature goes to disk.
 pub fn unlock(public_key: &str, private_key: &str) -> Result<()> {
+    scoped_unlock(Scope::SecurityTier, public_key, private_key)
+}
+
+/// The capability gate's public entry points.
+///
+/// Same three states as the security-tier gate and the same key, but a
+/// different challenge and a different receipt, so the two are independent
+/// grants. `capabilities_active` is the only one the tool layer asks.
+pub fn capability_gate_state(requested: bool, public_key: &str) -> GateState {
+    scoped_gate_state(Scope::Capability, requested, public_key)
+}
+
+pub fn capabilities_active(requested: bool, public_key: &str) -> bool {
+    capability_gate_state(requested, public_key) == GateState::Unlocked
+}
+
+pub fn unlock_capabilities(public_key: &str, private_key: &str) -> Result<()> {
+    scoped_unlock(Scope::Capability, public_key, private_key)
+}
+
+pub fn lock_capabilities() -> Result<()> {
+    scoped_lock(Scope::Capability)
+}
+
+pub fn capability_receipt_path_display() -> String {
+    scoped_receipt_path(Scope::Capability).display().to_string()
+}
+
+fn scoped_unlock(scope: Scope, public_key: &str, private_key: &str) -> Result<()> {
     if !has_public_key(public_key) {
         bail!(
             "No developer public key is configured, so there is nothing to unlock. Generate a \
@@ -352,8 +448,8 @@ pub fn unlock(public_key: &str, private_key: &str) -> Result<()> {
         bail!("That is not the developer key for this installation.");
     }
 
-    let sig = pair.sign(&signed_message(&configured));
-    let path = receipt_path();
+    let sig = pair.sign(&scoped_signed_message(scope, &configured));
+    let path = scoped_receipt_path(scope);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("could not create {}", parent.display()))?;
@@ -369,7 +465,11 @@ pub fn unlock(public_key: &str, private_key: &str) -> Result<()> {
 /// Revoke: delete the receipt. The config keeps asking, so the TUI will show
 /// `OFF (locked)` until unlocked again.
 pub fn lock() -> Result<()> {
-    let path = receipt_path();
+    scoped_lock(Scope::SecurityTier)
+}
+
+fn scoped_lock(scope: Scope) -> Result<()> {
+    let path = scoped_receipt_path(scope);
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         // Already locked is the desired end state, so this is not an error.
@@ -476,8 +576,131 @@ mod tests {
         assert_eq!(gate_state(true, &pk), GateState::Locked);
     }
 
+    /// The capability gate is a SEPARATE grant from the no-refusal gate.
+    ///
+    /// This is the property the whole split exists for. The user asked for the
+    /// ability to attack, harden and self-heal to sit behind the developer key
+    /// as its own thing — so unlocking "don't refuse" must not hand it over, and
+    /// unlocking it must not imply the model swap either. A shared challenge or a
+    /// shared receipt file would collapse the two into one permission and this
+    /// test would fail.
+    #[test]
+    fn the_capability_gate_is_independent_of_the_no_refusal_gate() {
+        let _s = Scratch::new("cap_indep");
+        let (pk, sk) = generate_keypair();
+
+        // Neither requested: both off, nothing to unlock.
+        assert_eq!(gate_state(false, &pk), GateState::NotRequested);
+        assert_eq!(capability_gate_state(false, &pk), GateState::NotRequested);
+
+        // Requested but locked: both say Locked.
+        assert_eq!(gate_state(true, &pk), GateState::Locked);
+        assert_eq!(capability_gate_state(true, &pk), GateState::Locked);
+
+        // Unlocking the MODEL must not unlock CAPABILITIES. This is the assertion
+        // that fails if the two ever share a receipt file.
+        unlock(&pk, &sk).expect("model gate unlocks");
+        assert!(unrestricted_active(true, &pk), "model gate should be open");
+        assert!(
+            !capabilities_active(true, &pk),
+            "unlocking the no-refusal mode must NOT grant capability actions"
+        );
+        assert_eq!(capability_gate_state(true, &pk), GateState::Locked);
+
+        // And the reverse.
+        lock().unwrap();
+        unlock_capabilities(&pk, &sk).expect("capability gate unlocks");
+        assert!(
+            capabilities_active(true, &pk),
+            "capability gate should be open"
+        );
+        assert!(
+            !unrestricted_active(true, &pk),
+            "unlocking capabilities must NOT grant the abliterated model"
+        );
+
+        // Both can be open at once, independently.
+        unlock(&pk, &sk).expect("model gate unlocks");
+        assert!(unrestricted_active(true, &pk));
+        assert!(capabilities_active(true, &pk));
+    }
+
+    /// A security-tier receipt must not verify against the capability challenge.
+    ///
+    /// Belt and braces on top of the independence test: this is the forgery the
+    /// distinct challenge strings exist to make impossible, checked directly at
+    /// the signature layer rather than inferred from the public API.
+    #[test]
+    fn a_capability_receipt_does_not_verify_as_a_security_receipt() {
+        let _s = Scratch::new("cap_forge");
+        let (pk, sk) = generate_keypair();
+
+        unlock_capabilities(&pk, &sk).expect("capability gate unlocks");
+
+        // The capability receipt is on disk...
+        assert!(scoped_receipt_path(Scope::Capability).exists());
+        // ...but must not satisfy the security-tier challenge.
+        assert!(
+            scoped_verify_receipt(Scope::SecurityTier, &pk).is_err(),
+            "a capability receipt must not unlock the no-refusal mode"
+        );
+        // Nor the other way round.
+        scoped_verify_receipt(Scope::Capability, &pk).unwrap();
+        unlock(&pk, &sk).unwrap();
+        assert!(scoped_receipt_path(Scope::Capability).exists());
+        assert!(
+            scoped_verify_receipt(Scope::Capability, &pk).is_ok(),
+            "both receipts should coexist"
+        );
+    }
+
+    /// A config edit alone must not activate capabilities.
+    ///
+    /// The asymmetry with `allow_external_actions` is the entire justification
+    /// for a second gate, so it is pinned: a boolean that a config edit flips is
+    /// not authorisation.
+    #[test]
+    fn a_receipt_is_required_and_the_config_flag_alone_does_nothing() {
+        let _s = Scratch::new("cap_cfg");
+        let (pk, sk) = generate_keypair();
+
+        // Requested in config, no signature: refused.
+        assert!(!capabilities_active(true, &pk));
+        assert_eq!(capability_gate_state(true, &pk), GateState::Locked);
+
+        // Signature present, config does not request: still off. Both halves are
+        // required, in either order.
+        unlock_capabilities(&pk, &sk).unwrap();
+        assert!(
+            !capabilities_active(false, &pk),
+            "a receipt alone must not activate a capability that was not requested"
+        );
+        assert_eq!(capability_gate_state(false, &pk), GateState::NotRequested);
+
+        // Both present.
+        assert!(capabilities_active(true, &pk));
+
+        // Revoking takes effect immediately.
+        lock_capabilities().unwrap();
+        assert!(!capabilities_active(true, &pk));
+    }
+
+    /// With no developer key configured, capabilities are permanently off.
+    #[test]
+    fn no_key_means_capabilities_can_never_be_enabled() {
+        let _s = Scratch::new("cap_nokey");
+        assert_eq!(capability_gate_state(true, ""), GateState::Unavailable);
+        assert!(!capabilities_active(true, ""));
+        assert!(!capabilities_active(true, "   "));
+        // And a receipt cannot help, because there is nothing to verify it
+        // against.
+        unlock_capabilities("", "").expect_err("no key, no unlock");
+        assert!(!capabilities_active(true, ""));
+    }
+
     #[test]
     fn the_wrong_key_is_rejected_and_writes_no_receipt() {
+        // (existing body follows)
         let _s = Scratch::new("wrong");
         let (pk, _) = generate_keypair();
         let (_, other_sk) = generate_keypair();
