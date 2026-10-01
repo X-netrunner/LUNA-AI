@@ -68,6 +68,21 @@ struct KeyPrompt {
     secret: String,
 }
 
+/// Modal for pasting a developer key to unlock the security tier's no-refusal
+/// mode.
+///
+/// A separate modal from `key_prompt` because the two are different things: that
+/// one stores a secret in the OS keyring, this one consumes a signing key to
+/// produce a receipt and then throws the key away. Nothing typed here is stored,
+/// and the input is masked because a developer pasting a key into a shared
+/// screen would otherwise put it in their scrollback.
+struct DevKeyPrompt {
+    input: String,
+    error: Option<String>,
+    /// Set when the config has no public key, where no key could ever work and
+    /// the modal should say so instead of collecting input.
+    unavailable_reason: Option<String>,
+}
 
 /// State for the interactive luna.toml editor modal.
 pub struct ConfigState {
@@ -401,6 +416,17 @@ impl SettingsMenuState {
                         description: "Allow Luna to propose verified source self-modifications",
                         setting_type: SettingType::Toggle(config.selfpatch.enabled),
                     },
+                    SettingItem {
+                        key: "llm.security_unrestricted",
+                        label: "Security Tier: No Refusal",
+                        description: "DEVELOPER KEY REQUIRED. Removes authorisation checks from \
+                                      the offensive-security tier. Shows the real gate state — the \
+                                      switch is only ON when a valid developer signature is on \
+                                      disk, not merely when this is ticked.",
+                        setting_type: SettingType::Value(
+                            config.llm.security_gate_state().as_str().to_string(),
+                        ),
+                    },
                 ],
             },
             SettingCategory {
@@ -453,6 +479,15 @@ impl SettingsMenuState {
     pub fn toggle_selected(&mut self) {
         if let Some(cat) = self.categories.get_mut(self.cat_index) {
             if let Some(item) = cat.items.get_mut(self.item_index) {
+                // The no-refusal switch is not a toggle. Flipping the config
+                // boolean would put Luna in a state where the config says ON and
+                // the model is still scoped, which is exactly the confusion the
+                // gate exists to prevent. Space/Enter on this item reports the
+                // real state and, if it is off, says what would unlock it.
+                if item.key == "llm.security_unrestricted" {
+                    self.describe_security_gate();
+                    return;
+                }
                 match &mut item.setting_type {
                     SettingType::Toggle(ref mut b) => {
                         *b = !*b;
@@ -493,6 +528,114 @@ impl SettingsMenuState {
                             self.status = format!("✓ Switched Voice Mode to {} [Press S to save]", next_str);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Is the cursor on the no-refusal switch?
+    pub fn is_on_security_item(&self) -> bool {
+        self.categories
+            .get(self.cat_index)
+            .and_then(|c| c.items.get(self.item_index))
+            .map(|i| i.key == "llm.security_unrestricted")
+            .unwrap_or(false)
+    }
+
+    /// Report the true state of the no-refusal switch.
+    ///
+    /// Deliberately does not flip the config boolean. The switch is only ON when a
+    /// valid signature is on disk, so a tick mark that could mean "asked for" is
+    /// a lie. This says which of the four states it is in and, for the two
+    /// unlockable ones, what the user has to do.
+    fn describe_security_gate(&mut self) {
+        use crate::unlock::GateState;
+        let st = self.config.llm.security_gate_state();
+        self.status = match st {
+            GateState::Unlocked => format!(
+                "🔓 No-Refusal Mode: ON. The security tier will not evaluate authorisation and \
+                 will not refuse. [S] to save · press again to LOCK"
+            ),
+            GateState::Locked => format!(
+                "🔒 No-Refusal Mode: OFF — requested but not unlocked (no valid developer \
+                 signature at {}). Unlock it with: luna --unlock-security, or press T and set \
+                 [llm] security_unrestricted = false to drop the request.",
+                crate::unlock::receipt_path_display()
+            ),
+            GateState::NotRequested => {
+                "🔒 No-Refusal Mode: OFF. To enable: run `luna --gen-dev-key`, put the public \
+                 key in luna.toml as [llm] security_dev_public_key, then run \
+                 `luna --unlock-security` with the private key."
+                    .to_string()
+            }
+            GateState::Unavailable => {
+                "⛔ No-Refusal Mode: permanently unavailable — no developer public key is \
+                 configured, so no key can ever unlock it. Run `luna --gen-dev-key` and set \
+                 [llm] security_dev_public_key in luna.toml first."
+                    .to_string()
+            }
+        };
+    }
+
+    /// Enable or disable the no-refusal mode, subject to the gate.
+    ///
+    /// Returns `true` when the caller should open the key prompt, because a key
+    /// is needed and one was supplied by nobody yet.
+    pub fn set_security_unrestricted(&mut self, want: bool) -> bool {
+        use crate::unlock::GateState;
+        self.config.llm.security_unrestricted = want;
+
+        if !want {
+            // Turning it off must actually take effect, not merely be recorded as
+            // a request. The receipt goes too, so a stale signature cannot
+            // re-enable it later.
+            if let Err(e) = crate::unlock::lock() {
+                self.status = format!("⚠ Turned off, but could not remove the receipt: {e}");
+                return false;
+            }
+            self.refresh_security_item();
+            self.modified = true;
+            self.status = String::from(
+                "🔒 No-Refusal Mode: OFF. Receipt deleted. [Press S to save]",
+            );
+            return false;
+        }
+
+        match self.config.llm.security_gate_state() {
+            GateState::Unlocked => {
+                self.refresh_security_item();
+                self.modified = true;
+                self.status = String::from(
+                    "🔓 No-Refusal Mode: ON (developer key verified). [Press S to save]",
+                );
+                false
+            }
+            GateState::Unavailable => {
+                // The request stays set. Reverting it would make the state
+                // `NotRequested`, which reads as "the user never asked" and hides
+                // the actual problem — that they asked and there is no key. The
+                // effective state is still off either way, so nothing is enabled
+                // by leaving it; and the status line explains the remedy.
+                self.refresh_security_item();
+                self.describe_security_gate();
+                false
+            }
+            _ => {
+                // Locked, or NotRequested-with-a-key. Either way a key is needed.
+                // Keep the request set so that a successful unlock takes effect
+                // without a second toggle.
+                true
+            }
+        }
+    }
+
+    /// Re-read the gate and mirror it onto the menu item.
+    fn refresh_security_item(&mut self) {
+        let state = self.config.llm.security_gate_state().as_str().to_string();
+        for cat in self.categories.iter_mut() {
+            for item in cat.items.iter_mut() {
+                if item.key == "llm.security_unrestricted" {
+                    item.setting_type = SettingType::Value(state.clone());
                 }
             }
         }
@@ -593,6 +736,9 @@ pub struct TuiApp {
     config_editor: Option<ConfigState>,
     /// Active interactive Settings & Controls menu (None = none).
     settings_menu: Option<SettingsMenuState>,
+    /// Modal asking for a developer key to unlock the no-refusal mode. Takes
+    /// priority over the settings menu while open.
+    dev_key_prompt: Option<DevKeyPrompt>,
     /// Index in slash command autocomplete popup.
     slash_selected: usize,
 }
@@ -637,6 +783,7 @@ impl TuiApp {
             show_shortcuts_bar: false,
             config_editor: None,
             settings_menu: None,
+            dev_key_prompt: None,
             slash_selected: 0,
         })
     }
@@ -1086,7 +1233,43 @@ impl TuiApp {
         }
     }
 
+    /// The one place the no-refusal switch is driven from the UI.
+    ///
+    /// Turning it ON requires a developer key, so this either opens the key
+    /// prompt or explains why it cannot. Turning it OFF deletes the receipt, so
+    /// "off" is off rather than "off until something re-enables it".
+    fn press_security_item(&mut self) {
+        let want = !self.config.llm.security_unrestricted_active();
+        let Some(sm) = self.settings_menu.as_mut() else {
+            return;
+        };
+        if sm.set_security_unrestricted(want) {
+            // A key is needed. When none is configured, say so in the modal
+            // instead of collecting a key that could never work.
+            let unavailable_reason = if !crate::unlock::has_public_key(
+                &self.config.llm.security_dev_public_key,
+            ) {
+                Some(
+                    "No developer public key is configured.\n\n\
+                     Run:  luna --gen-dev-key\n\
+                     Put the public key in luna.toml as [llm] security_dev_public_key\n\
+                     Then come back and press Space again."
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+            self.dev_key_prompt = Some(DevKeyPrompt {
+                input: String::new(),
+                error: None,
+                unavailable_reason,
+            });
+        } else {
+            self.dev_key_prompt = None;
+        }
+    }
 
+    /// Open (or extend) the wake-word-free conversation window on any voice
     /// interaction so the user can keep talking without repeating "luna".
     fn refresh_conversation_window(&mut self) {
         let secs = self.config.audio.conversation_window_secs;
@@ -1164,6 +1347,12 @@ impl TuiApp {
             return;
         }
 
+        // Developer key modal takes priority over everything below it.
+        if self.dev_key_prompt.is_some() {
+            self.handle_dev_key_prompt(key);
+            return;
+        }
+
         // Settings Menu modal steals the keyboard while open.
         if let Some(sm) = &mut self.settings_menu {
             match (key.modifiers, key.code) {
@@ -1189,7 +1378,19 @@ impl TuiApp {
                 (_, KeyCode::Up) => sm.prev_item(),
                 (_, KeyCode::Down) => sm.next_item(),
                 (_, KeyCode::Char(' ')) | (_, KeyCode::Enter) => {
-                    sm.toggle_selected();
+                    if sm.is_on_security_item() {
+                        self.press_security_item();
+                    } else {
+                        sm.toggle_selected();
+                    }
+                }
+                // An explicit, discoverable route to the same place. The security
+                // item is a Value, not a Toggle, so Space is ambiguous — and a
+                // user who wants this should not have to guess which key opens it.
+                (_, KeyCode::Char('u')) | (_, KeyCode::Char('U')) => {
+                    if sm.is_on_security_item() {
+                        self.press_security_item();
+                    }
                 }
                 _ => {}
             }
@@ -1606,6 +1807,76 @@ impl TuiApp {
     }
 
     /// Keys while a chat-typed `--set-key <name>` masked prompt is open.
+    /// Key handling for the developer-key modal.
+    ///
+    /// The key is consumed on Enter and immediately dropped: it is never stored,
+    /// never logged, and never written. What lands on disk is a signature.
+    fn handle_dev_key_prompt(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            if matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d')) {
+                self.should_quit = true;
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.dev_key_prompt = None;
+            }
+            KeyCode::Backspace => {
+                if let Some(p) = self.dev_key_prompt.as_mut() {
+                    p.input.pop();
+                    p.error = None;
+                }
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(p) = self.dev_key_prompt.as_mut() {
+                    p.input.clear();
+                    p.error = None;
+                }
+            }
+            KeyCode::Enter => {
+                let Some(p) = self.dev_key_prompt.take() else {
+                    return;
+                };
+                let cfg = &self.config;
+                match crate::unlock::unlock(&cfg.llm.security_dev_public_key, &p.input) {
+                    Ok(()) => {
+                        // Verified. Now flip the request on and mirror the real
+                        // state onto the item so the user sees the effect rather
+                        // than having to infer it.
+                        if let Some(sm) = self.settings_menu.as_mut() {
+                            sm.config.llm.security_unrestricted = true;
+                            sm.refresh_security_item();
+                            sm.modified = true;
+                            sm.status = String::from(
+                                "🔓 Developer key verified — No-Refusal Mode ON. [Press S to save]",
+                            );
+                        }
+                        // `input` is dropped here at the end of scope.
+                        self.status = String::from("Developer key accepted.");
+                    }
+                    Err(e) => {
+                        // Keep the modal open with the error. A failed attempt
+                        // must leave the feature off, and the user needs to see
+                        // why rather than having the dialog vanish.
+                        self.dev_key_prompt = Some(DevKeyPrompt {
+                            input: p.input,
+                            error: Some(e.to_string()),
+                            unavailable_reason: p.unavailable_reason,
+                        });
+                    }
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(p) = self.dev_key_prompt.as_mut() {
+                    p.input.push(c);
+                    p.error = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_key_prompt(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
@@ -2099,8 +2370,78 @@ impl TuiApp {
             }
         }
 
- // Cursor
-        if self.config_editor.is_none() && self.settings_menu.is_none() {
+        // Developer key modal — drawn last so it sits above the settings menu it
+        // was opened from.
+        if let Some(dk) = &self.dev_key_prompt {
+            let pop_w = (size.width.saturating_mul(3) / 4).clamp(48, 96);
+            let pop_h = 14.min(size.height.saturating_sub(2));
+            let pop = Rect::new(
+                size.x + size.width.saturating_sub(pop_w) / 2,
+                size.y + size.height.saturating_sub(pop_h) / 2,
+                pop_w,
+                pop_h,
+            );
+            f.render_widget(Clear, pop);
+
+            let outer_p = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Min(1),
+                    Constraint::Length(4),
+                    Constraint::Length(1),
+                ])
+                .split(pop);
+
+            let title = Paragraph::new("🔑 Developer Key — Security Tier: No Refusal")
+                .style(Style::default().add_modifier(Modifier::BOLD));
+            f.render_widget(title, outer_p[0]);
+
+            let shown = if dk.input.is_empty() {
+                " ".repeat(16)
+            } else {
+                // Masked. A 64-character key is short, but a paste of the wrong
+                // thing could be anything, so the field is capped and the tail
+                // is shown to confirm what arrived.
+                let masked: String = "•".repeat(dk.input.len().min(24));
+                if dk.input.len() > 24 {
+                    format!("{masked}… ({} chars)", dk.input.len())
+                } else {
+                    masked
+                }
+            };
+            let field = Paragraph::new(format!("Key: {shown}")).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(if dk.input.is_empty() {
+                        " paste developer key "
+                    } else {
+                        " "
+                    }),
+            );
+            f.render_widget(field, outer_p[1]);
+
+            let msg = if let Some(reason) = &dk.unavailable_reason {
+                Paragraph::new(reason.clone()).wrap(Wrap { trim: true })
+            } else if let Some(err) = &dk.error {
+                Paragraph::new(format!("✗ {err}")).wrap(Wrap { trim: true })
+            } else {
+                Paragraph::new(
+                    "The key is used once to sign a challenge, then discarded. Only the \
+                     signature is stored. Nothing typed here is saved or logged.",
+                )
+                .wrap(Wrap { trim: true })
+            };
+            f.render_widget(msg, outer_p[2]);
+
+            let hint = Paragraph::new("[Enter] verify  [Esc] cancel  [Ctrl+U] clear")
+                .style(Style::default().add_modifier(Modifier::DIM));
+            f.render_widget(hint, outer_p[3]);
+        }
+
+        // Cursor
+        if self.dev_key_prompt.is_none() && self.config_editor.is_none() && self.settings_menu.is_none()
+        {
             if let Some(cursor_area) = InputLine::cursor_area(outer[2], self.cursor_pos, &self.input) {
                 f.set_cursor_position(cursor_area);
             }
@@ -2146,4 +2487,186 @@ fn read_proc_stat() -> Option<(u64, u64)> {
     let idle = vals.get(3).copied().unwrap_or(0) + vals.get(4).copied().unwrap_or(0);
     let total: u64 = vals.iter().sum();
     Some((idle, total))
+}
+#[cfg(test)]
+mod security_gate_tests {
+    use super::*;
+
+    /// A cursor on the security item is recognised as such, so Space reaches the
+    /// gate instead of flipping a boolean.
+    ///
+    /// The category list is positional, so this pins that the item lives where
+    /// the tests think it does — otherwise a test that "navigated" to the wrong
+    /// row would pass while asserting nothing.
+    #[test]
+    fn the_security_item_is_findable_and_is_not_a_toggle() {
+        let mut sm = SettingsMenuState::load(crate::config::LunaConfig::default());
+        assert!(
+            !sm.is_on_security_item(),
+            "the security item must not be selected by default"
+        );
+
+        let mut found = false;
+        for _ in 0..sm.categories.len() {
+            for _ in 0..20 {
+                if sm.is_on_security_item() {
+                    found = true;
+                    break;
+                }
+                sm.next_item();
+            }
+            if found {
+                break;
+            }
+            sm.next_category();
+        }
+        assert!(found, "no security item exists in the settings menu");
+
+        // It must render as a state, not a checkbox. A tick that could mean
+        // "requested" while the model is still scoped is the confusion the gate
+        // exists to prevent.
+        let cat = &sm.categories[sm.cat_index];
+        let item = &cat.items[sm.item_index];
+        assert!(
+            matches!(item.setting_type, SettingType::Value(_)),
+            "the security item must show state, not a boolean toggle"
+        );
+    }
+
+    /// Enabling without a key must not enable anything, and must say what the
+    /// user has to do about it.
+    ///
+    /// The request flag is deliberately left set. Reverting it would report
+    /// `NotRequested` — indistinguishable from "never asked" — and bury the
+    /// actual problem, which is that the request is unsatisfiable. The effective
+    /// state is off regardless, so nothing is enabled by leaving it.
+    #[test]
+    fn enabling_without_a_key_enables_nothing_and_explains_itself() {
+        let mut sm = SettingsMenuState::load(crate::config::LunaConfig::default());
+        let needs_prompt = sm.set_security_unrestricted(true);
+
+        assert!(
+            !needs_prompt,
+            "opening a key prompt with no configured key would collect input that \
+             can never work"
+        );
+        assert!(
+            !sm.config.llm.security_unrestricted_active(),
+            "the feature was enabled with no developer key"
+        );
+        assert_eq!(
+            sm.config.llm.security_gate_state(),
+            crate::unlock::GateState::Unavailable,
+            "the state must show that no key is configured, not 'never asked'"
+        );
+        assert!(
+            sm.status.contains("gen-dev-key"),
+            "unhelpful status: {}",
+            sm.status
+        );
+    }
+
+    /// With a key configured but not unlocked, the request is kept — so that a
+    /// successful unlock takes effect without a second press — but the effective
+    /// state must stay off.
+    #[test]
+    fn a_configured_but_locked_key_keeps_the_request_and_stays_off() {
+        let mut sm = SettingsMenuState::load(crate::config::LunaConfig::default());
+        sm.config.llm.security_dev_public_key = "22".repeat(32);
+
+        let needs_prompt = sm.set_security_unrestricted(true);
+        assert!(needs_prompt, "a key prompt is needed when locked");
+        assert!(sm.config.llm.security_unrestricted, "the request should persist");
+        assert!(
+            !sm.config.llm.security_unrestricted_active(),
+            "locked, so the effective state must be off"
+        );
+        assert_eq!(
+            sm.config.llm.security_gate_state(),
+            crate::unlock::GateState::Locked
+        );
+    }
+
+    /// Turning it off must actually turn it off, and must clear the receipt so a
+    /// stale signature cannot re-enable it later.
+    ///
+    /// Uses the shared test receipt guard, so the real `~/.local/state` is never
+    /// written — otherwise this test would leave the real feature unlocked.
+    #[test]
+    fn turning_it_off_clears_the_receipt() {
+        use crate::unlock;
+        let _receipt = unlock::test_receipt(unlock::scratch_receipt("tui_off"));
+
+        let (pk, sk) = unlock::generate_keypair();
+        unlock::unlock(&pk, &sk).expect("unlock must work in a test");
+
+        let mut sm = SettingsMenuState::load(crate::config::LunaConfig::default());
+        sm.config.llm.security_dev_public_key = pk.clone();
+        sm.config.llm.security_unrestricted = true;
+
+        // Precondition: genuinely on, so the assertion afterwards means something.
+        assert!(
+            sm.config.llm.security_unrestricted_active(),
+            "test setup failed — never reached the ON state, so turning it off proves nothing"
+        );
+
+        let needs_prompt = sm.set_security_unrestricted(false);
+        assert!(!needs_prompt, "turning off must never need a key");
+        assert!(!sm.config.llm.security_unrestricted);
+        assert!(
+            !sm.config.llm.security_unrestricted_active(),
+            "still on after turning off"
+        );
+        assert!(sm.status.contains("Receipt deleted"), "{}", sm.status);
+
+        // The receipt itself must be gone, not just the request. A surviving
+        // signature would let the mode come back on a later request.
+        assert!(
+            !unlock::is_unlocked(&pk),
+            "the receipt survived — off is not off"
+        );
+
+        // And locking again must be safe: the UI can offer "off" whether or not a
+        // receipt existed.
+        unlock::lock().expect("locking twice must succeed");
+    }
+
+    /// The UI must never be the thing that decides. If a receipt exists and
+    /// verifies, the state is ON — but only if the config also asks for it.
+    ///
+    /// Both halves matter. A receipt alone must not silently re-enable the
+    /// feature, and a request alone must not enable it either.
+    #[test]
+    fn the_effective_state_follows_the_receipt_not_the_boolean() {
+        use crate::unlock;
+        let _receipt = unlock::test_receipt(unlock::scratch_receipt("tui_effective"));
+        let (pk, sk) = unlock::generate_keypair();
+        unlock::unlock(&pk, &sk).unwrap();
+
+        // Requested + unlocked → on.
+        let mut cfg = crate::config::LlmConfig::default();
+        cfg.security_unrestricted = true;
+        cfg.security_dev_public_key = pk.clone();
+        assert!(cfg.security_unrestricted_active());
+        assert_eq!(cfg.security_gate_state(), unlock::GateState::Unlocked);
+
+        // Requested but not unlocked → off. (Deleting the receipt directly, so
+        // this exercises the gate rather than the UI's off path.)
+        unlock::lock().unwrap();
+        assert!(
+            !cfg.security_unrestricted_active(),
+            "a request with no receipt enabled the feature"
+        );
+        assert_eq!(cfg.security_gate_state(), unlock::GateState::Locked);
+
+        // Unlocked but not requested → off. A leftover receipt must not silently
+        // re-enable a feature the user has turned off.
+        unlock::unlock(&pk, &sk).unwrap();
+        cfg.security_unrestricted = false;
+        assert!(
+            !cfg.security_unrestricted_active(),
+            "a leftover receipt re-enabled the feature without being asked"
+        );
+        assert_eq!(cfg.security_gate_state(), unlock::GateState::NotRequested);
+    }
 }

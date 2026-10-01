@@ -67,6 +67,12 @@ chrono = { version = "0.4", features = ["serde"] }
 keyring = { version = "3", features = ["sync-secret-service"] }
 base64 = "0.22"     # Spotify Basic-auth header for OAuth token requests
 sha2 = "0.10"       # PKCE S256 code_challenge for Spotify OAuth
+# Ed25519 sign/verify for the developer gate on the security tier's no-refusal
+# mode. Already in the tree via `keyring`, so this costs no extra compilation.
+# Ed25519 rather than RSA: the only pure-Rust RSA crate published is a release
+# candidate, and the gate only needs "only the key holder can produce a
+# verifying signature" — see src/unlock.rs.
+ring = "0.17"
 ratatui = "0.30.2"
 crossterm = "0.29.0"
 

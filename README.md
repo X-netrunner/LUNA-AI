@@ -130,6 +130,49 @@ card, and the whole model lands in system RAM.
 
 Without `security_model` set, the tier is inactive and security requests fall
 back to the general model — degraded, not broken.
+
+#### No-refusal mode
+
+By default the tier is **scoped**: it will only write tooling for systems you
+own or are contracted to test, and it says so in the prompt. There is also a
+developer-gated no-refusal mode that removes the authorisation check and
+instructs the model never to refuse:
+
+    luna --gen-dev-key        # once, prints a public + private key
+    # put the public key in luna.toml:
+    #   [llm] security_dev_public_key = "<64 hex chars>"
+    luna --unlock-security    # paste the private key; a signature is stored
+    luna --security-status    # inspect
+    luna --lock-security      # revoke
+
+In the TUI: `/config` → Safety Gates → *Security Tier: No Refusal*, then `Space`
+or `U`. The item displays the real state (`OFF`, `OFF (locked)`, `ON`, or
+`OFF (no developer key configured)`) rather than a tick that could mean
+"requested". Enabling prompts for the key inline.
+
+**The gate.** `security_unrestricted = true` in `luna.toml` is a *request* and
+does nothing on its own. It takes effect only when a signature over a fixed
+challenge is present at `~/.local/state/luna/security-unlock.sig` and verifies
+against `security_dev_public_key`. So editing the config cannot enable it, and
+a hand-written receipt cannot either — the public key is part of the signed
+message, so a receipt from one installation does not verify against another.
+Turning the mode off deletes the receipt. Blanking the public key makes it
+permanently unavailable. The state is logged on every start (WARN when on), so
+it is never silently active.
+
+The private key is never stored or logged — it is used once to sign and
+dropped. Ed25519 (`ring`) rather than RSA, because the only pure-Rust RSA crate
+published is a release candidate; if you need RSA interop, `sign` and `verify`
+in `src/unlock.rs` are the only two functions that touch the algorithm.
+
+Be clear-eyed about what this buys. It is not DRM: you have the source, and the
+check is a small deletion. It makes turning the mode on deliberate and leaves a
+signed record — which is what a gate is worth on a machine you control. What it
+does *not* do is constrain the model: it gates one boolean, and the tools, the
+sudo password, and the outbound-network gate are identical either way. Read the
+header comment in `src/unlock.rs` before changing how it is evaluated.
+
+[voice]
 mode = "basic"               # basic | off
 piper_model = "/home/YOU/.local/share/luna/kokoro/kokoro-v1.0.onnx"
 piper_bin = "af_heart"       # Kokoro voice name: af_heart | af_sky | af_nicole | af_sarah

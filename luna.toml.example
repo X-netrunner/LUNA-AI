@@ -45,6 +45,38 @@ deep_model = "qwen2.5:7b-instruct-q4_K_M"   # Large model for code, reasoning, a
 #                                 # degrading — check the "Tool subset:" debug line.
 # security_unrestricted = false     # false = the tier is scoped to systems you own or are
 #                                 # contracted to test. true = it writes exploit tooling
+#                                 # without evaluating who owns the target, and is
+#                                 # additionally instructed never to refuse.
+#                                 # Read before enabling: this tier drives run_shell (your
+#                                 # sudo_password is in this file), unrestricted write_file,
+#                                 # and allow_external_actions covers outbound network calls.
+#                                 # The scope clause is the only thing limiting a
+#                                 # prompt-injected instruction from reaching those.
+#
+#                                 # DEVELOPER-GATED — this line alone does NOTHING.
+#                                 # It is a *request*. It only takes effect when a valid
+#                                 # developer signature is also present on disk, verified
+#                                 # against security_dev_public_key below. Editing this
+#                                 # file cannot enable it, and writing a plausible-looking
+#                                 # signature into the receipt cannot either.
+#                                   luna --gen-dev-key      generate a keypair
+#                                   luna --unlock-security  sign the challenge with the key
+#                                   luna --security-status  inspect current state
+#                                   luna --lock-security    revoke
+#
+# security_dev_public_key = ""      # Public half of the developer keypair — the value
+#                                 # `luna --gen-dev-key` prints. Public data, meant to be
+#                                 # shared. The PRIVATE half is never written anywhere by
+#                                 # Luna and is not recoverable. Blank here means
+#                                 # no-refusal mode is permanently unavailable; that is
+#                                 # the default, and it is enforced in code rather than
+#                                 # merely hidden in the UI.
+#
+#                                 # Honest scope of the gate: it prevents casual and
+#                                 # accidental enabling and leaves a signed record. It is
+#                                 # NOT DRM — you have the source, and removing the check
+#                                 # in src/unlock.rs is a small patch. It exists to make
+#                                 # turning this on a deliberate act, not to stop you.
 # security_scripts_dir = "~/Documents/luna-scripts"
 #                                 # Default output directory for security-tier scripts,
 #                                 # created at startup. Exists because the model was picking

@@ -1738,6 +1738,7 @@ dependencies = [
  "memmap2",
  "ratatui",
  "reqwest",
+ "ring",
  "rodio",
  "rpassword",
  "rustyline",

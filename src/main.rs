@@ -19,6 +19,7 @@ mod stt;
 mod tools;
 mod tts;
 mod tui;
+mod unlock;
 mod util;
 mod wake;
 
@@ -66,6 +67,31 @@ struct Args {
     /// without echo. Avoid for truly sensitive keys (it shows in argv/ps).
     #[arg(long, value_name = "SECRET")]
     value: Option<String>,
+
+    /// Generate a developer keypair for the security tier's no-refusal mode.
+    ///
+    /// Prints the public key (put it in luna.toml as
+    /// `[llm] security_dev_public_key`) and the private key (keep it; it is not
+    /// recoverable and not stored anywhere).
+    #[arg(long)]
+    gen_dev_key: bool,
+
+    /// Unlock the security tier's no-refusal mode with a developer key.
+    ///
+    /// Reads the key from the terminal without echoing. Also requires
+    /// `[llm] security_unrestricted = true` in luna.toml — this only issues the
+    /// signature that makes that request take effect.
+    #[arg(long)]
+    unlock_security: bool,
+
+    /// Re-lock the no-refusal mode: delete the receipt. The config keeps asking,
+    /// so it shows as OFF (locked) until unlocked again.
+    #[arg(long)]
+    lock_security: bool,
+
+    /// Print the no-refusal gate state and exit.
+    #[arg(long)]
+    security_status: bool,
 
     /// Print a stored keyring secret to stdout (for verification).
     #[arg(long, value_name = "NAME")]
@@ -182,6 +208,105 @@ async fn main() -> Result<()> {
                 e
             ),
         }
+    }
+
+    // ── Security tier: no-refusal gate ───────────────────────────────────────
+    // Logged on every start, including when nothing is configured. The point is
+    // that a mode which removes the authorisation check should never be active
+    // silently: if it is ever on there is a WARN in the journal saying so, and if
+    // it is requested-but-locked that is visible too. Someone auditing a machine
+    // should not have to run `--security-status` to find out.
+    match config.llm.security_gate_state() {
+        crate::unlock::GateState::Unlocked => tracing::warn!(
+            "Security tier NO-REFUSAL MODE IS ON. The model will not evaluate authorisation and \
+             will not refuse. To disable: `luna --lock-security`."
+        ),
+        crate::unlock::GateState::Locked => tracing::info!(
+            "Security tier no-refusal mode requested but NOT active — no valid developer \
+             signature at {}. The security tier remains scoped. Unlock with \
+             `luna --unlock-security`.",
+            crate::unlock::receipt_path_display()
+        ),
+        // Both remaining states are "off", and both are the normal case. Debug
+        // level so a default install is not noisy about a feature the user may
+        // not know exists.
+        crate::unlock::GateState::NotRequested | crate::unlock::GateState::Unavailable => {
+            tracing::debug!(
+                "Security tier no-refusal mode off ({})",
+                config.llm.security_gate_state().as_str()
+            );
+        }
+    }
+
+    // ── Keyring management (exits immediately) ───────────────────────────────
+    // ── Security tier: no-refusal mode ──────────────────────────────────────
+    // Handled before the daemon/TUI dispatch so these work from any mode,
+    // including headless, and exit without starting anything.
+    if args.gen_dev_key {
+        let (pub_key, priv_key) = crate::unlock::generate_keypair();
+        println!("Add this to luna.toml, in the [llm] section:\n");
+        println!("security_dev_public_key = \"{pub_key}\"\n");
+        println!("Then run:  luna --unlock-security");
+        println!("and paste the private key below when prompted.\n");
+        println!("─── private key — shown once, not stored anywhere ───");
+        println!("{priv_key}");
+        println!("─────────────────────────────────────────────────────");
+        return Ok(());
+    }
+
+    if args.security_status {
+        let st = config.llm.security_gate_state();
+        println!("Security tier — No-Refusal Mode: {}", st.as_str());
+        println!("  requested in config : {}", config.llm.security_unrestricted);
+        println!(
+            "  developer key set   : {}",
+            crate::unlock::has_public_key(&config.llm.security_dev_public_key)
+        );
+        println!("  receipt path        : {}", crate::unlock::receipt_path_display());
+        println!("  effective           : {}", config.llm.security_unrestricted_active());
+        if !crate::unlock::has_public_key(&config.llm.security_dev_public_key) {
+            println!("\nNo developer key is configured, so this can never be enabled.");
+            println!("Run `luna --gen-dev-key` and set [llm] security_dev_public_key.");
+        }
+        return Ok(());
+    }
+
+    if args.lock_security {
+        crate::unlock::lock()?;
+        println!("Receipt deleted. No-Refusal Mode is OFF.");
+        if config.llm.security_unrestricted {
+            println!(
+                "Note: [llm] security_unrestricted is still true in luna.toml, so it will show \
+                 as OFF (locked) until unlocked again."
+            );
+        }
+        return Ok(());
+    }
+
+    if args.unlock_security {
+        if !crate::unlock::has_public_key(&config.llm.security_dev_public_key) {
+            anyhow::bail!(
+                "No developer public key in luna.toml ([llm] security_dev_public_key), so there \
+                 is nothing to unlock against. Run `luna --gen-dev-key` first."
+            );
+        }
+        // Read from the terminal without echoing. Never a CLI argument: a key in
+        // argv is visible in `ps` and lands in shell history.
+        let key = rpassword::prompt_password("Developer key: ")
+            .context("Failed to read the developer key from the terminal")?;
+        crate::unlock::unlock(&config.llm.security_dev_public_key, &key)?;
+        // Drop the key. It has served its purpose and must not linger.
+        drop(key);
+        println!("✓ Developer key verified — signature stored.");
+        if config.llm.security_unrestricted {
+            println!("  No-Refusal Mode is now ON (security_unrestricted was already true).");
+        } else {
+            println!(
+                "  Still OFF: [llm] security_unrestricted is false in luna.toml. Set it to true \
+                 to activate."
+            );
+        }
+        return Ok(());
     }
 
     if let Some(name) = args.set_key {

@@ -294,24 +294,32 @@ pub struct LlmConfig {
     /// in VRAM, and the difference between 8k and 16k is several GB of KV cache.
     #[serde(default = "default_security_num_ctx")]
     pub security_num_ctx: u32,
-    /// Drop the authorisation-scope clause from the security tier's prompt.
-///
-/// Default false, which keeps the tier scoped to the user's own systems. Set
-/// true to remove the authorisation test entirely — the model then writes
-/// exploit tooling without evaluating who owns the target.
-///
-/// This is a real capability change, not a wording preference, so it is a flag
-/// rather than a line buried in the prompt: `security_react` drives
-/// `run_shell` (which has the sudo password), unrestricted `write_file`, and
-/// `allow_external_actions` includes outbound network actions. Scoping is the
-/// only thing limiting a prompt-injected instruction from reaching those.
-///
-/// Exists partly as an experiment. Hypothesis under test 2026-10-01: the model
-/// refuses some requests by *reasoning about authorisation*, and removing the
-/// clause removes the refusal. Measured by flipping this key and re-running the
-/// same prompts — see the note on `build_security_prompt`.
-#[serde(default)]
-pub security_unrestricted: bool,
+    /// Request the security tier's no-refusal mode. Developer-gated.
+    ///
+    /// Default false, which keeps the tier scoped to the user's own systems. Set
+    /// true to remove the authorisation test entirely — the model then writes
+    /// exploit tooling without evaluating who owns the target.
+    ///
+    /// **This field alone does nothing.** It is a request, not a switch. The
+    /// prompt only uses the unrestricted clause when
+    /// `unlock::unrestricted_active(self.security_unrestricted,
+    /// &self.security_dev_public_key)` is true, which additionally requires a
+    /// valid signature on a receipt stored outside this file. Read
+    /// `src/unlock.rs` before changing how this is evaluated.
+    ///
+    /// This is a real capability change, not a wording preference, so it is
+    /// visible in config rather than buried in the prompt: `security_react`
+    /// drives `run_shell` (which has the sudo password), unrestricted
+    /// `write_file`, and `allow_external_actions` includes outbound network
+    /// actions. Scoping is the only thing limiting a prompt-injected instruction
+    /// from reaching those.
+    ///
+    /// The gate is a speed bump against accidental or casual changes, not DRM.
+    /// The user has the source and can remove the check. What it does buy is
+    /// real: turning this on is a deliberate act that leaves a signed trace,
+    /// rather than an edit to a line of text.
+    #[serde(default)]
+    pub security_unrestricted: bool,
     /// Where the security tier should write generated scripts.
     ///
     /// Set because the model was choosing paths itself, and `/tmp` is the wrong
@@ -326,6 +334,18 @@ pub security_unrestricted: bool,
     /// [`default_security_scripts_dir`].
     #[serde(default = "default_security_scripts_dir")]
     pub security_scripts_dir: String,
+    /// Developer public key that gates `security_unrestricted`.
+    ///
+    /// NOT the gate itself. The gate is a signature over a fixed challenge,
+    /// stored outside this file and verified against this key — see
+    /// `crate::unlock`. Setting `security_unrestricted = true` here does nothing
+    /// on its own, which is the entire point: a boolean in a file the person
+    /// running Luna can edit is not a gate.
+    ///
+    /// Public data, and meant to be shared. Blank it to make the no-refusal mode
+    /// permanently unavailable, regardless of any receipt on disk.
+    #[serde(default)]
+    pub security_dev_public_key: String,
     /// Local embedding model used for semantic memory recall (RAG-lite).
     /// Pull once with: ollama pull nomic-embed-text
     pub embedding_model: String,
@@ -335,6 +355,33 @@ pub security_unrestricted: bool,
     /// `fast_model`, which never sees the tool schema.
     #[serde(default = "default_num_ctx")]
     pub num_ctx: u32,
+}
+
+impl LlmConfig {
+    /// The effective state of the security tier's no-refusal mode.
+    ///
+    /// THE single definition. Everything that acts on this mode must go through
+    /// here rather than reading `security_unrestricted` directly, so the
+    /// developer gate cannot be bypassed by a caller that forgets to check it.
+    /// The raw field is a *request*; this is the answer.
+    ///
+    /// The argument is `&self` rather than a global so tests can exercise every
+    /// combination of flag and key without touching the real state directory.
+    pub fn security_unrestricted_active(&self) -> bool {
+        crate::unlock::unrestricted_active(
+            self.security_unrestricted,
+            &self.security_dev_public_key,
+        )
+    }
+
+    /// The gate state, for display.
+    ///
+    /// More informative than the boolean, because "off because locked" and "off
+    /// because no developer key is configured" are different situations with
+    /// different remedies, and the TUI has to tell the user which one they are in.
+    pub fn security_gate_state(&self) -> crate::unlock::GateState {
+        crate::unlock::gate_state(self.security_unrestricted, &self.security_dev_public_key)
+    }
 }
 
 fn default_num_ctx() -> u32 {
@@ -375,6 +422,7 @@ impl Default for LlmConfig {
             security_num_ctx: default_security_num_ctx(),
             security_unrestricted: false,
             security_scripts_dir: default_security_scripts_dir(),
+            security_dev_public_key: String::new(),
             embedding_model: "nomic-embed-text".into(),
             num_ctx: default_num_ctx(),
         }
