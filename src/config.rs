@@ -212,6 +212,14 @@ pub struct AgentConfig {
     pub sudo_password: Option<String>,
     #[serde(default = "default_true")]
     pub native_tools: bool,
+    /// Path to a per-machine constitution that overrides the shipped one.
+    ///
+    /// `None` or unreadable falls back to `src/agent/constitution.md`. Editing
+    /// Luna's personality should not require a recompile, and should not
+    /// require editing her source either — that file is in `protected_files`
+    /// precisely so she cannot rewrite her own rules.
+    #[serde(default)]
+    pub constitution_path: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -256,6 +264,7 @@ impl Default for AgentConfig {
             max_react_iterations: 8,
             sudo_password: None,
             native_tools: true,
+            constitution_path: None,
         }
     }
 }

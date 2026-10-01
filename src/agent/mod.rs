@@ -284,14 +284,81 @@ pub fn build_system_prompt(config: &LunaConfig) -> String {
     );
 
     format!(
-        "{}{}{}",
-        config.agent.system_prompt, time_context, history_block
+        "{}{}{}\n\n{}",
+        config.agent.system_prompt,
+        time_context,
+        history_block,
+        load_constitution(config).trim()
     )
 }
 
-/// Append the live clock context to any tier prompt (full/deep/fast) so the
-/// model never has to guess the current time.
-fn with_time_context(prompt: String) -> String {
+/// Luna's constitution, as shipped.
+///
+/// Kept in a markdown file rather than a string literal so it can be read and
+/// argued about as prose. Editable per-machine via `AgentConfig::constitution_path`;
+/// this is only the fallback.
+const CONSTITUTION_DEFAULT: &str = include_str!("constitution.md");
+
+/// Truncation budget for the constitution, in characters.
+///
+/// Roughly 1 token per 4 characters, so the default is about 700 tokens. The
+/// limit is not arbitrary: `src/tools/select.rs` measures tool-call failure
+/// against prompt size, and an unbounded constitution would reintroduce the
+/// exact failure it is meant to prevent — Luna describing work in prose instead
+/// of doing it. Truncation is logged rather than silent so a runaway edit is
+/// visible.
+const CONSTITUTION_MAX_CHARS: usize = 2800;
+
+/// The constitution for this machine: the user's file if it exists, else the
+/// shipped one, truncated to budget.
+///
+/// Read fresh each call rather than cached. It is a few hundred lines of text
+/// read once per turn, and caching it would mean an edit to the file silently
+/// not taking effect until restart — which is exactly the confusion the
+/// editable-file form exists to avoid.
+fn load_constitution(config: &LunaConfig) -> String {
+    let raw = match config.agent.constitution_path.as_deref() {
+        Some(p) if !p.trim().is_empty() => {
+            let expanded = p.replace('~', &std::env::var("HOME").unwrap_or_default());
+            match std::fs::read_to_string(&expanded) {
+                Ok(t) => t,
+                Err(e) => {
+                    // Not fatal: a mistyped path must not stop Luna answering.
+                    tracing::warn!(
+                        "constitution_path {:?} unreadable ({}), using the shipped one",
+                        expanded,
+                        e
+                    );
+                    CONSTITUTION_DEFAULT.to_string()
+                }
+            }
+        }
+        _ => CONSTITUTION_DEFAULT.to_string(),
+    };
+
+    if raw.chars().count() > CONSTITUTION_MAX_CHARS {
+        let cut: String = raw.chars().take(CONSTITUTION_MAX_CHARS).collect();
+        tracing::warn!(
+            "constitution is {} chars, truncating to {} — oversized prompts break tool calls",
+            raw.chars().count(),
+            CONSTITUTION_MAX_CHARS
+        );
+        return format!(
+            "{}\n\n[constitution truncated at {} chars; see constitution_path for the full text]",
+            cut.trim_end(),
+            CONSTITUTION_MAX_CHARS
+        );
+    }
+    raw
+}
+
+/// Append the shared tail to any tier prompt: the clock, then the constitution.
+///
+/// One function rather than calling both at nine sites, because every one of
+/// those sites was a chance to forget the constitution on a tier and ship an
+/// inconsistent personality. `src/tools/select.rs` already records what
+/// happens when the four tiers disagree.
+fn finalize_prompt(config: &LunaConfig, prompt: String) -> String {
     let now = chrono::Local::now();
     let hour = now.hour();
     let time_context = format!(
@@ -304,7 +371,12 @@ fn with_time_context(prompt: String) -> String {
             _ => "night",
         }
     );
-    format!("{}{}", prompt, time_context)
+    format!(
+        "{}{}\n\n{}",
+        prompt,
+        time_context,
+        load_constitution(config).trim()
+    )
 }
 
 /// Compact prompt for the fast model. Greetings land here, so the intro must
@@ -680,14 +752,14 @@ pub async fn run_routed_turn(
         match classify_with_latch(input) {
             QueryComplexity::Simple => {
                 if let Some(fr) = fast_react.as_ref() {
-                    (fr, with_time_context(FAST_PROMPT.to_string()), Tier::Fast)
+                    (fr, finalize_prompt(config, FAST_PROMPT.to_string()), Tier::Fast)
                 } else {
                     (&react, system_prompt.clone(), Tier::Full)
                 }
             }
             QueryComplexity::Deep => {
                 if let Some(dr) = deep_react.as_ref() {
-                    (dr, with_time_context(DEEP_PROMPT.to_string()), Tier::Deep)
+                    (dr, finalize_prompt(config, DEEP_PROMPT.to_string()), Tier::Deep)
                 } else {
                     (&react, system_prompt.clone(), Tier::Full)
                 }
@@ -696,7 +768,7 @@ pub async fn run_routed_turn(
                 if let Some(sr) = security_react.as_ref() {
                     (
                         sr,
-                        with_time_context(build_security_prompt(
+                        finalize_prompt(config, build_security_prompt(
                             config.llm.security_unrestricted_active(),
                             &config.llm.security_scripts_dir,
                         )),
@@ -1049,14 +1121,14 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
             match classify_with_latch(&input) {
                 QueryComplexity::Simple => {
                     if let Some(fr) = fast_react.as_ref() {
-                        (fr, with_time_context(FAST_PROMPT.to_string()), Tier::Fast)
+                        (fr, finalize_prompt(config, FAST_PROMPT.to_string()), Tier::Fast)
                     } else {
                         (&react, system_prompt.to_string(), Tier::Full)
                     }
                 }
                 QueryComplexity::Deep => {
                     if let Some(dr) = deep_react.as_ref() {
-                        (dr, with_time_context(DEEP_PROMPT.to_string()), Tier::Deep)
+                        (dr, finalize_prompt(config, DEEP_PROMPT.to_string()), Tier::Deep)
                     } else {
                         (&react, system_prompt.to_string(), Tier::Full)
                     }
@@ -1065,7 +1137,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                     if let Some(sr) = security_react.as_ref() {
                         (
                             sr,
-                            with_time_context(build_security_prompt(
+                            finalize_prompt(config, build_security_prompt(
                             config.llm.security_unrestricted_active(),
                             &config.llm.security_scripts_dir,
                         )),
@@ -1265,14 +1337,14 @@ async fn answer_input(
         match classify_with_latch(input) {
             QueryComplexity::Simple => {
                 if let Some(fr) = fast_react {
-                    (fr, with_time_context(FAST_PROMPT.to_string()), Tier::Fast)
+                    (fr, finalize_prompt(config, FAST_PROMPT.to_string()), Tier::Fast)
                 } else {
                     (react, system_prompt.to_string(), Tier::Full)
                 }
             }
             QueryComplexity::Deep => {
                 if let Some(dr) = deep_react {
-                    (dr, with_time_context(DEEP_PROMPT.to_string()), Tier::Deep)
+                    (dr, finalize_prompt(config, DEEP_PROMPT.to_string()), Tier::Deep)
                 } else {
                     (react, system_prompt.to_string(), Tier::Full)
                 }
@@ -1281,7 +1353,7 @@ async fn answer_input(
                 if let Some(sr) = security_react {
                     (
                         sr,
-                        with_time_context(build_security_prompt(
+                        finalize_prompt(config, build_security_prompt(
                             config.llm.security_unrestricted_active(),
                             &config.llm.security_scripts_dir,
                         )),
@@ -2706,5 +2778,135 @@ security_unrestricted = true
         // A strip always removes the wake first, so the inline never carries it.
         assert!(voice_mode_exit_match("luna voice mode down"));
         assert!(!wake_toggles_voice_mode("voice mode down"));
+    }
+
+    // ── Constitution ─────────────────────────────────────────────────────────
+
+    /// Every tier must carry the constitution.
+    ///
+    /// The failure this prevents is an inconsistent personality: the fast tier
+    /// greeting warmly while the security tier is a different person. Assembled
+    /// from the real routing constants rather than the helper alone, so a new
+    /// tier cannot be added without this noticing.
+    #[test]
+    fn every_tier_carries_the_constitution() {
+        let cfg = crate::config::LunaConfig::default();
+        let marker = "## II. Honesty";
+
+        let prompts = [
+            ("full", super::build_system_prompt(&cfg)),
+            (
+                "fast",
+                super::finalize_prompt(&cfg, super::FAST_PROMPT.to_string()),
+            ),
+            (
+                "deep",
+                super::finalize_prompt(&cfg, super::DEEP_PROMPT.to_string()),
+            ),
+            (
+                "security",
+                super::finalize_prompt(&cfg, super::build_security_prompt(true, "/x/y")),
+            ),
+        ];
+
+        for (name, p) in prompts {
+            assert!(
+                p.contains(marker),
+                "the {name} tier prompt is missing the constitution"
+            );
+        }
+    }
+
+    /// The rules that exist because of a measured failure must actually be in
+    /// the shipped text. A constitution that quietly loses its honesty section
+    /// is worse than none, because it still looks like one.
+    #[test]
+    fn the_shipped_constitution_states_the_rules_that_were_measured() {
+        let c = super::CONSTITUTION_DEFAULT;
+        for required in [
+            "Never claim an action I did not take",
+            "Never present output I did not receive",
+            "Do, don't narrate",
+            "No placeholders, no TODOs",
+            "No filler",
+        ] {
+            assert!(c.contains(required), "constitution lost {required:?}");
+        }
+    }
+
+    /// A user's constitution file overrides the shipped one.
+    ///
+    /// Pinned because the whole point is that personality is editable without a
+    /// recompile. A mistyped path must also fall back rather than return an
+    /// empty prompt -- silently sending Luna no constitution at all would look
+    /// like the file worked.
+    #[test]
+    fn a_constitution_file_overrides_and_a_bad_path_falls_back() {
+        let dir = std::env::temp_dir().join(format!("luna_const_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("mine.md");
+        std::fs::write(&good, "## II. Honesty\nMY OWN RULE, MARKERTOKEN\n").unwrap();
+
+        let mut cfg = crate::config::LunaConfig::default();
+        cfg.agent.constitution_path = Some(good.to_string_lossy().to_string());
+        let got = super::load_constitution(&cfg);
+        assert!(got.contains("MARKERTOKEN"), "override ignored");
+
+        cfg.agent.constitution_path = Some(dir.join("nope.md").to_string_lossy().to_string());
+        let fell = super::load_constitution(&cfg);
+        assert_eq!(
+            fell.trim(),
+            super::CONSTITUTION_DEFAULT.trim(),
+            "a bad path must fall back to the shipped constitution"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An oversized constitution is truncated, loudly.
+    ///
+    /// This is not tidiness. `src/tools/select.rs` measures tool calls collapsing
+    /// as the prompt grows, and a 7B that has stopped emitting tool calls answers
+    /// with prose describing work it never did. An unbounded constitution is a
+    /// slow route back to the exact failure the constitution is meant to
+    /// prevent, so it is capped and the cap is visible in the prompt.
+    #[test]
+    fn an_oversized_constitution_is_truncated_and_says_so() {
+        let dir = std::env::temp_dir().join(format!("luna_const_big_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.md");
+        std::fs::write(&big, "X".repeat(super::CONSTITUTION_MAX_CHARS * 3)).unwrap();
+
+        let mut cfg = crate::config::LunaConfig::default();
+        cfg.agent.constitution_path = Some(big.to_string_lossy().to_string());
+        let got = super::load_constitution(&cfg);
+
+        assert!(
+            got.contains("constitution truncated"),
+            "truncation must be visible in the prompt, got: {:?}",
+            &got[..got.len().min(120)]
+        );
+        assert!(
+            got.chars().count() < super::CONSTITUTION_MAX_CHARS * 2,
+            "truncation left {} chars",
+            got.chars().count()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The shipped constitution must fit its own budget.
+    ///
+    /// Otherwise the default deployment ships already-truncated, and the
+    /// honesty section -- which sits at the top, so it survives -- would be
+    /// followed by a note telling the model the rules are incomplete.
+    #[test]
+    fn the_shipped_constitution_fits_the_budget() {
+        let n = super::CONSTITUTION_DEFAULT.chars().count();
+        assert!(
+            n <= super::CONSTITUTION_MAX_CHARS,
+            "shipped constitution is {n} chars, budget is {}",
+            super::CONSTITUTION_MAX_CHARS
+        );
     }
 }
