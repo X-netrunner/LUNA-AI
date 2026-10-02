@@ -1332,6 +1332,46 @@ fn is_registered_tool(name: &str) -> bool {
 /// when a tool was refused is worse than none — the user would be left staring at
 /// a turn that apparently did nothing, which is indistinguishable from a hang.
 /// Wrapping the whole body means refusal is reported as a refusal.
+/// A call that never reached its tool, because a required argument was absent.
+///
+/// # Why this is a type and not a message prefix
+///
+/// The ReAct loop treats a tool failure as evidence that the model is flailing
+/// and, if something already succeeded this turn, stops and answers from the
+/// work that landed. That rule is right for a tool that ran and failed. It was
+/// firing on calls where *nothing ran at all*, and the error it printed told
+/// her to re-issue the call — so the turn ended at the exact moment the remedy
+/// became available.
+///
+/// Measured, 2026-10-02 14:37: asked for eleven exploit scripts, she wrote the
+/// first, then emitted a bare `<|tool_call|>write_file<|/tool_call|>`. The
+/// missing `path` produced an error, the error armed the turn-stop, and the
+/// turn ended with one file on disk and ten unwritten. Fixing this in the
+/// message text would have been string matching on wording that is already
+/// load-bearing for the model to read, and would have broken silently the next
+/// time the wording changed.
+#[derive(Debug)]
+pub struct MalformedCall(pub String);
+
+impl std::fmt::Display for MalformedCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MalformedCall {}
+
+/// Whether an error means "the tool ran and failed" rather than "the call was
+/// never well-formed".
+///
+/// Anything that is not a `MalformedCall` counts as a real failure, including
+/// errors raised by the gates above the tool. That is the stingy direction: a
+/// refusal that we fail to recognise still stops the turn, so an unrecognised
+/// new error type cannot quietly buy extra iterations.
+pub fn is_tool_failure(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<MalformedCall>().is_none()
+}
+
 pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> Result<String> {
     let name = &tool_call.function.name;
     let args = normalise_tool_args(&tool_call.function.arguments);
@@ -1465,13 +1505,23 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             // Measured 5/6 exploit-authoring turns ended that way: the file was
             // written correctly and then Luna answered with a dump of this.
             //
-            // Say what actually happened and tell the model to answer instead.
+            // Say what actually happened, and let her re-issue.
+            //
+            // This used to return `Ok`, which was its own bug: the ReAct loop
+            // sets `had_success` on any `Ok`, so a command that never ran was
+            // recorded as work accomplished — and the next failure in the same
+            // turn then armed the turn-stop. The advice to "answer instead"
+            // came from the measurement above, but the safeguard it relied on
+            // was the success-shaped string, and that is fixed independently
+            // and pinned by `a_missing_required_argument_never_reports_success`.
+            // The iteration cap bounds the loop without any of this.
             let Some(command) = args["command"].as_str().filter(|c| !c.trim().is_empty())
             else {
-                return Ok("ERROR: run_shell was called with no command. Nothing was \
-                    executed. If the task is already complete, reply to the user in \
-                    plain text now — do not call another tool."
-                    .to_string());
+                return Err(anyhow::Error::new(MalformedCall(
+                    "run_shell was called with no command. Nothing was executed. \
+                     Re-issue the call with an explicit `command` argument."
+                        .to_string(),
+                )));
             };
             let result = shell::run_command(command, sudo_pass).await?;
             if result.exit_code == 0 {
@@ -1594,9 +1644,10 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             // read /dev/null, which is empty, so the model received "" and
             // concluded the file did not exist.
             let Some(path) = args["path"].as_str().filter(|p| !p.trim().is_empty()) else {
-                return Err(anyhow::anyhow!(
+                return Err(anyhow::Error::new(MalformedCall(
                     "read_file was called with no path. Re-issue with an explicit `path`."
-                ));
+                        .to_string(),
+                )));
             };
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
             filesystem::read_file(&expanded).await
@@ -1611,10 +1662,11 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             // where the model omitted `path` and Luna cheerfully reported
             // writing to /dev/null instead of the requested file.
             let Some(path) = args["path"].as_str().filter(|p| !p.trim().is_empty()) else {
-                return Err(anyhow::anyhow!(
+                return Err(anyhow::Error::new(MalformedCall(
                     "write_file was called with no path. Nothing was written. \
                      Re-issue the call with an explicit `path` argument."
-                ));
+                        .to_string(),
+                )));
             };
             let content = args["content"].as_str().unwrap_or("");
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
@@ -2709,6 +2761,75 @@ mod gate_tests {
                 "{name} did not say which argument was missing: {out:?}"
             );
         }
+    }
+
+    /// The distinction the turn-stop depends on, stated as a test.
+    ///
+    /// `call_failed && had_success` in the ReAct loop ends a turn. That is
+    /// right when a tool ran and failed and wrong when the call never reached
+    /// the tool, because the remedy — re-issue with the missing argument — needs
+    /// another iteration to be worth anything. Measured 2026-10-02 14:37: eleven
+    /// scripts requested, one written, ten never attempted.
+    #[test]
+    fn a_call_that_never_reached_its_tool_is_not_a_tool_failure() {
+        let malformed = anyhow::Error::new(MalformedCall(
+            "write_file was called with no path.".to_string(),
+        ));
+        assert!(!is_tool_failure(&malformed));
+
+        // The stingy direction, and the reason the predicate is a type rather
+        // than a message prefix: anything we do not recognise counts as a real
+        // failure, so a gate refusal or a new error type cannot quietly buy
+        // extra iterations.
+        assert!(is_tool_failure(&anyhow::anyhow!("refused by the capability gate")));
+        assert!(is_tool_failure(&anyhow::anyhow!("no space left on device")));
+        assert!(is_tool_failure(&anyhow::anyhow!("self-patch is locked")));
+    }
+
+    /// All three tools must actually raise `MalformedCall` for a missing
+    /// argument, or the test above passes while the loop still stops the turn.
+    /// Each of these was previously a plain `anyhow!`, and one (`run_shell`) was
+    /// previously an `Ok`, which was worse: it set `had_success` for a command
+    /// that never ran.
+    #[tokio::test]
+    async fn every_missing_required_argument_raises_a_malformed_call() {
+        let config = crate::config::LunaConfig::default();
+        for (name, args) in [
+            ("write_file", serde_json::json!({"content": "print('x')"})),
+            ("write_file", serde_json::json!({"path": "   "})),
+            ("read_file", serde_json::json!({})),
+            ("read_file", serde_json::json!({"path": ""})),
+            ("run_shell", serde_json::json!({})),
+            ("run_shell", serde_json::json!({"command": "   "})),
+        ] {
+            let err = execute(&call(name, args.clone()), &config)
+                .await
+                .expect_err("{name} with {args} should refuse");
+            assert!(
+                !is_tool_failure(&err),
+                "{name} with {args} would still stop the turn: {err}"
+            );
+        }
+    }
+
+    /// A malformed call is still a failure as far as she is concerned: it must
+    /// never read as success, because the original bug was a missing `path`
+    /// defaulting to /dev/null and reporting "Written to /dev/null".
+    #[tokio::test]
+    async fn a_malformed_call_is_never_reported_as_success() {
+        let config = crate::config::LunaConfig::default();
+        let err = execute(
+            &call("write_file", serde_json::json!({"content": "x"})),
+            &config,
+        )
+        .await
+        .expect_err("must refuse");
+        let text = err.to_string();
+        assert!(
+            !text.starts_with("SUCCESS") && !text.starts_with("Written to "),
+            "a refused call read as success: {text}"
+        );
+        assert!(text.contains("no path"), "{text}");
     }
 
     /// The live config file must gate everything the code classifies as a
