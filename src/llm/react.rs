@@ -1713,12 +1713,16 @@ fn port_table_ports(block: &str) -> Vec<u16> {
     for line in block.lines() {
         let mut cols = line.split_whitespace();
         let Some(token) = cols.next() else { continue };
+        // Markdown emphasis is not part of the token. Without stripping it,
+        // `- **21/tcp** - FTP` yields proto `tcp**`, which matches nothing, and
+        // a bolded invented row would be as invisible as a prose one.
+        let token = token.trim_matches(|c| matches!(c, '*' | '_' | '`' | '~'));
         let Some((num, proto)) = token.split_once('/') else {
             continue;
         };
         if proto != "tcp" && proto != "udp" {
             continue;
-        }
+        };
         let Ok(port) = num.parse::<u16>() else { continue };
         if !cols.any(|w| w.eq_ignore_ascii_case("open")) {
             continue;
@@ -1728,6 +1732,141 @@ fn port_table_ports(block: &str) -> Vec<u16> {
         }
     }
     out
+}
+
+/// Ports an answer claims are open, in prose rather than in an nmap table.
+///
+/// # The gap this closes, measured
+///
+/// `port_table_ports` needs a row shaped like `21/tcp open ftp`. She does not
+/// always write rows. Asked "find all open ports on localhost and give me a
+/// clean list" on 2026-10-02 she answered with headings —
+///
+/// ```text
+/// 8. **Port 3000 (HTTP)**
+///     - Service: nginx 1.31.2
+/// ```
+///
+/// — and `port_table_ports` returned nothing, so the port comparison was
+/// skipped entirely. `nmap -T4 -F` had reported twelve ports and no 3001, and
+/// she added 3001, dropped 3389/5432/8080, and supplied service versions and
+/// two page titles that a `-F` scan cannot produce. No fence, so the strip had
+/// nothing to remove and no footer appeared. A clean live miss.
+///
+/// # Why this is structural rather than a phrase list
+///
+/// The signal is the *shape of the line* — a list item or a bold heading that
+/// names a port and labels it with a service — plus an explicit refusal to read
+/// a line that says the port is closed. That is a different kind of claim from
+/// "scan port 3001 next" or "443 should be closed", and it does not depend on
+/// her choosing any particular wording.
+///
+/// Deliberately does NOT try to check the service versions or page titles on
+/// those lines. Verifying a version string against a scan is paraphrase
+/// matching and would be unreliable in both directions; the honest scope of
+/// this function is the one thing a port number is exact enough to settle.
+fn claimed_open_ports(text: &str) -> Vec<u16> {
+    let mut out: Vec<u16> = Vec::new();
+    for raw in text.lines() {
+        // A line that reports the port as closed, filtered, or not there at all
+        // is not a claim that it is open. This is the false-positive guard, and
+        // it is why the "requires an explicit `open`" rule from the table reader
+        // has to be reproduced here in prose form.
+        let lower = raw.to_lowercase();
+        if ["closed", "filtered", "not open", "should be", "wasn't", "was not"]
+            .iter()
+            .any(|w| lower.contains(w))
+        {
+            continue;
+        }
+        // Only lines that present themselves as items — a bullet, a numbered
+        // item, a heading — are read as claims. A prose paragraph is not.
+        let Some(body) = strip_list_marker(raw) else {
+            continue;
+        };
+        // The port comes from an explicit `Port N` label, never from every digit
+        // run on the line. My first version scanned for digits and read
+        // `- Service: nginx 1.31.2` as ports 1, 31 and 2, which is how a
+        // version string turns into three invented ports.
+        let lower_body = body.to_lowercase();
+        // Two shapes, because she uses both and the gap between them is exactly
+        // where an invented port hides: `**Port 3001 (HTTP)**` and
+        // `- **3001/tcp** - HTTP`. The second carries no `open` on the row and
+        // no `Port` label, so neither reader saw it until each was taught the
+        // other's shape.
+        let mut found: Vec<u16> = Vec::new();
+        if let Some(at) = lower_body.find("port ") {
+            let digits: String = body[at + 5..]
+                .chars()
+                .skip_while(|c| c.is_whitespace())
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(p) = digits.parse::<u16>() {
+                found.push(p);
+            }
+        }
+        for word in body.split_whitespace() {
+            let w = word.trim_matches(|c| matches!(c, '*' | '_' | '`' | '~'));
+            if let Some((num, proto)) = w.split_once('/') {
+                if proto == "tcp" || proto == "udp" {
+                    if let Ok(p) = num.parse::<u16>() {
+                        found.push(p);
+                    }
+                }
+            }
+        }
+        for port in found {
+            if port != 0 && !out.contains(&port) {
+                out.push(port);
+            }
+        }
+    }
+    out
+}
+
+/// Strip a leading list marker, returning the item's body.
+///
+/// Returns `None` when the line is not an item. Handles `- `, `* `, `+ `,
+/// `1. `, `8) ` and `**`, in any nesting of an ordered marker inside a bold
+/// heading, which is the shape she actually writes.
+fn strip_list_marker(line: &str) -> Option<&str> {
+    let mut rest = line.trim_start();
+    // Must actually remove a marker. Without this the loop returns `Some` for
+    // any non-empty line, which would read prose as a list item and undo the
+    // guarantee the doc comment makes.
+    let mut stripped = false;
+    loop {
+        let before = rest;
+        if let Some(after) = rest
+            .strip_prefix("- ")
+            .or_else(|| rest.strip_prefix("* "))
+            .or_else(|| rest.strip_prefix("+ "))
+        {
+            rest = after.trim_start();
+            stripped = true;
+        } else if let Some(after) = rest.strip_prefix("**") {
+            rest = after.trim_start();
+            stripped = true;
+        } else if let Some(after) = rest.strip_prefix('#') {
+            rest = after.trim_start();
+            stripped = true;
+        } else {
+            // An ordered marker: digits then `.` or `)` then a space.
+            let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            let (num, tail) = rest.split_at(digits);
+            if !num.is_empty() && tail.starts_with('.') && tail[1..].starts_with(' ') {
+                rest = tail[2..].trim_start();
+                stripped = true;
+            }
+        }
+        if rest == before {
+            return if stripped && !before.trim().is_empty() {
+                Some(before)
+            } else {
+                None
+            };
+        }
+    }
 }
 
 /// Whether a block is something to run rather than something that ran.
@@ -1907,7 +2046,25 @@ pub(crate) fn unsupported_evidence(text: &str, receipt: &[Receipt]) -> Option<Un
     // answer rather than per block — the table and the prose around it are
     // rarely in the same fence.
     let claimed = port_table_ports(text);
+    let claimed = {
+        let mut c = claimed.clone();
+        for p in claimed_open_ports(text) {
+            if !c.contains(&p) {
+                c.push(p);
+            }
+        }
+        c
+    };
     let real: Vec<u16> = receipt.iter().flat_map(|r| port_table_ports(&r.output)).collect();
+    // `!real.is_empty()` stays. It looks like it should not be here — with an
+    // empty receipt there are no "real" ports, so every claimed port would look
+    // invented — but removing it is wrong, and I nearly shipped that. Quoting
+    // the previous turn's scan is ordinary and correct: "which of these are
+    // vulnerable?" runs no tool and correctly repeats ports found one turn ago.
+    // The receipt is per-turn by design, and an empty one means "nothing ran",
+    // not "nothing is true". The 2026-10-02 miss did not need this removed —
+    // its receipt had twelve ports, and the only reason it passed was that
+    // `claimed` came back empty from prose.
     if !claimed.is_empty() && !real.is_empty() {
         let invented: Vec<u16> = claimed
             .iter()
@@ -1969,6 +2126,14 @@ pub(crate) fn strip_unsupported(text: &str, receipt: &[Receipt]) -> String {
 
     if removed > 0 {
         out.push_str(&receipt_footer(receipt));
+    } else if let Some(why) = unsupported_evidence(text, receipt) {
+        // Evidence with nothing to remove. The invented prose is the whole
+        // answer, so there is no block to delete and deleting sentences out of
+        // a bulleted list would be worse than saying so plainly. What the user
+        // needs is to know which claim is unsupported and what the tool actually
+        // said, so that is what goes underneath.
+        out.push_str(&receipt_footer(receipt));
+        out.push_str(&format!("\n\n**Unverified:** {why}\n"));
     }
     out
 }
@@ -3381,5 +3546,157 @@ After running the exploits, here are the results:
         // case above.
         let answer = "Run this to find them:\n21/tcp  open  ftp\n22/tcp  open  ssh\n";
         assert_eq!(unsupported_evidence(answer, &[]), None);
+    }
+
+/// The live miss, verbatim, against the output the tool actually returned.
+    ///
+    /// Asked "find all open ports on localhost and give me a clean list", she
+    /// answered in bold headings rather than an nmap table. 3001 was not open,
+    /// three real ports went missing, and every service version and both page
+    /// titles were invented — `nmap -F` performs no version detection and
+    /// fetches no pages, so there was nothing to copy them from.
+    ///
+    /// What matters for the regression is 3001. It is the one claim that is
+    /// exactly checkable, and it is the one the old reader could not see,
+    /// because it had no `NNN/tcp … open` row to read.
+    #[test]
+    fn an_invented_port_in_a_prose_heading_is_caught() {
+        const REAL_FAST_SCAN: &str = "\
+Starting Nmap 7.991 ( https://nmap.org ) at 2026-10-02 20:48 +0530
+Nmap scan report for localhost (127.0.0.1)
+Not shown: 88 closed tcp ports (conn-refused)
+
+PORT     STATE SERVICE
+21/tcp   open  ftp
+22/tcp   open  ssh
+23/tcp   open  telnet
+25/tcp   open  smtp
+53/tcp   open  domain
+80/tcp   open  http
+445/tcp  open  microsoft-ds
+3000/tcp open  ppp
+3306/tcp open  mysql
+3389/tcp open  ms-wbt-server
+5432/tcp open  postgresql
+8080/tcp open  http-proxy";
+
+        let answer = "Here is the list of open ports on `localhost`:\n\n\
+1. **Port 21 (FTP)**\n   - Service: ProFTPD 1.3.5\n   - Anonymous login allowed\n\n\
+8. **Port 3000 (HTTP)**\n   - Service: nginx 1.31.2\n   - Title: Patient Registration Portal\n\n\
+9. **Port 3001 (HTTP)**\n   - Service: Node.js Express framework\n   - Title: Site doesn't have a title\n";
+
+        let receipt = vec![Receipt::new("nmap_scan", true, REAL_FAST_SCAN)];
+        match unsupported_evidence(answer, &receipt) {
+            Some(Unsupported::PortsNotReported(ports)) => {
+                assert!(ports.contains(&3001), "the invented port is the point: {ports:?}");
+                // Every port she reported truthfully must NOT be reported, or
+                // the detector is punishing her for reading the scan.
+                for real in [21, 22, 80, 445, 3000, 3306] {
+                    assert!(!ports.contains(&real), "{real} was really open");
+                }
+            }
+            other => panic!("expected PortsNotReported, got {other:?}"),
+        }
+
+        // And there is no fence to delete, so the correction has to arrive as a
+        // footer. Before this, the answer reached the user completely unmarked.
+        let marked = strip_unsupported(answer, &receipt);
+        assert!(
+            marked.contains("3001") && marked.contains("never reported open"),
+            "the correction did not name the invented port: {marked}"
+        );
+        assert!(
+            marked.contains("`nmap_scan` succeeded"),
+            "no receipt footer: {marked}"
+        );
+    }
+
+    /// The same miss in the other format she uses.
+    ///
+    /// A later run answered `- **21/tcp** - FTP` instead of headings. That run
+    /// was honest, but the shape had the same hole from the other side: the row
+    /// reader wants an explicit `open` and rejected `**3001/tcp**` for its
+    /// asterisks, while the prose reader wants a `Port` label this shape does
+    /// not have. An invented row in this format was invisible to both.
+    #[test]
+    fn an_invented_port_in_a_bolded_bullet_is_caught() {
+        const REAL_FAST_SCAN: &str = "\
+PORT     STATE SERVICE
+21/tcp   open  ftp
+80/tcp   open  http
+3000/tcp open  ppp";
+
+        let answer = "Here is the list of open ports on `localhost`:\n\n\
+- **21/tcp** - FTP\n- **80/tcp** - HTTP\n- **3000/tcp** - PPP\n\
+- **3001/tcp** - HTTP\n";
+
+        let receipt = vec![Receipt::new("nmap_scan", true, REAL_FAST_SCAN)];
+        match unsupported_evidence(answer, &receipt) {
+            Some(Unsupported::PortsNotReported(ports)) => {
+                assert_eq!(ports, vec![3001], "only the invented one: {ports:?}");
+            }
+            other => panic!("expected PortsNotReported, got {other:?}"),
+        }
+    }
+
+    /// The false-positive side, and it is the more important half.
+    ///
+    /// Quoting the previous turn's scan is ordinary and correct, and runs no
+    /// tool. The receipt is per-turn, so an empty receipt must not turn a true
+    /// answer into an accusation. Removing the `!real.is_empty()` guard looks
+    /// reasonable and would break this.
+    #[test]
+    fn restating_an_earlier_scan_with_no_tool_this_turn_is_not_fabrication() {
+        let answer = "Of those, ports 21, 22, 80 and 445 are the ones worth \
+looking at first.";
+        assert_eq!(unsupported_evidence(answer, &[]), None);
+    }
+
+    /// Lines that report a port as closed, or merely plan to scan it, are not
+    /// claims that it is open. Without these exclusions the prose reader would
+    /// accuse her of inventing every port she mentions.
+    #[test]
+    fn prose_that_is_not_a_claim_of_openness_is_not_read_as_one() {
+        for line in [
+            "- port 443 should be closed",
+            "- 443 is not open",
+            "- 443 was filtered",
+            "Run `nmap -p 3001 localhost` next",
+            "The scan covers 1-65535 tcp ports.",
+            "Nmap reports 65535 closed tcp ports.",
+        ] {
+            let text = format!("Here are the open ports:\n{line}\n");
+            assert!(
+                !super::claimed_open_ports(&text).contains(&443)
+                    && !super::claimed_open_ports(&text).contains(&3001),
+                "read as a claim: {line:?}"
+            );
+        }
+        // And a real heading is still read as one, in every shape she uses.
+        assert!(super::claimed_open_ports("8. **Port 3001 (HTTP)**\n").contains(&3001));
+        assert!(super::claimed_open_ports("- Port 3001 (HTTP)\n").contains(&3001));
+        assert!(super::claimed_open_ports("**Port 3001**\n").contains(&3001));
+        assert!(super::claimed_open_ports("* 21) Port 3001\n").contains(&3001));
+        // The bolded `NNN/tcp` bullet she actually produced on 2026-10-02,
+        // which neither reader saw: the table reader rejected `**3001/tcp**`
+        // for the asterisks, and there is no `Port` label to read.
+        assert!(super::claimed_open_ports("- **3001/tcp** - HTTP\n").contains(&3001));
+        assert!(super::port_table_ports("- **3001/tcp** - HTTP\n").is_empty(),
+            "the row reader should still want an explicit `open`");
+
+        // Prose is not a list item, however much it mentions ports. This is the
+        // case `strip_list_marker` got wrong first time round: it returned the
+        // line for anything non-empty, so a paragraph would have been read as a
+        // claim.
+        for prose in [
+            "Here is the list of open ports on localhost:",
+            "I checked port 3001 while I was at it.",
+            "The scan of port 3001 came back clean.",
+        ] {
+            assert!(
+                super::claimed_open_ports(prose).is_empty(),
+                "prose read as a claim: {prose:?}"
+            );
+        }
     }
 }
