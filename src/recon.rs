@@ -164,22 +164,16 @@ pub async fn run(config: &LunaConfig) -> Result<String, String> {
         },
     };
 
-    // Published so the scan is visible in the activity feed. Without it the
-    // user sees Luna go quiet for the length of a real scan with no indication
-    // anything is running — the exact gap the feed was built to close.
-    let started = std::time::Instant::now();
-    crate::activity::publish(crate::activity::Event::ToolStart {
-        name: "nmap_scan".into(),
-        summary: format!("harness recon: {} (-p-)", RECON_TARGET),
-    });
-
+    // `tools::execute` publishes its own ToolStart/ToolEnd for every call, so
+    // publishing here as well showed the user the scan running twice.
+    //
+    // That was not cosmetic. Measured 2026-10-02 at N=12: the harness scan
+    // counted 2 per turn, which I read as "harness plus one of her own" and
+    // reported as her calling nmap_scan. She calls no tools at all. The
+    // activity count was the only evidence for that claim and it was wrong by
+    // exactly the duplication I had added — an instrument bug that produced a
+    // confident false conclusion, which is the worst kind.
     let result = crate::tools::execute(&call, config).await;
-
-    crate::activity::publish(crate::activity::Event::ToolEnd {
-        name: "nmap_scan".into(),
-        ok: result.is_ok(),
-        elapsed: started,
-    });
 
     result.map_err(|e| {
         let msg = format!("{e:#}");
