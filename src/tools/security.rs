@@ -684,55 +684,72 @@ pub async fn tool_check(name: &str) -> Result<String> {
 /// model on the strength of a sentence. The list below covers the tools these
 /// turns actually reach for. Widen it in config rather than by editing here.
 pub const PKG_INSTALL_ALLOWLIST: &[&str] = &[
-    // Credential testing and wordlists.
+    // Credential testing and password recovery.
     "hydra", "ncrack", "medusa", "john", "hashcat",
     // Recon. `masscan` complements the 71 nmap scripts rather than replacing
-    // them, and `wireshark-cli` is what actually provides `tshark` — the
-    // package is not named `tshark`, and `pacman -S tshark` fails.
-    // `netdiscover` is absent despite being widely recommended: check, don't
-    // guess. See NOT_IN_OFFICIAL_REPOS.
-    "nmap", "masscan", "wireshark-cli",
-    // Service probing and web.
-    "nikto", "sqlmap", "gobuster",
+    // them. Two of these are named after their *purpose*, not their binary:
+    // `wireshark-cli` provides `tshark` (`pacman -S tshark` fails) and
+    // `exploitdb` provides `searchsploit` (`pacman -S searchsploit` fails).
+    // Both are worth having: exploitdb in particular lets her look up a known
+    // CVE by the exact service version nmap returned, offline, instead of
+    // inventing one.
+    "nmap", "masscan", "wireshark-cli", "exploitdb", "tcpdump",
+    // Service probing and web. `nikto`, `sqlmap`, `gobuster` are the general
+    // ones; `wpscan` is WordPress-specific but is in `extra`, not the AUR as
+    // commonly claimed, and it is the single most useful thing to have when a
+    // honeypot serves a CMS.
+    "nikto", "sqlmap", "gobuster", "wpscan",
     // Transport and shell.
     "socat", "openbsd-netcat",
     // Credential spraying and enumeration. `smbclient` and `openldap` are the
-    // official-repo clients; `enum4linux` and `dirb` are AUR-only and so are
-    // not here, see NOT_IN_OFFICIAL_REPOS.
+    // official-repo clients; `enum4linux` and `dirb` are not, see below.
     "smbclient", "openldap",
+    // Firmware/embedded analysis, for the IoT-shaped targets.
+    "binwalk",
     // Wireless, for the WiFi-adjacent questions that keep coming up.
+    // `hcxtools` provides `hcxdumptool` for modern WPA2 handshake capture,
+    // which then feeds `hashcat` above.
     "aircrack-ng", "hcxtools",
 ];
 
-/// Packages known NOT to be in the official repos, kept here so the mistake is
-/// recorded rather than repeated.
+/// Names that `pacman -S` cannot resolve, kept so the mistake is recorded
+/// rather than repeated.
 ///
-/// Four entries in the first version of the allowlist were AUR-only: `ffuf`,
-/// `whatweb`, `enum4linux` and `dirb`. `pacman -Ss` finds none of them, and
-/// `netcat-openbsd` was simply the wrong name — the package is
-/// `openbsd-netcat`. Since `pkg_install` runs `pacman -S` and nothing else,
-/// those four could never have installed: the tool would have reported
-/// `target not found`, and she would have learned that `pkg_install` is broken
-/// rather than that the package is unavailable. That is the worse failure of
-/// the two, because it teaches her the wrong lesson about a tool that works.
+/// Two kinds live here and they fail differently, which is why they are worth
+/// distinguishing in prose even though the test treats them alike:
 ///
-/// AUR packages need `yay`/`paru`, which is a deliberate non-goal: an AUR
-/// helper builds an arbitrary PKGBUILD and this installer runs as root.
+/// * **AUR-only** — the package exists, just not in the official repos:
+///   `ffuf`, `whatweb`, `enum4linux`, `dirb`, `wfuzz`, `responder`,
+///   `netdiscover`, `crackmapexec`, `netexec`, `metasploit-framework`, `cewl`,
+///   `burpsuite`. An AUR helper (`yay`/`paru`) would reach them, which is a
+///   deliberate non-goal: it builds an arbitrary PKGBUILD and `pkg_install`
+///   runs as root.
+/// * **No such package on Arch at all** — `crunch`. There is no wordlist
+///   generator by that name. Do *not* substitute `crunch64`, which does exist
+///   and is "a library for handling common N64 compression formats". This is
+///   the closest call in the file: the name is one character away and the
+///   package is real, so it passes every syntactic check and installs cleanly
+///   into the exact wrong tool.
+/// * **Binary names, not packages** — `tshark` and `searchsploit`. Both tools
+///   are reachable, as `wireshark-cli` and `exploitdb`, which are on the
+///   allowlist above. Listed so nobody "fixes" the allowlist by adding the
+///   binary name.
 ///
-/// The two tests at the bottom of `tool_availability_tests` check this list
-/// against pacman in both directions, and between them they have already
-/// earned their keep: writing this list is how I put `netdiscover` on the
-/// allowlist (it is not packaged) and how `wpscan` ended up here (it *is* in
-/// `extra`, version 1:4.0.1-1). Both were my errors, both caught the same
-/// day. A list of package names is a claim about a moving distribution and
-/// has to be re-checked, not trusted.
+/// How this list got here: the first allowlist shipped four AUR-only packages
+/// and one nonexistent name (`netcat-openbsd`, where the package is
+/// `openbsd-netcat`) and nothing caught it, because the only test on the list
+/// asserted that the allowlist and the validator agreed with *each other* —
+/// two things I wrote, checking each other. Every entry in both lists is now
+/// checked against `pacman` in both directions by the two tests at the bottom
+/// of `tool_availability_tests`.
 ///
-/// The real Arch names to watch for: `wireshark-cli` (provides `tshark`) and
-/// `openbsd-netcat` (provides `nc`) — searching for the binary's name finds
-/// nothing.
+/// The cost of getting this wrong is not a failed install. `pkg_install`
+/// would report `target not found`, and she would conclude that `pkg_install`
+/// is broken — teaching the wrong lesson about a tool that works.
 const NOT_IN_OFFICIAL_REPOS: &[&str] = &[
     "ffuf", "whatweb", "enum4linux", "dirb", "wfuzz", "responder", "netdiscover",
-    "metasploit-framework", "crackmapexec", "netexec", "cewl", "searchsploit",
+    "metasploit-framework", "crackmapexec", "netexec", "cewl", "burpsuite",
+    "crunch", "tshark", "searchsploit",
 ];
 
 /// Install one allowlisted package, as root, non-interactively.
