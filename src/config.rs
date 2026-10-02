@@ -442,6 +442,23 @@ pub struct LlmConfig {
     /// permanently unavailable, regardless of any receipt on disk.
     #[serde(default)]
     pub security_dev_public_key: String,
+    /// Hosts `nmap_scan` may touch. Loopback is always permitted regardless
+    /// of this list; anything else has to be named here.
+    ///
+    /// Added because `sanitize_target` is a character allowlist for shell
+    /// safety, not a scope restriction — `nmap_scan` would scan any host on
+    /// the network. "Attack my laptop" naming a machine is not consent to
+    /// sweep the LAN it sits on, and a user with a honeypot on loopback does
+    /// not want recon wandering out to `192.168.x.x` the first time a model
+    /// resolves a pronoun confidently.
+    ///
+    /// Entries are matched against the sanitised target as literal strings.
+    /// The trade-off is deliberate: CIDR would be more convenient and also
+    /// more dangerous, because `192.168.0.0/16` reads as narrow and is not.
+    /// A default of loopback-only means a remote target is always a
+    /// deliberate, persistent act.
+    #[serde(default)]
+    pub scan_allowlist: Vec<String>,
     /// Local embedding model used for semantic memory recall (RAG-lite).
     /// Pull once with: ollama pull nomic-embed-text
     pub embedding_model: String,
@@ -521,6 +538,8 @@ impl Default for LlmConfig {
             security_unrestricted: false,
             security_scripts_dir: default_security_scripts_dir(),
             security_dev_public_key: String::new(),
+            // Loopback-only by default; see `scan_allowlist`.
+            scan_allowlist: Vec::new(),
             embedding_model: "nomic-embed-text".into(),
             num_ctx: default_num_ctx(),
         }

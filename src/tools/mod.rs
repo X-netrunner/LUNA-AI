@@ -1467,7 +1467,13 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             if target.is_empty() {
                 anyhow::bail!("No target provided");
             }
-            security::nmap_scan(target, scan_type, sudo_pass).await
+            security::nmap_scan(
+                target,
+                scan_type,
+                sudo_pass,
+                &config.llm.scan_allowlist,
+            )
+            .await
         }
 
         "analyze_pcap" => {

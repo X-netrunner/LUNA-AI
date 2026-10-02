@@ -9,7 +9,15 @@ use anyhow::Result;
 
 // ── nmap ─────────────────────────────────────────────────────────────────────
 
-pub async fn nmap_scan(target: &str, scan_type: &str, sudo_pass: Option<&str>) -> Result<String> {
+pub async fn nmap_scan(
+    target: &str,
+    scan_type: &str,
+    sudo_pass: Option<&str>,
+    allowlist: &[String],
+) -> Result<String> {
+    // Before the sanitiser, so the check sees what will actually be scanned
+    // and cannot be evaded by dressing the host up in shell metacharacters.
+    ensure_scan_target_allowed(target, allowlist)?;
     let safe_target = sanitize_target(target);
 
     let nmap_args = match scan_type {
@@ -168,9 +176,151 @@ pub async fn dns_lookup(target: &str, mode: &str, sudo_pass: Option<&str>) -> Re
 /// Strip shell-dangerous characters from a target string (host/IP/domain).
 /// Not a full validator — just removes the characters that matter for
 /// command injection in this specific quoting context.
+/// Is this target the local machine, reachable only over loopback?
+///
+/// Always allowed, on any allowlist, because the traffic cannot leave the
+/// host. This is what lets the default configuration work with no setup.
+pub fn is_loopback_target(target: &str) -> bool {
+    let t = sanitize_target(target).to_lowercase();
+    if t == "localhost" || t == "::1" || t == "[::1]" || t == "0:0:0:0:0:0:0:1" {
+        return true;
+    }
+    // Parsed as four octets, not string-matched on a "127." prefix.
+    //
+    // The prefix version accepted `127.0.0.1.evil.test`, which is a hostname
+    // its holder controls, not an address. Anything that does not parse as a
+    // complete IPv4 address is not loopback, full stop.
+    let octets: Vec<&str> = t.split('.').collect();
+    octets.len() == 4
+        && octets.iter().all(|o| {
+            !o.is_empty()
+                && o.len() <= 3
+                && o.bytes().all(|b| b.is_ascii_digit())
+                && o.parse::<u16>().map(|n| n <= 255).unwrap_or(false)
+        })
+        && octets[0] == "127"
+}
+
+/// Refuse a scan of anything not loopback and not explicitly allowed.
+///
+/// A refusal, not a warning. The whole point of a scope limit is that it
+/// holds when the model is persuasive, and "my laptop" plus a confident
+/// hostname lookup is exactly the situation where prose should not be
+/// enough.
+pub fn ensure_scan_target_allowed(target: &str, allowlist: &[String]) -> Result<()> {
+    let safe = sanitize_target(target);
+    if is_loopback_target(&safe) {
+        return Ok(());
+    }
+    if allowlist
+        .iter()
+        .any(|a| sanitize_target(a).eq_ignore_ascii_case(&safe))
+    {
+        tracing::info!("scan target '{}' is on the allowlist", safe);
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Refused: '{safe}' is not a local target. nmap_scan is scoped to loopback \
+         (localhost, 127.0.0.1, ::1) plus the hosts listed under \
+         `scan_allowlist` in luna.toml. Add the target there if you really want \
+         it scanned — this is not something a request should be able to talk past."
+    )
+}
+
 fn sanitize_target(target: &str) -> String {
     target
         .chars()
         .filter(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | ':' | '/' | '_'))
         .collect()
+}
+
+#[cfg(test)]
+mod scan_scope_tests {
+    use super::*;
+
+    fn allow(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The default: no configuration, and the user's own machine is
+    /// reachable. A scope limit that needs setup to be useful is a scope
+    /// limit nobody keeps.
+    #[test]
+    fn loopback_works_with_no_configuration_at_all() {
+        for t in ["localhost", "127.0.0.1", "::1", "127.0.0.53"] {
+            assert!(
+                ensure_scan_target_allowed(t, &[]).is_ok(),
+                "loopback target {t} should be allowed with an empty allowlist"
+            );
+        }
+    }
+
+    /// The whole point. A default install must not be able to sweep the LAN.
+    #[test]
+    fn a_remote_target_is_refused_without_allowlisting_it() {
+        for t in [
+            "192.168.1.1",
+            "10.0.0.5",
+            "example.com",
+            "192.168.0.0/24",
+            "honeypot.lan",
+        ] {
+            let r = ensure_scan_target_allowed(t, &[]);
+            assert!(r.is_err(), "{t} should be refused by default, got {r:?}");
+        }
+    }
+
+    /// Emptying the allowlist must not widen anything. A user who clears the
+    /// list is asking for the default, not for everything.
+    #[test]
+    fn clearing_the_allowlist_does_not_unlock_the_network() {
+        assert!(ensure_scan_target_allowed("192.168.1.1", &allow(&[])).is_err());
+    }
+
+    /// Allowlisting is the escape hatch, and it has to actually work or the
+    /// limit is just an obstacle.
+    #[test]
+    fn an_explicitly_allowed_host_is_reachable() {
+        let list = allow(&["192.168.1.50", "example.com"]);
+        assert!(ensure_scan_target_allowed("192.168.1.50", &list).is_ok());
+        assert!(ensure_scan_target_allowed("example.com", &list).is_ok());
+        // And still not a neighbour.
+        assert!(ensure_scan_target_allowed("192.168.1.51", &list).is_err());
+    }
+
+    /// Shell metacharacters must not be usable to disguise a target. The check
+    /// runs before the sanitiser precisely so this holds, but a test is what
+    /// keeps that ordering from being "tidied" into the wrong order later.
+    #[test]
+    fn a_disguised_target_cannot_slip_past_the_check() {
+        for t in [
+            "192.168.1.1; whoami",
+            "$(echo 192.168.1.1)",
+            "192.168.1.1`id`",
+            "192.168.1.1 && curl evil.test",
+        ] {
+            assert!(
+                ensure_scan_target_allowed(t, &[]).is_err(),
+                "disguised target {t} was allowed"
+            );
+        }
+    }
+
+    /// `0.0.0.0` is not loopback. On Linux it means "every interface", so a
+    /// scan against it reaches the LAN — which is the exact case the limit
+    /// exists to stop, wearing a friendly name.
+    #[test]
+    fn the_wildcard_address_is_not_treated_as_local() {
+        assert!(!is_loopback_target("0.0.0.0"));
+        assert!(ensure_scan_target_allowed("0.0.0.0", &[]).is_err());
+    }
+
+    /// A prefix must not be enough: `127.example.com` resolves somewhere real,
+    /// and `127.0.0.1.evil.test` is a real attack.
+    #[test]
+    fn a_loopback_looking_prefix_is_not_loopback() {
+        for t in ["127.0.0.1.evil.test", "127.example.com", "localhost.evil.test"] {
+            assert!(!is_loopback_target(t), "{t} should not count as loopback");
+        }
+    }
 }
