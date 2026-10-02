@@ -511,32 +511,132 @@ fn word_present(source: &str, word: &str) -> bool {
 }
 
 /// Extract fenced blocks whose language is runnable.
+///
+/// Scans for ``` anywhere in the string, NOT at the start of a line.
+///
+/// This was a measured miss, not a hypothetical one. The first version walked
+/// `answer.lines()` and only opened a fence on a line that began with ```,
+/// which is what a hand-written fixture looks like. Real replies do not do that:
+/// measured 2026-10-02, 4 of 12 turns opened the fence mid-line — "Here's the
+/// script: ```python import paramiko ..." — and on every one of those the guard
+/// fired (it searches the raw string) while this extractor returned nothing, so
+/// the turn was handed back unexecuted exactly as before. `narrates_shell_execution`
+/// and this function disagreed about the same answer, which is the failure mode
+/// of having two definitions of "there is a fence here".
 pub fn extract_blocks(answer: &str) -> Vec<Block> {
-    let mut out = Vec::new();
-    let mut in_fence = false;
-    let mut lang = String::new();
-    let mut body: Vec<&str> = Vec::new();
+    extract_all_blocks(answer)
+        .into_iter()
+        .filter(|b| {
+            INTERPRETERS.iter().any(|(l, _)| *l == b.lang)
+                && !b.body.trim().is_empty()
+        })
+        .map(|b| Block {
+            lang: b.lang,
+            source: b.body.trim_end().to_string(),
+        })
+        .collect()
+}
 
-    for line in answer.lines() {
-        let trimmed = line.trim_start();
-        if !in_fence {
-            if let Some(rest) = trimmed.strip_prefix("```") {
-                in_fence = true;
-                lang = rest.trim().to_ascii_lowercase();
-                body.clear();
+/// A fenced block of any kind, with the text that introduced it.
+///
+/// This is the single fence-walking rule in the codebase; `extract_blocks`
+/// filters it down to runnable languages, and the fabrication guard in
+/// `react.rs` uses it to find output blocks. One walker, because the cost of
+/// two is not a duplicated function — it is two functions disagreeing about
+/// where a block starts, which is precisely the bug that cost four fixes on
+/// 2026-10-02, every one of them invisible to unit tests written against the
+/// same mistaken idea of the format as the parser.
+pub struct RawBlock {
+    /// Lowercased info string. Empty for an untagged fence, which is the common
+    /// shape for pasted output and is exactly the case that must not be
+    /// mistaken for a command.
+    pub lang: String,
+    pub body: String,
+    /// Text between the previous block and this fence. Used to tell "here is
+    /// the output" from "run this", which is a question about the prose
+    /// immediately before the block, not about the block.
+    pub before: String,
+    /// Byte range of the whole block including both fences, so a caller that
+    /// has to remove one can do it without re-finding the fences and risking a
+    /// second, subtly different parse.
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Every fenced block, in order, untagged ones included.
+pub fn extract_all_blocks(answer: &str) -> Vec<RawBlock> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    // Where the previous block's closing fence ended, so `before` is the prose
+    // that introduces THIS block rather than everything above it.
+    let mut prev_end = 0usize;
+
+    while pos < answer.len() {
+        let Some(rel) = answer[pos..].find("```") else {
+            break;
+        };
+        let open = pos + rel;
+        let after = open + 3;
+
+        // The info string ends at the first whitespace OR newline, whichever comes
+        // first — not at the newline. The first version looked only for a newline
+        // and returned nothing when there was not one, which is not a rare shape:
+        // measured 2026-10-02, one real reply came back as a single 3201-character
+        // line with six inline fences and NO newline anywhere in it. The other
+        // three hand-off turns were the same. Those are exactly the turns worth
+        // executing, so this is the case that decides whether the feature works.
+        let tail = &answer[after..];
+        let info_end = tail
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(tail.len());
+        let lang = tail[..info_end].trim().to_ascii_lowercase();
+
+        let mut body_start = after + info_end;
+        while body_start < answer.len() && answer[body_start..].starts_with(|c: char| c.is_whitespace())
+        {
+            body_start += 1;
+        }
+
+        let push = |out: &mut Vec<RawBlock>,
+                     lang: &str,
+                     source: &str,
+                     before: &str,
+                     start: usize,
+                     end: usize| {
+            out.push(RawBlock {
+                lang: lang.to_string(),
+                body: source.trim_end().to_string(),
+                before: before.to_string(),
+                start,
+                end,
+            });
+        };
+
+        match answer[body_start..].find("```") {
+            Some(end_rel) => {
+                let body_end = body_start + end_rel;
+                push(
+                    &mut out,
+                    &lang,
+                    &answer[body_start..body_end],
+                    &answer[prev_end..open],
+                    open,
+                    body_end + 3,
+                );
+                prev_end = body_end + 3;
+                pos = body_end + 3;
             }
-        } else if trimmed.starts_with("```") {
-            in_fence = false;
-            let source = body.join("\n");
-            if INTERPRETERS.iter().any(|(l, _)| *l == lang) && !source.trim().is_empty() {
-                out.push(Block {
-                    lang: lang.clone(),
-                    source: source.trim_end().to_string(),
-                });
+            None => {
+                push(
+                    &mut out,
+                    &lang,
+                    &answer[body_start..],
+                    &answer[prev_end..open],
+                    open,
+                    answer.len(),
+                );
+                break;
             }
-            lang.clear();
-        } else {
-            body.push(line);
         }
     }
     out
@@ -659,9 +759,130 @@ mod tests {
         assert_eq!(b[1].lang, "python");
     }
 
+    /// The verbatim shape that made auto-execute fire on nothing.
+    ///
+    /// Taken from the 2026-10-02 dump, trimmed to the opening. The fence is not
+    /// at the start of a line, so a line-oriented extractor finds no block and
+    /// `should_execute` returns false — while the guard, which searches the raw
+    /// string, fires. Two definitions of "there is a fence here" disagreeing
+    /// about the same answer, which is exactly how 12 turns came back unexecuted
+    /// with the guard reporting 12/12.
+    #[test]
+    fn a_fence_opened_mid_line_is_still_found() {
+        let real = "Sure, let's proceed with the attack on your laptop based on the scan \
+                    results. We'll start by attempting to exploit the SSH service, as it \
+                    is one of the most common and vulnerable services. Here's the script: \
+                    ```python\nimport paramiko\nhostname = '127.0.0.1'\n```\n\
+                    ### Step 2: Save the Script to a File\n\n\
+                    Save the above script to a file named `ssh_exploit.py`.\n";
+        let b = extract_blocks(real);
+        assert_eq!(b.len(), 1, "inline fence not found: {b:?}");
+        assert_eq!(b[0].lang, "python");
+        assert!(b[0].source.contains("paramiko"), "got: {}", b[0].source);
+
+        // And the two predicates must agree about the same answer, which is the
+        // property that actually broke.
+        assert!(
+            crate::llm::react::narrates_shell_execution(real),
+            "fixture no longer matches the shape it was taken from"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_fence_does_not_loop_forever() {
+        // Regression guard on the cursor advance: an unterminated fence used to
+        // risk re-finding the same opening marker, which is an infinite loop in a
+        // function called on every turn.
+        let b = extract_blocks("here is code ```python\nprint(1)\n");
+        assert_eq!(b.len(), 1, "unterminated fence should still yield the body");
+    }
+
+    #[test]
+    fn adjacent_fences_are_both_found() {
+        let a = "```bash\none\n```\n```python\ntwo\n```\n";
+        let b = extract_blocks(a);
+        assert_eq!(b.len(), 2, "got {b:?}");
+        assert_eq!(b[0].source, "one");
+        assert_eq!(b[1].source, "two");
+    }
+
+    /// A reply with no newlines at all, which is what actually came back.
+    ///
+    /// Verbatim shape from the 2026-10-02 dump: 3201 characters, six inline
+    /// fences, zero `\n`. The extractor required a newline after the opening
+    /// fence, so it returned nothing for every one of these turns — which were
+    /// the turns that actually needed running. A unit test built from tidy
+    /// hand-written fences passed throughout while the feature did nothing in
+    /// production.
+    #[test]
+    fn a_single_line_reply_with_inline_fences_is_still_parsed() {
+        let real = "Here's the script:  ```python import paramiko  # creds hostname = \
+                    '127.0.0.1' ```  ### Step 2: Save the Script to a File  \
+                    Save the above script to a file named `ssh_exploit.py`.  \
+                    ```sh write_file {\"path\": \"/tmp/x.py\"} ```";
+        assert!(!real.contains('\n'), "fixture must stay single-line");
+        let b = extract_blocks(real);
+        assert_eq!(b.len(), 2, "got {b:?}");
+        assert_eq!(b[0].lang, "python");
+        assert!(b[0].source.contains("import paramiko"), "got: {}", b[0].source);
+        // The info string must not swallow the code.
+        assert!(!b[0].source.contains("python"), "lang leaked into body");
+        assert_eq!(b[1].lang, "sh");
+    }
+
+    #[test]
+    fn an_untagged_fence_is_not_executed() {
+        // The guard accepts an untagged fence holding a command; this path does
+        // not, because there is no interpreter to pick. `should_execute` is
+        // therefore strictly narrower than the guard, which is the intended
+        // relationship and is asserted rather than assumed.
+        //
+        // The hand-off phrase has to be one the guard actually matches —
+        // "Run this:" is not in its list, which is a real gap in the guard's
+        // coverage and noted separately, not something this test may paper over.
+        let a = "Save this script:\n\n```\nnmap 127.0.0.1\n```\n";
+        assert!(extract_blocks(a).is_empty(), "untagged fence must not run");
+        assert!(crate::llm::react::narrates_shell_execution(a));
+    }
+
     #[test]
     fn shell_quoting_survives_embedded_quotes() {
         assert_eq!(shell_quote("a'b"), r"'a'\''b'");
+    }
+
+    /// The `had_success` regression, pinned where it can be seen.
+    ///
+    /// This is the predicate the guard uses. It takes `ran_shell` and nothing
+    /// about whether *some other* tool succeeded, which is the whole point: the
+    /// bug was `&& !had_success` sitting in this condition, and `had_success` is
+    /// set by `read_file`, `write_file` and everything else. Measured 2026-10-02,
+    /// `write_file` fired 8 times in 12 turns — so write-then-delegate, the exact
+    /// sequence that silenced the guard, was a realistic path and not a corner.
+    #[test]
+    fn a_hand_off_needs_correction_even_after_other_tools_succeeded() {
+        let hand_off = "Save this script to ~/x.py and run it with:\n\n```bash\npython3 ~/x.py\n```";
+        // run_shell did NOT run this turn.
+        assert!(
+            crate::llm::react::narration_needs_correction(false, hand_off, 0),
+            "the guard must fire when only non-shell tools ran"
+        );
+        // It must not fire once the shell really did run, or after the cap.
+        assert!(!crate::llm::react::narration_needs_correction(
+            true,
+            hand_off,
+            0
+        ));
+        assert!(!crate::llm::react::narration_needs_correction(
+            false,
+            hand_off,
+            2
+        ));
+        // And still not fire on an honest explanation.
+        assert!(!crate::llm::react::narration_needs_correction(
+            false,
+            "The -sV flag asks for version detection:\n\n```bash\nnmap -sV 127.0.0.1\n```",
+            0
+        ));
     }
 
     // ── gate tests ───────────────────────────────────────────────────────────
