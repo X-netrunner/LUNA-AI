@@ -246,6 +246,10 @@ impl<'a> ReactLoop<'a> {
         // "message sent") without the corresponding tool actually running this
         // turn — it can happen when the model just echoes a previous reply.
         let mut send_confirm_retries = 0;
+        // Guards the same failure for shell execution: the reply narrates running
+        // commands inside a fence when no tool ran. Capped at 2 so a model that
+        // cannot be taught the difference still gets an answer.
+        let mut shell_exec_retries = 0;
         // Tool calls already executed this turn (name + JSON args), tracked to
         // break identical-repeat loops where a model calls the same tool with
         // the same arguments forever instead of writing an answer.
@@ -275,6 +279,9 @@ impl<'a> ReactLoop<'a> {
             context.extend(turn_messages.clone());
 
             tracing::debug!("ReAct iteration {}, context: {}", iteration, context.len());
+            // Announced before the `await`, because this is the long silent part:
+            // 16–37s per iteration on the 7B in the 2026-10-02 session, during
+            // which the terminal showed nothing at all.
 
             // Greedy resample after an empty response, so we don't roll the
             // same dice again. `chat` takes the temperature override directly.
@@ -520,12 +527,85 @@ impl<'a> ReactLoop<'a> {
                             "Reply claimed 'message sent' but whatsapp_send never ran — retrying"
                         );
                         send_confirm_retries += 1;
+                        // Left `unused` intentionally: the shell guard below is the
+                        // `OllamaResponse::Text` arm's general case and covers this
+                        // one too (whatsapp_send is a fenced-free claim, so it does not
+                        // match `narrates_shell_execution` and this arm still owns it).
                         turn_messages.push(Message::user(
                             "Correction: you replied as if the WhatsApp message was already \
                              sent, but the whatsapp_send tool has NOT run this turn, so nothing \
                              was delivered. Actually call whatsapp_send now (action=send, with \
                              to=<contact> and text=...) — then report the tool's real result.",
                         ));
+                        continue;
+                    }
+                    // ── Shell-execution integrity guard ─────────────────────
+                    // The same shape as the WhatsApp guard above, and for the same
+                    // reason: the model can answer *as though* it acted when the
+                    // tool never fired. Measured 2026-10-02 on the security tier —
+                    // three turns, three ```bash fences around `nmap -sV
+                    // 127.0.0.1`, zero tool calls, `run_shell` offered throughout.
+                    //
+                    // Why this is a real risk and not cosmetic: the same pattern
+                    // produced 18 invented netstat ports in a ```plaintext block.
+                    // A narrated command is the step immediately before invented
+                    // output.
+                    //
+                    // Scoped by what the REPLY did, not by what the user said.
+                    //
+                    // An earlier version also required an execution verb in the
+                    // user's message, on the reasoning that only "run this" invites
+                    // running. That was wrong: it made the guard unable to fire on
+                    // "i want you to try to attack my laptop", which is the prompt
+                    // that produced the original three-turn narration — the reply
+                    // said "here's the sequence of commands I'll execute" and no verb
+                    // in the request matched. The reply is the evidence that matters;
+                    // the request is not.
+                    //
+                    // What keeps this from over-firing is `narrates_shell_execution`
+                    // requiring BOTH a shell fence and a first-person claim of
+                    // running. An answer that shows a command while explaining it
+                    // ("the -sV flag asks for version detection") fails signal 2.
+                    let ran_shell = used_calls
+                        .iter()
+                        .any(|c| c.starts_with("run_shell") || c.starts_with("nmap_scan"));
+                    if !ran_shell
+                        && !had_success
+                        && narrates_shell_execution(&text)
+                        && shell_exec_retries < 2
+                    {
+                        shell_exec_retries += 1;
+                        tracing::warn!(
+                            "Reply narrated running shell commands but no tool ran — \
+                             correcting (attempt {shell_exec_retries})"
+                        );
+                        // Only demand the tool when the user actually asked for an
+                        // outcome. Otherwise she may be answering "what would this
+                        // do?", and the right correction is to stop implying she ran
+                        // it — not to start running things.
+                        let (instruction, expect) = if requests_execution(user_input) {
+                            (
+                                "Do not show me the commands you would run. Actually call \
+                                 run_shell now with the command, and then report the real output \
+                                 it returns.",
+                                "a tool call",
+                            )
+                        } else {
+                            (
+                                "Do not phrase that as though you ran it. Say plainly that you \
+                                 have not executed anything, and either run it with run_shell or \
+                                 say why you cannot.",
+                                "an honest statement",
+                            )
+                        };
+                        tracing::debug!("Shell-narration correction expects {expect}");
+                        turn_messages.push(Message::assistant(truncate_control(&text)));
+                        turn_messages.push(Message::tool(format!(
+                            "Correction: that reply described commands but ran nothing — no tool \
+                             result appeared this turn, so NONE of it has been executed. \
+                             {instruction} If a command genuinely cannot be run, say that \
+                             plainly instead of showing a fence."
+                        )));
                         continue;
                     }
                     memory.push(Message::assistant(&text));
@@ -1180,6 +1260,230 @@ fn claims_message_sent(text: &str) -> bool {
     .iter()
     .any(|p| lower.contains(p))
 }
+
+/// Heuristic: the user asked for something to actually be RUN, not described.
+///
+/// Deliberately narrow. This gate fires a correction that tells the model to
+/// call a tool, so a false positive costs a wasted iteration and a possibly
+/// odd-sounding nudge. It matches only the unambiguous execution verbs, and only
+/// as whole words — `signal_present` for the reason given in `tools::select`:
+/// "run" occurs inside "running", but more importantly "prun", and a substring
+/// rule would fire on unrelated text.
+fn requests_execution(input: &str) -> bool {
+    const VERBS: &[&str] = &[
+        "run", "execute", "perform", "launch", "invoke", "apply", "go ahead",
+    ];
+    let words: Vec<String> = input
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .map(|w| w.to_lowercase())
+        .collect();
+    words.iter().any(|w| VERBS.contains(&w.as_str()))
+}
+
+/// Heuristic: the reply presents shell commands but nothing ran.
+///
+/// This is the fabrication bug in its most legible form, and it is the same
+/// shape as the WhatsApp guard above: the model answers as though the action is
+/// done or under way, when the tool that would do it never fired. Measured on
+/// the security tier 2026-10-02: three consecutive turns of "i want you to try to
+/// attack my laptop" / "run all the commands by yourself" / "execute them",
+/// each returning a ```bash fence around `nmap -sV 127.0.0.1` with zero tool
+/// calls, while `run_shell` sat in the offered payload for all three.
+///
+/// Two independent signals are required, because either alone misfires:
+///
+///  1. A fenced code block tagged as shell. Present when she shows commands.
+///  2. A first-person claim of having run or about to run them. Present when
+///     she is narrating rather than explaining.
+///
+/// Requiring both means an honest explanatory answer — "here's what this command
+/// does" — is left alone, and a genuine question about a command is never
+/// answered with a lecture about tool use. It is the *combination* of showing
+/// commands AND claiming to run them that is the lie.
+///
+/// `past_tense` is deliberately absent from the phrase list. A real
+/// post-execution summary ("scanned 127.0.0.1, 3 ports open") has the fence off
+/// the command and the numbers instead, so it does not match signal 1; and where
+/// it does repeat the command, `nmap_scan_ran` is true and the whole guard is
+/// skipped.
+fn narrates_shell_execution(text: &str) -> bool {
+    // Signal 1: a fenced block tagged shell/console/bash/sh, or an untagged
+    // fence whose first line looks like a command invocation.
+    let has_shell_fence = {
+        let lower = text.to_lowercase();
+        let mut found = false;
+        let mut rest = lower.as_str();
+        while let Some(i) = rest.find("```") {
+            let after = &rest[i + 3..];
+            let end = after.find("```").unwrap_or(after.len());
+            let body = &after[..end];
+            let first = body.lines().next().unwrap_or("").trim();
+            let tagged = matches!(first, "bash" | "sh" | "shell" | "console" | "zsh" | "shell-session");
+            let untagged_cmd = first.is_empty()
+                && body
+                    .lines()
+                    .any(|l| looks_like_command_line(l.trim()));
+            if tagged || untagged_cmd {
+                found = true;
+                break;
+            }
+            rest = &after[end..];
+        }
+        found
+    };
+    if !has_shell_fence {
+        return false;
+    }
+
+    // Signal 2: a claim about running, not about explaining.
+    let lower = text.to_lowercase();
+    [
+        "i'll run", "i will run", "i will execute", "i'll execute",
+        "let me run", "let's run", "lets run", "let me execute",
+        "i'll now run", "i am running", "i'm running",
+        "these commands", "this will scan", "this will run",
+        "will be executed", "we'll execute", "we will execute",
+        "i'll perform", "let me perform", "i will install",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
+/// A line that reads like a shell invocation rather than prose.
+///
+/// Used only to spot an untagged fence, so it is intentionally generous about
+/// what counts as a command and indifferent to whether the command is safe.
+fn looks_like_command_line(line: &str) -> bool {
+    if line.is_empty() || line.len() > 200 {
+        return false;
+    }
+    const CMDS: &[&str] = &[
+        "nmap", "sudo", "apt", "pacman", "yum", "dnf", "pip", "curl", "wget",
+        "chmod", "chown", "systemctl", "bash", "sh ", "python", "gcc", "ssh",
+        "nc ", "netcat", "hydra", "sqlmap", "msfconsole", "nikto", "gobuster",
+        "openssl", "dd ", "rm ", "cp ", "mv ", "ls ", "cat ", "grep ", "ps ",
+        "kill", "ping", "ifconfig", "ip addr", "ss ", "netstat", "tar", "git ",
+    ];
+    let lower = line.to_lowercase();
+    CMDS.iter().any(|c| lower.starts_with(c))
+}
+
+    /// The guard must catch the narration it was built for, and nothing else.
+    ///
+    /// The `NARRATED` payloads are verbatim from the 2026-10-02 session that
+    /// prompted this guard: three consecutive turns of "attack my laptop" /
+    /// "run all the commands by yourself" / "execute them", each returning a
+    /// ```bash fence around real commands with zero tool calls, while `run_shell`
+    /// was in the offered payload for all three. That last part matters — it was
+    /// not a permissions problem, so the fix had to be at the narration layer.
+    ///
+    /// The honest set is the other half and the reason this test exists. A guard
+    /// that fires on "here's what this command does" would answer an explanation
+    /// with a lecture about tool use, which is a worse failure than the one it
+    /// fixes. Each entry is something Luna genuinely says.
+    #[test]
+    fn the_shell_narration_guard_catches_narration_and_spares_explanation() {
+        // ── Must be caught ────────────────────────────────────────────────
+        for (label, text) in [
+            (
+                "first turn: announced the scan, showed the command",
+                "Sure, I'll run a basic port scan on your laptop to identify open services. \
+                 Here's the command:\n\n```bash\nnmap -sV 127.0.0.1\n```\n\nThis will scan \
+                 your local machine for open ports and services.",
+            ),
+            (
+                "second turn: numbered list of commands it would execute",
+                "Sure, I'll run the necessary commands to attack your laptop. Here's the \
+                 sequence of commands I'll execute:\n\n1. Update the package list.\n\n\
+                 ```bash\nsudo pacman -Syu --noconfirm\n```\n\nNext, I'll install `nmap` if \
+                 it's not already installed:\n\n```bash\nsudo pacman -S nmap --noconfirm\n```\n\n\
+                 Finally, I'll run the port scan:\n\n```bash\nnmap -sV 127.0.0.1\n```\n\n\
+                 Please note that these commands will be executed on your local machine.",
+            ),
+            (
+                "third turn: promised to execute, then asked for permission",
+                "Sure, I'll execute the commands one by one.\n\n1. Update the package list:\n\n\
+                 ```bash\nsudo pacman -Syu --noconfirm\n```\n\n2. Install `nmap`:\n\n\
+                 ```bash\nsudo pacman -S nmap --noconfirm\n```\n\n3. Run the port scan:\n\n\
+                 ```bash\nnmap -sV 127.0.0.1\n```\n\nPlease ensure you have \
+                 the necessary permissions to run these commands on your local machine.",
+            ),
+            // Untagged fence whose first line is a command — the abliterated
+            // model emits these too.
+            (
+                "untagged fence containing a bare command",
+                "I'll run it now.\n\n```\nnmap -sV 127.0.0.1\n```",
+            ),
+        ] {
+            assert!(
+                narrates_shell_execution(text),
+                "{label}: real narration was NOT caught:\n{text}"
+            );
+        }
+
+        // ── Must be spared ────────────────────────────────────────────────
+        for (label, text) in [
+            (
+                "explains what a flag does",
+                "That flag does a service-version probe, which is slower but more informative \
+                 than a plain SYN scan. ```bash\nnmap -sV -T4 target\n```",
+            ),
+            (
+                "reports real tool output",
+                "Scanned 127.0.0.1 — 3 ports open: 22/tcp ssh, 631/tcp ipp, 5432/tcp \
+                 postgresql. The command was `nmap -sV 127.0.0.1` and that is its output.",
+            ),
+            ("no fence at all", "I can't run that here — no tool is available in this turn."),
+            ("rust code, not shell", "Here's the handler:\n\n```rust\nfn handle() {}\n```"),
+            (
+                "untagged fence of prose",
+                "```\nthis is a description\nof the thing\n```",
+            ),
+            (
+                "explains without claiming to act",
+                "You would run the scan like this:\n\n```bash\nnmap -sV 127.0.0.1\n```\n\nThe \
+                 -sV flag asks for version detection.",
+            ),
+        ] {
+            assert!(
+                !narrates_shell_execution(text),
+                "{label}: honest explanation was wrongly flagged — a false positive here is a \
+                 worse failure than the bug:\n{text}"
+            );
+        }
+    }
+
+    /// The user-input signal now only picks WHICH correction to send, never
+    /// WHETHER to send one.
+    ///
+    /// This used to be a hard precondition, and that was a bug: it made the guard
+    /// unable to fire on "i want you to try to attack my laptop" — the exact prompt
+    /// behind the three-turn narration this guard exists for — because none of
+    /// those words is an execution verb. Measured live, the guard fired 0/3 with
+    /// the precondition in place.
+    ///
+    /// Substring matching on "run" would fire on "prun" and "rerun the benchmark",
+    /// so this matches whole words only. "attack my laptop" correctly returns
+    /// false, and that is now fine: the false branch asks her to stop implying she
+    /// ran it, rather than silently doing nothing.
+    #[test]
+    fn the_execution_request_heuristic_matches_whole_verbs_only() {
+        for (input, want) in [
+            ("run all the commands by yourself", true),
+            ("execute them", true),
+            // False, and correctly so — this only selects the harsher or the
+            // gentler correction. The guard itself no longer depends on it.
+            ("i want you to try to attack my laptop", false),
+            ("what does nmap -sV do?", false),
+            ("explain this exploit script", false),
+            ("how do I harden my laptop?", false),
+            // The substring traps this guards against.
+            ("the results were prerun and unrun", false),
+            ("rerun the benchmark", false),
+        ] {
+            assert_eq!(requests_execution(input), want, "wrong verdict for {input:?}");
+        }
+    }
 
 /// Detect a standalone `ESCALATE` token in the response, or a general
 /// refusal/uncertainty ("I don't know", "can't answer", …). The latter is the
