@@ -40,6 +40,20 @@ pub enum QueryComplexity {
 /// because they misfire badly on everyday speech — "payload" alone would catch
 /// "what's the payload size of this request", and "attack" would catch "attack
 /// the problem from another angle".
+/// Is this request offensive-security work?
+///
+/// Public because `crate::recon` needs it, and it must be the *same* predicate
+/// the tier router uses rather than a second copy. Two copies means one of them
+/// silently stops being updated, and the symptom is a feature that fires on some
+/// phrasings and not others with nothing in the logs to explain it — the exact
+/// failure `is_security_request` was rewritten to fix.
+///
+/// Lowercases for the caller, because every signal in here is lowercase and
+/// callers should not have to remember that.
+pub fn is_offensive_request(input: &str) -> bool {
+    is_security_request(&input.to_lowercase())
+}
+
 fn is_security_request(lower: &str) -> bool {
     const SIGNALS: &[&str] = &[
         // Exploit / PoC authoring

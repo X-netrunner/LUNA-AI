@@ -459,6 +459,23 @@ pub struct LlmConfig {
     /// deliberate, persistent act.
     #[serde(default)]
     pub scan_allowlist: Vec<String>,
+    /// Run a port scan in the harness before an offensive turn, and hand the
+    /// result to the model.
+    ///
+    /// On by default because the alternative was measured: asked to attack a
+    /// laptop, Luna wrote a script with `your_laptop_ip` placeholders and
+    /// nothing else, twice, with `nmap_scan` on the table for the second one.
+    /// See `crate::recon` for why the harness does it rather than asking her.
+    #[serde(default = "default_true")]
+    pub security_auto_recon: bool,
+    /// Scan profile for that recon, as `nmap_scan`'s `scan_type`.
+    ///
+    /// Defaults to `ports` (`-p-`, all 65535 TCP) rather than a version scan
+    /// because it measured 2.47s against loopback versus 24-48s for
+    /// `-sS -sV -p-`. Banners are the upgrade, and paying 10-20x for them
+    /// before knowing they are needed is the wrong order.
+    #[serde(default = "default_recon_scan_type")]
+    pub recon_scan_type: String,
     /// Local embedding model used for semantic memory recall (RAG-lite).
     /// Pull once with: ollama pull nomic-embed-text
     pub embedding_model: String,
@@ -510,6 +527,11 @@ fn default_security_num_ctx() -> u32 {
 /// `XDG_DOCUMENTS_DIR` is honoured when set, because on Arch the user may well
 /// have moved Documents (a symlink into another partition is common) and a
 /// hard-coded path would then write somewhere the user does not look.
+/// Full port range rather than a version scan; see `recon_scan_type`.
+fn default_recon_scan_type() -> String {
+    "ports".into()
+}
+
 pub fn default_security_scripts_dir() -> String {
     if let Ok(docs) = std::env::var("XDG_DOCUMENTS_DIR") {
         let docs = docs.trim();
@@ -540,6 +562,8 @@ impl Default for LlmConfig {
             security_dev_public_key: String::new(),
             // Loopback-only by default; see `scan_allowlist`.
             scan_allowlist: Vec::new(),
+            security_auto_recon: true,
+            recon_scan_type: "ports".into(),
             embedding_model: "nomic-embed-text".into(),
             num_ctx: default_num_ctx(),
         }

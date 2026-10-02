@@ -173,9 +173,6 @@ pub async fn dns_lookup(target: &str, mode: &str, sudo_pass: Option<&str>) -> Re
     }
 }
 
-/// Strip shell-dangerous characters from a target string (host/IP/domain).
-/// Not a full validator — just removes the characters that matter for
-/// command injection in this specific quoting context.
 /// Is this target the local machine, reachable only over loopback?
 ///
 /// Always allowed, on any allowlist, because the traffic cannot leave the
@@ -185,11 +182,22 @@ pub fn is_loopback_target(target: &str) -> bool {
     if t == "localhost" || t == "::1" || t == "[::1]" || t == "0:0:0:0:0:0:0:1" {
         return true;
     }
-    // Parsed as four octets, not string-matched on a "127." prefix.
+    // ── DO NOT "SIMPLIFY" THIS TO A `starts_with("127.")` PREFIX ─────────────
     //
-    // The prefix version accepted `127.0.0.1.evil.test`, which is a hostname
-    // its holder controls, not an address. Anything that does not parse as a
-    // complete IPv4 address is not loopback, full stop.
+    // The prefix version accepted `127.0.0.1.evil.test` — a hostname its holder
+    // controls, which resolves wherever its holder points it. That is the whole
+    // class of bug this guards: a naive string check on a network identifier
+    // hands the decision to whoever chose the name. `127.example.com` and
+    // `localhost.evil.test` are the same attack wearing a different hat.
+    //
+    // So this parses four octets and requires all four. Anything that is not a
+    // complete IPv4 address is not loopback, full stop — a name that merely
+    // looks like an address is not one.
+    //
+    // The test `a_loopback_looking_prefix_is_not_loopback` in
+    // `scan_scope_tests` below exists solely to fail if this is reverted to a
+    // prefix match. If you change this function, run it, and do not "tidy" it
+    // into `starts_with` on the grounds that it is clearer.
     let octets: Vec<&str> = t.split('.').collect();
     octets.len() == 4
         && octets.iter().all(|o| {
@@ -227,6 +235,12 @@ pub fn ensure_scan_target_allowed(target: &str, allowlist: &[String]) -> Result<
     )
 }
 
+/// Strip shell-dangerous characters from a target string (host/IP/domain).
+///
+/// Not a validator — it removes the characters that matter for injection in
+/// this quoting context and nothing more. It is NOT a scope check, which is why
+/// [`is_loopback_target`] and [`ensure_scan_target_allowed`] exist separately
+/// and run first.
 fn sanitize_target(target: &str) -> String {
     target
         .chars()

@@ -788,6 +788,34 @@ pub async fn run_routed_turn(
     // Capabilities go last — the model follows the instruction right before
     // the user message far better than a block buried mid-prompt. (Memory,
     // skills, profile and nudges are injected by ReactLoop::run itself.)
+    //
+    // Recon goes after that, i.e. closest to the user message, because it is
+    // the one block that is fact rather than instruction. `effective_prompt` is
+    // a local rebuilt on every call, so the block is rebuilt every turn and can
+    // never be summarised out of memory partway through a task — the failure
+    // that a persisted version would have, and the reason this is not written to
+    // memory even though memory would be the more natural home.
+    //
+    // Runs before the model is called at all, which is the whole design: there
+    // is no step in which she can choose to skip it. See `crate::recon`.
+    let mut recon_ran = false;
+    if crate::recon::should_recon(input, config) {
+        tracing::info!(
+            "Offensive turn: running harness recon on {} before the model call",
+            crate::recon::RECON_TARGET
+        );
+        let result = crate::recon::run(config).await;
+        match &result {
+            Ok(scan) => tracing::info!(
+                "Recon returned {} chars of real port data",
+                scan.chars().count()
+            ),
+            Err(why) => tracing::warn!("Recon did not run: {why}"),
+        }
+        effective_prompt.push_str(&crate::recon::injection_block(input, &result));
+        recon_ran = true;
+    }
+
     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
 
     for attempt in 1..=2 {
@@ -1133,6 +1161,12 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                 // not leave the next one holding a security tier it never asked
                 // for.
                 crate::llm::escalation::reset_security_latch();
+                // The recon task latch too, for the same reason and with the
+                // same consequence left unguarded: without this, a cleared
+                // conversation would still scan loopback on every turn for the
+                // rest of the session, because the offence is remembered as
+                // session state and the user just asked for session state to go.
+                crate::recon::reset_latch();
                 println!("Luna: Memory and chat history cleared.");
                 continue;
             }

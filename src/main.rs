@@ -16,6 +16,7 @@ mod first_run;
 mod llm;
 mod memory;
 mod overlay;
+mod recon;
 mod stt;
 mod tools;
 mod tts;
