@@ -122,10 +122,30 @@ pub struct ExternalActionConfig {
     pub capability_tools: Vec<String>,
 }
 
-fn default_capability_tools() -> Vec<String> {
+/// Extra packages `pkg_install` may install, beyond the built-in allowlist in
+/// `security::PKG_INSTALL_ALLOWLIST`.
+///
+/// Present because the allowlist cannot be right forever — a pentest box will
+/// want `masscan` or `radare2` and the honest response to that is to widen the
+/// list deliberately, by name, in a file the user can read. Not a way to turn
+/// the installer into "anything": the name still has to pass
+/// `plain_command_name`, and the tool is still capability-gated.
+pub fn default_pkg_install_allowlist() -> Vec<String> {
+    Vec::new()
+}
+
+pub fn default_capability_tools() -> Vec<String> {
     [
         // Actively probes hosts on the network.
         "nmap_scan",
+        // Installs packages as root. `pacman -S` runs maintainer install
+        // scripts as root, so this is arbitrary code execution chosen by the
+        // model on the strength of a sentence. It sits here rather than in
+        // `gated_tools` because a boolean in luna.toml is not a strong enough
+        // answer for something that changes the machine persistently, and
+        // because the allowlist in `security::pkg_install` is a second,
+        // independent bound.
+        "pkg_install",
         // Rewrites firewall/sysctl/audit posture on a live machine — the
         // "harden" and "self-heal" half of the request.
         "sysmode",
@@ -228,6 +248,10 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "fetch_page",
     "dns_lookup",
     "hash_file",
+    // Reads only: `command -v`, a bounded `--version`, a repo search, and
+    // directory listings. No writes, no root, no network target — it reports
+    // the machine's state and changes nothing.
+    "tool_check",
     "nmap_scan",
     "analyze_pcap",
     "decode_payload",
@@ -459,6 +483,14 @@ pub struct LlmConfig {
     /// deliberate, persistent act.
     #[serde(default)]
     pub scan_allowlist: Vec<String>,
+    /// Extra packages `pkg_install` may install, on top of the built-in
+    /// allowlist in `security::PKG_INSTALL_ALLOWLIST`.
+    ///
+    /// Empty by default. The built-in list is deliberately short — see
+    /// `default_pkg_install_allowlist` for why an open-ended installer is
+    /// arbitrary code execution chosen by a 7B model.
+    #[serde(default = "default_pkg_install_allowlist")]
+    pub pkg_install_allowlist: Vec<String>,
     /// Run a port scan in the harness before an offensive turn, and hand the
     /// result to the model.
     ///
@@ -600,6 +632,7 @@ impl Default for LlmConfig {
             security_dev_public_key: String::new(),
             // Loopback-only by default; see `scan_allowlist`.
             scan_allowlist: Vec::new(),
+            pkg_install_allowlist: Vec::new(),
             security_auto_recon: true,
             recon_scan_type: "ports".into(),
             security_auto_execute: false,

@@ -105,6 +105,50 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         ToolDef {
             r#type: "function".into(),
             function: ToolFunction {
+                name: "tool_check".into(),
+                description: "Check whether a command-line tool actually exists on this machine, \
+                              and what already here does the same job. Use this BEFORE writing \
+                              code that calls a tool, and instead of assuming a binary or a \
+                              wordlist path exists. Returns installed/not-installed, the \
+                              providing package, nmap scripts that cover the same task, and \
+                              wordlist directories present.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Command name to check, e.g. 'hydra', 'nmap', 'nikto'"
+                        }
+                    },
+                    "required": ["name"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "pkg_install".into(),
+                description: "Install a security tool from the system package manager. Only \
+                              an allowlist of packages is accepted (hydra, ncrack, medusa, \
+                              john, nikto, sqlmap, gobuster, ffuf, whatweb, socat, nmap, \
+                              enum4linux, smbclient, openldap); anything else is refused. \
+                              Run tool_check first — the capability is often already present \
+                              via nmap scripts. Requires a configured sudo password.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "package": {
+                            "type": "string",
+                            "description": "Package name to install, e.g. 'hydra'"
+                        }
+                    },
+                    "required": ["package"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
                 name: "nmap_scan".into(),
                 description: "Run an nmap scan against a target (IP, hostname, or CIDR range). \
                               Use for network reconnaissance, CTF challenges, or auditing your \
@@ -1461,6 +1505,22 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             }
         }
 
+        "tool_check" => {
+            let name = args["name"].as_str().unwrap_or("");
+            if name.trim().is_empty() {
+                anyhow::bail!("No tool name provided. Pass name=<command>, e.g. name=hydra.");
+            }
+            security::tool_check(name).await
+        }
+
+        "pkg_install" => {
+            let package = args["package"].as_str().unwrap_or("");
+            if package.trim().is_empty() {
+                anyhow::bail!("No package provided. Pass package=<name>, e.g. package=hydra.");
+            }
+            security::pkg_install(package, sudo_pass, &config.llm.pkg_install_allowlist).await
+        }
+
         "nmap_scan" => {
             let target = args["target"].as_str().unwrap_or("");
             let scan_type = args["scan_type"].as_str().unwrap_or("quick");
@@ -2651,6 +2711,63 @@ mod gate_tests {
         }
     }
 
+    /// The live config file must gate everything the code classifies as a
+    /// capability tool.
+    ///
+    /// Added because `capability_tools` in `luna.toml` REPLACES the built-in
+    /// list rather than extending it, so naming the key there silently opts out
+    /// of every safety default added afterwards. Measured 2026-10-02: this file
+    /// listed four tools, `pkg_install` was added to the code default in the
+    /// same commit, and the result was an installer that ran as root with no
+    /// developer signature — while `capability_gated_tools_are_the_ones_that_act_on_the_machine`
+    /// passed, because that test reads `LunaConfig::default()` and the default
+    /// is not the file.
+    ///
+    /// A checker that reads the same source as the code cannot see this class of
+    /// bug at all, so this one reads the actual TOML. Skipped, not failed, when
+    /// there is no config — a fresh checkout or CI has none, and inventing a
+    /// failure there would train people to ignore it.
+    #[test]
+    fn the_live_config_gates_every_capability_tool() {
+        let path = dirs::config_dir()
+            .map(|d| d.join("luna").join("luna.toml"))
+            .filter(|p| p.exists());
+        let Some(path) = path else {
+            eprintln!("skipping: no live luna.toml at {}", dirs::config_dir().unwrap_or_default().display());
+            return;
+        };
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+        let defaults = crate::config::default_capability_tools();
+        let missing: Vec<&String> = defaults
+            .iter()
+            .filter(|t| !text_matches_list(&text, t))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} is missing {missing:?} from `capability_tools`.\n\
+             That key REPLACES the built-in list, so these tools are currently \
+             UNGATED on this machine — pkg_install runs `pacman -S` as root \
+             with no developer signature — while the default-based tests pass. \
+             Add them to capability_tools in {}.",
+            path.display(),
+            path.display()
+        );
+    }
+
+    /// Whether a TOML array of strings contains this exact entry.
+    ///
+    /// Deliberately not a substring test: `"pkg_install_extra"` contains
+    /// `"pkg_install"` and would satisfy a `contains` check while leaving the
+    /// real tool ungated.
+    fn text_matches_list(text: &str, item: &str) -> bool {
+        let quoted = format!("\"{item}\"");
+        text.lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .any(|l| l.split(',').any(|part| part.trim() == quoted))
+    }
+
     /// And the positive control: a well-formed call still works, so the guard
     /// above cannot be satisfied by simply refusing everything.
     #[tokio::test]
@@ -2699,7 +2816,7 @@ mod gate_tests {
     #[test]
     fn capability_gated_tools_are_the_ones_that_act_on_the_machine() {
         let cfg = crate::config::LunaConfig::default();
-        for t in ["nmap_scan", "sysmode", "self_patch", "system_update"] {
+        for t in ["nmap_scan", "pkg_install", "sysmode", "self_patch", "system_update"] {
             assert!(
                 cfg.external.is_capability_gated(t),
                 "{t} must be behind the capability gate"
@@ -2741,6 +2858,12 @@ mod gate_tests {
 
         for (name, args) in [
             ("nmap_scan", serde_json::json!({"target": "127.0.0.1"})),
+            // Root on the machine, chosen by the model. This one is the reason
+            // the list membership is worth testing through dispatch rather than
+            // asserting on the config: `pacman -S` runs maintainer install
+            // scripts as root, so "it is in the list" and "the gate stops it"
+            // are very different facts.
+            ("pkg_install", serde_json::json!({"package": "hydra"})),
             ("sysmode", serde_json::json!({"action": "status"})),
             ("self_patch", serde_json::json!({"instruction": "add a test"})),
         ] {

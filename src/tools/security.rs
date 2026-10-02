@@ -338,3 +338,623 @@ mod scan_scope_tests {
         }
     }
 }
+// ── Tool availability ────────────────────────────────────────────────────────
+//
+// Measured 2026-10-02, live session. Asked to exploit SSH she wrote:
+//
+//     hydra -L /usr/share/wordlists/rockyou.txt -P /usr/share/wordlists/rockyou.txt localhost ssh
+//
+// Neither the tool nor the wordlist exists on this host. `hydra` is not
+// installed, and `/usr/share/wordlists/rockyou.txt` is not a file. Both were
+// asserted as fact, inside a turn where the surrounding narration was invented
+// too, so there was no tool result anywhere to contradict them.
+//
+// That is a different failure from the transcript one and it needs a different
+// fix. The fabrication guard catches output that no tool produced; it cannot
+// catch a claim about the *machine* that happens to be wrong, because there is
+// no receipt for the machine's state. So the capability has to exist rather
+// than the correction.
+//
+// What is genuinely available here, measured: 71 nmap `*-brute.nse` scripts
+// including `ssh-brute`, `ftp-anon`, `smtp-user-enum` and `mysql-brute`;
+// `~/CyberSecurity/wordlist/seclists`; `hashcat`. `pacman -Ss '^hydra$'`
+// resolves `extra/hydra 9.7-1`. So the honest answer to "hydra is missing" is
+// usually "you already have `nmap --script ssh-brute` and seclists", and only
+// sometimes "install hydra". Checking has to come first for that to be true.
+
+/// How to ask the host's package manager, detected rather than assumed.
+struct PkgManager {
+    name: &'static str,
+    search: &'static str,
+    owns: &'static str,
+    installed: &'static str,
+    install: &'static str,
+}
+
+/// Detected by probing, in preference order.
+///
+/// The user asked for "pacman -Q or something like that depending on the OS",
+/// and hardcoding pacman would have been a bug waiting for the next machine.
+fn detect_pkg_manager() -> Option<PkgManager> {
+    let has = |c: &str| {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {c}"))
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if has("pacman") {
+        Some(PkgManager {
+            name: "pacman",
+            search: "pacman -Ss",
+            owns: "pacman -Qo",
+            installed: "pacman -Qi",
+            install: "pacman -S --needed --noconfirm",
+        })
+    } else if has("apt-get") {
+        Some(PkgManager {
+            name: "apt-get",
+            search: "apt-cache search",
+            owns: "apt-file search",
+            installed: "dpkg -s",
+            install: "apt-get install -y",
+        })
+    } else if has("dnf") {
+        Some(PkgManager {
+            name: "dnf",
+            search: "dnf list",
+            owns: "rpm -qf",
+            installed: "rpm -q",
+            install: "dnf install -y",
+        })
+    } else if has("apk") {
+        Some(PkgManager {
+            name: "apk",
+            search: "apk search",
+            owns: "apk info -W",
+            installed: "apk info -e",
+            install: "apk add",
+        })
+    } else {
+        None
+    }
+}
+
+/// Strictly a command name: no spaces, no shell metacharacters.
+///
+/// This is the only thing standing between the model's output and `bash -c`,
+/// so it is a whitelist of characters rather than a blacklist. A blacklist
+/// invites the next metacharacter nobody thought of; a whitelist makes the
+/// unsafe set empty by construction. `run_command` runs `bash -c`, so this
+/// matters here in a way it would not for a direct exec.
+fn plain_command_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        && !name.starts_with('-')
+}
+
+/// What to suggest when a tool is missing, keyed by what it was for.
+///
+/// Not a general "similar tools" search — those are guesses, and a guess here
+/// would be the same fabrication one level up. Every entry is a substring
+/// matched against scripts that are actually present on disk, and nothing is
+/// listed unless the file exists.
+const CAPABILITY_HINTS: &[(&str, &[&str])] = &[
+    ("hydra", &["brute"]),
+    ("ncrack", &["brute"]),
+    ("medusa", &["brute"]),
+    ("crack", &["brute"]),
+    ("brute", &["brute"]),
+    ("password", &["brute"]),
+    ("john", &["hash"]),
+    ("hashcat", &["hash"]),
+    ("nikto", &["vuln", "http-vuln"]),
+    ("sqlmap", &["sql", "mysql"]),
+    ("gobuster", &["http-enum", "dir"]),
+    ("ffuf", &["http-enum", "dir"]),
+    ("dirbuster", &["http-enum", "dir"]),
+    ("telnet", &["telnet"]),
+    ("ftp", &["ftp"]),
+    ("ssh", &["ssh"]),
+    ("smtp", &["smtp", "pop3"]),
+    ("mysql", &["mysql"]),
+    ("redis", &["redis"]),
+    ("mssql", &["mssql"]),
+    ("http", &["http"]),
+    ("dns", &["dns"]),
+    ("smb", &["smb"]),
+    ("rdp", &["rdp"]),
+    ("vnc", &["vnc"]),
+    ("nmap", &["vuln"]),
+];
+
+/// Order alternatives by how likely they are to be the one wanted.
+///
+/// Sorted alphabetically this is worse than useless: asked about hydra, the
+/// list came back `afp-`, `ajp-`, `cics-`, `citrix-`, `cvs-`, `dicom-` and the
+/// twelve-item cap cut `ssh-brute` off entirely, which is the single most
+/// relevant script on the box for the job. Caught by a test asserting on the
+/// real host rather than on a fixture, which is the only reason it was caught
+/// before shipping.
+///
+/// Common services first, then everything else alphabetically.
+const PREFERRED_SERVICES: &[&str] = &[
+    "ssh", "ftp", "telnet", "smtp", "pop3", "http", "mysql", "redis", "smb", "dns", "mssql",
+    "vnc", "rdp", "imap", "ldap", "rpc", "ssh2",
+];
+
+fn script_priority(fname: &str) -> usize {
+    PREFERRED_SERVICES
+        .iter()
+        .position(|s| fname.contains(s))
+        .unwrap_or(PREFERRED_SERVICES.len())
+}
+
+/// nmap scripts already on this machine that cover the same job.
+fn installed_scripts(hints: &[&str]) -> Vec<String> {
+    let mut dirs: Vec<std::path::PathBuf> = vec![
+        "/usr/share/nmap/scripts".into(),
+        "/usr/local/share/nmap/scripts".into(),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(std::path::PathBuf::from(home).join(".local/share/nmap/scripts"));
+    }
+    let mut found: Vec<String> = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if !fname.ends_with(".nse") {
+                continue;
+            }
+            if hints.iter().any(|h| fname.contains(h)) && !found.contains(&fname) {
+                found.push(fname);
+            }
+        }
+    }
+    found.sort_by_key(|f| (script_priority(f), f.clone()));
+    found
+}
+
+/// Wordlist directories that exist here, with a file count.
+///
+/// Reported as a count rather than a listing because seclists holds tens of
+/// thousands of files and the point is "yes, you have some", not "here are
+/// forty thousand".
+fn wordlist_dirs() -> Vec<(String, usize)> {
+    let mut candidates: Vec<std::path::PathBuf> = vec![
+        "/usr/share/wordlists".into(),
+        "/usr/share/seclists".into(),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(std::path::PathBuf::from(&home).join("CyberSecurity/wordlist"));
+        candidates.push(std::path::PathBuf::from(&home).join("CyberSecurity/wordlist/seclists"));
+        candidates.push(std::path::PathBuf::from(&home).join("wordlists"));
+    }
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for dir in candidates {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let count = entries.flatten().count();
+        if count > 0 && !out.iter().any(|(p, _)| *p == dir.display().to_string()) {
+            out.push((dir.display().to_string(), count));
+        }
+    }
+    out
+}
+
+/// Whether the tool is actually on this machine.
+///
+/// Answered with a bounded `--version`, not assumed from the path: a file
+/// called `hydra` in `/usr/local/bin` that is not hydra is precisely the kind
+/// of thing that should not be reported as "available".
+async fn probe_installed(name: &str) -> Option<String> {
+    let which = shell::run_command(&format!("command -v {name}"), None).await.ok()?;
+    let path = which.stdout.trim().to_string();
+    if path.is_empty() {
+        return None;
+    }
+    let mut report = path.clone();
+    // Bounded: some `--version` paths are interactive, and this runs inside the
+    // agent loop where a hang costs a whole turn.
+    if let Ok(v) = shell::run_command(&format!("timeout 10 {name} --version 2>&1 | head -2"), None).await
+    {
+        let first = v.stdout.lines().next().unwrap_or("").trim().to_string();
+        if !first.is_empty() {
+            report.push_str(&format!("\n  version: {first}"));
+        }
+    }
+    Some(report)
+}
+
+/// Whether the tool is genuinely installed AND what else on this machine does
+/// the same job.
+///
+/// `pkg_install` is named in the output on purpose. The tool's job is to stop
+/// her asserting a binary that does not exist, and the useful answer to "hydra
+/// is missing" is usually not "install hydra" — on this host it is
+/// `nmap --script ssh-brute`, which is already installed. Checking has to come
+/// before installing or the alternative is never found.
+pub async fn tool_check(name: &str) -> Result<String> {
+    let name = name.trim();
+    if !plain_command_name(name) {
+        anyhow::bail!(
+            "'{}' is not a plain command name. Give a tool name like 'hydra' or 'nmap', not a \
+             path or a command line.",
+            name.chars().take(40).collect::<String>()
+        );
+    }
+
+    let key = name.to_ascii_lowercase();
+    let hints: Vec<&str> = CAPABILITY_HINTS
+        .iter()
+        .find(|(k, _)| key.contains(k))
+        .map(|(_, h)| h.to_vec())
+        .unwrap_or_else(|| vec![key.as_str()]);
+
+    let mut out = String::new();
+    match probe_installed(name).await {
+        Some(info) => {
+            out.push_str(&format!("INSTALLED: {name}\n  {info}\n"));
+        }
+        None => {
+            out.push_str(&format!("NOT INSTALLED: {name}\n"));
+
+            if let Some(pm) = detect_pkg_manager() {
+                // Anchored so a search for "hydra" does not return every
+                // package with "hydra" somewhere in its description.
+                let out_cmd = format!(
+                    "timeout 25 {} ^{}$ 2>&1 | head -6",
+                    pm.search,
+                    name.to_ascii_lowercase()
+                );
+                if let Ok(r) = shell::run_command(&out_cmd, None).await {
+                    let hits: Vec<&str> = r.stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+                    if hits.is_empty() {
+                        out.push_str(&format!(
+                            "  no package named '{name}' in the repos ({})\n",
+                            pm.name
+                        ));
+                    } else {
+                        out.push_str(&format!("  available from repos ({}):\n", pm.name));
+                        for h in &hits {
+                            out.push_str(&format!("    {}\n", h.trim()));
+                        }
+                    }
+                }
+                // `-Qo` answers "which package owns this file", which is how a
+                // tool ends up installed but off PATH.
+                if let Ok(r) = shell::run_command(&format!("timeout 15 {} {name} 2>&1", pm.owns), None).await
+                {
+                    let owned = r.stdout.trim();
+                    if !owned.is_empty() && !owned.contains("not owned") && !owned.contains("error:") {
+                        out.push_str(&format!("  owned by: {owned}\n"));
+                    }
+                }
+            } else {
+                out.push_str("  no supported package manager found (pacman, apt-get, dnf, apk)\n");
+            }
+        }
+    }
+
+    let scripts = installed_scripts(&hints);
+    if !scripts.is_empty() {
+        out.push_str(&format!(
+            "\nALREADY ON THIS MACHINE — nmap scripts for the same job ({} found):\n",
+            scripts.len()
+        ));
+        for s in scripts.iter().take(12) {
+            out.push_str(&format!("    nmap --script {s}\n"));
+        }
+        if scripts.len() > 12 {
+            out.push_str(&format!("    … and {} more\n", scripts.len() - 12));
+        }
+    }
+
+    let lists = wordlist_dirs();
+    if !lists.is_empty() {
+        out.push_str("\nWORDLISTS PRESENT:\n");
+        for (path, count) in &lists {
+            out.push_str(&format!("    {path}  ({count} entries)\n"));
+        }
+    } else {
+        out.push_str("\nWORDLISTS: none found in the usual locations.\n");
+    }
+
+    out.push_str(
+        "\nUse these facts, do not assume a tool or a path exists. If nothing above covers \
+         the task, call pkg_install to install it — do not describe an install as done \
+         unless pkg_install returned success.\n",
+    );
+    Ok(out)
+}
+
+/// Packages `pkg_install` will install without asking.
+///
+/// A curated list, not "any package the repos have", and the reason is not
+/// caution for its own sake: `pacman -S` runs maintainer install scripts as
+/// root, so an open-ended installer is arbitrary code execution chosen by a 7B
+/// model on the strength of a sentence. The list below covers the tools these
+/// turns actually reach for. Widen it in config rather than by editing here.
+pub const PKG_INSTALL_ALLOWLIST: &[&str] = &[
+    "hydra", "ncrack", "medusa", "john", "nikto", "sqlmap", "gobuster", "ffuf",
+    "whatweb", "socat", "nmap", "netcat-openbsd", "enum4linux", "smbclient", "openldap",
+];
+
+/// Install one allowlisted package, as root, non-interactively.
+///
+/// # Why this may use sudo when `exec` refuses it outright
+///
+/// `exec` was refused because it pipes the sudo password into *model-authored*
+/// text — she writes a shell command and the password goes into it. Here the
+/// command is entirely harness-authored: `pacman -S --needed --noconfirm` plus a
+/// package name that has passed `plain_command_name` (so no shell metacharacter
+/// can survive) and `PKG_INSTALL_ALLOWLIST` membership. The model supplies a
+/// word, not a command. Those are different risks and they get different
+/// answers.
+///
+/// Bounded to four things, all deliberate: allowlisted, name-validated, log-only
+/// refusals for everything else, and no install at all if the package is already
+/// present.
+pub async fn pkg_install(
+    package: &str,
+    sudo_pass: Option<&str>,
+    extra_allowed: &[String],
+) -> Result<String> {
+    let package = package.trim().to_ascii_lowercase();
+
+    if !plain_command_name(&package) {
+        anyhow::bail!(
+            "'{}' is not a valid package name. Only letters, digits, '-', '_' and '.' are \
+             accepted.",
+            package.chars().take(40).collect::<String>()
+        );
+    }
+
+    let allowed = PKG_INSTALL_ALLOWLIST.contains(&package.as_str())
+        || extra_allowed.iter().any(|p| p.eq_ignore_ascii_case(&package));
+    if !allowed {
+        anyhow::bail!(
+            "'{package}' is not on the install allowlist, so it was not installed. Allowed: {}.\n\
+             If you need something else, check first with tool_check — the capability is often \
+             already present via nmap scripts — and tell the user which package to install \
+             themselves.",
+            PKG_INSTALL_ALLOWLIST.join(", ")
+        );
+    }
+
+    let Some(pm) = detect_pkg_manager() else {
+        anyhow::bail!("no supported package manager found (pacman, apt-get, dnf, apk)");
+    };
+
+    // Already installed: say so and change nothing. Reinstalling is a no-op on
+    // Arch but not on every manager, and "it is already there" is the useful
+    // answer when the real problem is that she assumed it was missing.
+    if let Ok(r) = shell::run_command(&format!("timeout 15 {} {package} 2>&1", pm.installed), None).await
+    {
+        if r.exit_code == 0 && !r.stdout.trim().is_empty() {
+            return Ok(format!(
+                "{package} is already installed. Nothing to do.\n{}",
+                crate::util::truncate(&r.stdout, 400)
+            ));
+        }
+    }
+
+    if sudo_pass.is_none() {
+        anyhow::bail!(
+            "installing {package} needs root and no sudo password is configured. Set \
+             [agent] sudo_password in the config, or install it yourself with: \
+             `{} {} {package}`",
+            pm.name,
+            pm.install
+        );
+    }
+
+    let cmd = format!("sudo {} {package}", pm.install);
+    // Logged because this changes the machine, and because a persistent change
+    // made on a model's judgement should be findable afterwards.
+    tracing::warn!("pkg_install: installing '{package}' via {}", pm.name);
+
+    let out = shell::run_command(&cmd, sudo_pass).await?;
+    let status = if out.exit_code == 0 { "SUCCESS" } else { "FAILED" };
+    Ok(format!(
+        "pkg_install {status} (exit {}) for '{package}'\ncommand: {}\n\n{}\n{}",
+        out.exit_code,
+        cmd,
+        out.stdout.trim(),
+        out.stderr.trim()
+    ))
+}
+
+#[cfg(test)]
+mod tool_availability_tests {
+    use super::*;
+
+    /// The charset is the whole security boundary here — `run_command` hands the
+    /// string to `bash -c` — so this is tested as an allowlist, including the
+    /// shapes that a blacklist would let through.
+    #[test]
+    fn only_plain_command_names_are_accepted() {
+        for good in ["hydra", "nmap", "netcat-openbsd", "a.b_c-d", "sqlmap"] {
+            assert!(plain_command_name(good), "{good} should be allowed");
+        }
+        for bad in [
+            "hydra; rm -rf /",
+            "hydra && curl evil.sh",
+            "hydra | tee /tmp/x",
+            "$(whoami)",
+            "`id`",
+            "hyd ra",
+            "-rf",
+            "",
+            "hydra\nnmap",
+            "hydra'",
+            "hydra\"",
+            "../hydra",
+        ] {
+            assert!(!plain_command_name(bad), "{bad:?} must be refused");
+        }
+    }
+
+    /// Every entry in the allowlist must survive the name validator, or the
+    /// allowlist and the validator silently disagree and an allowed package
+    /// becomes uninstallable for no visible reason.
+    #[test]
+    fn every_allowlisted_package_passes_its_own_validator() {
+        for pkg in PKG_INSTALL_ALLOWLIST {
+            assert!(
+                plain_command_name(pkg),
+                "'{pkg}' is allowlisted but the validator would refuse it"
+            );
+        }
+    }
+
+    /// Every capability hint must be a plausible substring, and must not be so
+    /// broad that it matches everything.
+    #[test]
+    fn capability_hints_are_not_so_broad_they_match_nothing_meaningful() {
+        for (key, hints) in CAPABILITY_HINTS {
+            assert!(!key.is_empty() && *key == key.to_ascii_lowercase());
+            assert!(!hints.is_empty(), "{key} has no hints");
+        }
+    }
+
+    /// The real question this module exists for. Measured on this host:
+    /// hydra is absent and `/usr/share/wordlists/rockyou.txt` does not exist,
+    /// and both were asserted as fact in a live session.
+    #[tokio::test]
+    async fn tool_check_reports_the_real_absence_of_hydra() {
+        let out = tool_check("hydra")
+            .await
+            .expect("tool_check must not fail on a missing tool");
+
+        assert!(
+            out.contains("NOT INSTALLED: hydra"),
+            "hydra is absent here and must be reported absent: {out}"
+        );
+        // The whole point: something that does the same job, already present.
+        assert!(
+            out.contains("ALREADY ON THIS MACHINE"),
+            "no alternatives offered, so the tool is useless: {out}"
+        );
+        assert!(
+            out.contains("ssh-brute"),
+            "ssh-brute.nse is installed on this host and is the actual answer: {out}"
+        );
+    }
+
+    /// A tool that IS here must be reported present, with a version. Reporting
+    /// a false absence would push her to install something she already has.
+    #[tokio::test]
+    async fn tool_check_finds_a_tool_that_is_installed() {
+        let out = tool_check("nmap").await.expect("tool_check must succeed");
+        assert!(
+            out.contains("INSTALLED: nmap"),
+            "nmap is installed here: {out}"
+        );
+    }
+
+    /// The wordlist report must reflect this machine, where seclists exists and
+    /// rockyou does not. Reporting a path that is not there is the bug.
+    #[tokio::test]
+    async fn tool_check_reports_wordlists_that_actually_exist() {
+        let out = tool_check("hydra").await.expect("tool_check must succeed");
+        if out.contains("WORDLISTS PRESENT") {
+            assert!(
+                !out.contains("/usr/share/wordlists/rockyou.txt  (0 entries)"),
+                "must not invent a wordlist path: {out}"
+            );
+            for line in out.lines().filter(|l| l.contains("entries)")) {
+                let path = line.trim();
+                let path = path
+                    .trim_start_matches("WORDLISTS PRESENT")
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                assert!(
+                    !path.is_empty() && std::path::Path::new(path).is_dir(),
+                    "reported wordlist dir does not exist: {path}"
+                );
+            }
+        }
+    }
+
+    /// Injection attempts must fail at the validator, before any shell runs.
+    #[tokio::test]
+    async fn pkg_install_refuses_a_shell_metacharacter_name() {
+        let err = pkg_install("hydra; rm -rf /", None, &[])
+            .await
+            .expect_err("must refuse");
+        assert!(
+            err.to_string().contains("not a valid package name"),
+            "wrong refusal: {err}"
+        );
+    }
+
+    /// An allowlisted install with no sudo password must fail with the command
+    /// to run by hand, not by attempting anything.
+    #[tokio::test]
+    async fn pkg_install_without_a_password_explains_rather_than_acts() {
+        let err = pkg_install("hydra", None, &[])
+            .await
+            .expect_err("must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("needs root"), "unhelpful: {msg}");
+        assert!(
+            msg.contains("pacman -S --needed --noconfirm hydra"),
+            "must hand back the exact command: {msg}"
+        );
+    }
+
+    /// A real refusal case from this session's shape: a package that exists,
+    /// works, and is not on the list. The refusal must be actionable rather
+    /// than a bare "no".
+    #[tokio::test]
+    async fn a_package_outside_the_allowlist_is_refused_with_the_list() {
+        let err = pkg_install("masscan", Some("x"), &[])
+            .await
+            .expect_err("must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("not on the install allowlist"), "{msg}");
+        assert!(msg.contains("hydra"), "must list what IS allowed: {msg}");
+        assert!(
+            msg.contains("tool_check"),
+            "must point at the cheaper option: {msg}"
+        );
+    }
+
+    /// The allowlist can be widened by name in config, and only by name.
+    #[tokio::test]
+    async fn config_can_widen_the_allowlist() {
+        // `masscan` passes the validator, so reaching the "no sudo" branch
+        // proves it got past the allowlist rather than being refused earlier.
+        let err = pkg_install("masscan", None, &["masscan".to_string()])
+            .await
+            .expect_err("no sudo password, so it stops before installing");
+        assert!(
+            err.to_string().contains("needs root"),
+            "allowlist did not widen: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod show_output {
+    /// Not a test — a way to see what Luna actually receives. Run with
+    /// `cargo test show_output -- --ignored --nocapture`. Kept because the
+    /// ordering of the alternatives list is a judgement call that is worth
+    /// being able to look at without editing a test.
+    #[tokio::test]
+    #[ignore]
+    async fn show() {
+        println!("{}", super::tool_check("hydra").await.unwrap());
+    }
+}

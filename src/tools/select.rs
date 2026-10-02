@@ -93,6 +93,23 @@ fn triggers(name: &str) -> &'static [&'static str] {
         "decode_payload" => &["decode", "payload", "shellcode", "exploit", "reverse engineer", "base64"],
         "hash_file" => &["hash", "sha256", "sha1", "md5", "checksum", "file integrity"],
         "dns_lookup" => &["dns", "nameserver", "mx record", "resolve domain", "whois"],
+        // Availability before install. Measured 2026-10-02: asked to exploit SSH
+        // she cited `hydra` and a rockyou path, and neither exists here. The
+        // trigger includes ordinary "is X installed" phrasings so this is
+        // reachable without offensive vocabulary, which is the point.
+        "tool_check" => &[
+            "is it installed", "installed", "available", "do you have",
+            "which tool", "what tools", "check for", "check if", "not found",
+            "command not found", "alternatively", "alternative", "instead of",
+            "hydra", "ncrack", "medusa", "nikto", "sqlmap", "gobuster",
+            "ffuf", "whatweb", "socat", "wordlist", "wordlists", "exists",
+            "can you use", "do we have", "is there a tool",
+        ],
+        "pkg_install" => &[
+            "install", "install it", "install the tool", "not installed",
+            "missing tool", "pacman", "apt", "apt-get", "dnf", "apk", "brew",
+            "package manager", "add the package", "get the package",
+        ],
 
         // ── Gated, but only offered when actually asked for ─────────────
         "browser_do" => &["browser", "browse", "web page", "website", "navigate to", "amazon", "click on"],
