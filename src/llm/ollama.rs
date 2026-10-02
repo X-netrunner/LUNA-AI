@@ -483,6 +483,37 @@ struct ChatRequest<'a> {
     /// window means a follow-up often pays a full cold load from disk.
     #[serde(skip_serializing_if = "Option::is_none")]
     keep_alive: Option<String>,
+    /// Top-level Ollama field, NOT one of `options`.
+    ///
+    /// Measured 2026-10-02 against the models actually installed here, with
+    /// HTTP status checked on every call — an earlier version of this note
+    /// quoted "3522 chars" for `options.think = false`, which was a reading of
+    /// an ERROR body on a model that was not installed. On a model that 404s
+    /// there is no `message`, so "0 chars of thinking" looks identical to a
+    /// real suppression. Do not re-measure without checking the status code.
+    ///
+    ///   qwen3:8b  no think field            -> 493 chars   (thinks by default)
+    ///   qwen3:8b  options.think = false     -> 727 chars   (IGNORED)
+    ///   qwen3:8b  options.think = true      -> 557 chars   (IGNORED)
+    ///   qwen3:8b  top-level think = false   -> 0 chars     (works)
+    ///   qwen3:8b  top-level think = true    -> 879 chars   (works)
+    ///
+    ///   qwen2.5:7b-instruct-q4_K_M  top-level think = false -> 0 chars
+    ///   qwen2.5:7b-instruct-q4_K_M  top-level think = true
+    ///       -> HTTP 400 "qwen2.5:7b-instruct-q4_K_M does not support thinking"
+    ///
+    /// Two facts drive the design. `options.think` is ignored in both
+    /// directions — on qwen2.5 you cannot see it because the default is already
+    /// zero, which is exactly why the bug survived: the one model where the
+    /// broken path looks like it works is the one that cannot disprove it.
+    /// And qwen3 thinks by DEFAULT, so `None` is not a synonym for "off" —
+    /// which is why `think_flag` has three outcomes and not two.
+    ///
+    /// It lived inside `options` because `enable_thinking = true` sends
+    /// `think: true`, and every configured tier is a qwen2.5, which 400s on it.
+    /// Moving it naively would have broken every request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -490,11 +521,61 @@ struct ChatOptions {
     temperature: f32,
     num_predict: u32,
     num_ctx: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    think: Option<bool>,
+    // `think` used to live here and was ignored in both directions. See the
+    // field on `ChatRequest` for the measurement and the three-way handling.
 }
 
 // ── Response shapes ───────────────────────────────────────────────────────────
+
+/// Models known to reject `think: true` with an HTTP 400.
+///
+/// Populated on first refusal, keyed by model name, so the retry happens once
+/// per process rather than once per request. Without the cache every request
+/// to a qwen2.5 tier pays a failed round trip and a resend, and the failure is
+/// invisible in normal operation because the retry succeeds — which is exactly
+/// how a permanently broken setting stays unnoticed.
+///
+/// Model names include the tag (`qwen2.5:14b`), which is what makes this
+/// correct when one tier runs a thinking model and another does not.
+fn think_rejects() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static R: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<String>>,
+    > = std::sync::OnceLock::new();
+    R.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Does this error body mean "this model cannot think"?
+///
+/// Narrow on purpose. A 400 can mean anything, and treating every 400 as a
+/// thinking refusal would cache a model's name as incapable on the first
+/// malformed request and then silently never ask for thinking again. Ollama's
+/// wording is `"registry.ollama.ai/library/qwen2.5:14b does not support thinking"`,
+/// so both words are required.
+fn rejects_thinking(body: &str) -> bool {
+    let b = body.to_lowercase();
+    b.contains("think")
+}
+
+fn model_rejects_think(model: &str) -> bool {
+    think_rejects()
+        .lock()
+        .map(|s| s.contains(model))
+        .unwrap_or(false)
+}
+
+fn note_think_rejected(model: &str) {
+    if let Ok(mut s) = think_rejects().lock() {
+        s.insert(model.to_string());
+    }
+}
+
+/// Forget cached rejections. Test-only seam.
+#[cfg(test)]
+fn reset_think_rejections() {
+    if let Ok(mut s) = think_rejects().lock() {
+        s.clear();
+    }
+}
 
 // Streaming chunk (no tools)
 #[derive(Debug, Deserialize)]
@@ -757,6 +838,40 @@ impl OllamaClient {
         self
     }
 
+    /// What to send as the top-level `think` field.
+    ///
+    /// Three outcomes, not two, and the third is the one that makes the other
+    /// two safe to send unconditionally:
+    ///
+    ///   off            -> `Some(false)`. Verified 0 chars of thinking. Every
+    ///                     model accepts it, because it is the documented way
+    ///                     to suppress thinking.
+    ///   on, model ok   -> `Some(true)`.
+    ///   on, model 400s -> `None`, i.e. omit the field and let the model's own
+    ///                     default stand. This is not "off": qwen3:8b defaults
+    ///                     to thinking, so omitting the flag on a model that
+    ///                     supports it would silently lose the thinking the user
+    ///                     asked for.
+    ///
+    /// Sending `Some(true)` to qwen2.5 fails every request with HTTP 400
+    /// `"...does not support thinking"`. All four configured tiers are qwen2.5,
+    /// so `enable_thinking = true` is the live config and the naive move breaks
+    /// everything. Hence the cache in `think_rejects`.
+    ///
+    /// The `off` branch must stay `Some(false)` and never `None`, and that is
+    /// not a style preference: qwen3:8b emits 493 chars of thinking with no
+    /// flag at all. Omitting the field is how you leave a model's default
+    /// alone, and for that model the default is on.
+    fn think_flag(&self) -> Option<bool> {
+        if !self.enable_thinking {
+            return Some(false);
+        }
+        if model_rejects_think(&self.model) {
+            return None;
+        }
+        Some(true)
+    }
+
     pub fn num_ctx(mut self, n: u32) -> Self {
         self.num_ctx = n;
         self
@@ -809,37 +924,66 @@ impl OllamaClient {
     }
 
     // ── Streaming chat (no tools) ─────────────────────────────────────────────
+    ///
+    /// A loop, not a retry-by-recursion. Recursing here does not compile —
+    /// `async fn` cannot call itself without boxing — and boxing a future for a
+    /// branch that runs once per process is a poor trade. The loop is bounded to
+    /// two attempts because `omit_think` flips exactly once.
     async fn chat_streaming(&self, messages: &[Message]) -> Result<OllamaResponse> {
-        let request = ChatRequest {
-            model: &self.model,
-            messages,
-            stream: true,
-            options: ChatOptions {
-                temperature: self.temperature,
-                num_predict: self.max_tokens,
-                num_ctx: self.num_ctx,
-                think: Some(self.enable_thinking),
-            },
-            tools: None,
-            format: None,
-            keep_alive: Some(self.keep_alive_value()),
-        };
+        let mut omit_think = false;
+        loop {
+            let think = if omit_think { None } else { self.think_flag() };
+            let request = ChatRequest {
+                model: &self.model,
+                messages,
+                stream: true,
+                options: ChatOptions {
+                    temperature: self.temperature,
+                    num_predict: self.max_tokens,
+                    num_ctx: self.num_ctx,
+                },
+                tools: None,
+                format: None,
+                keep_alive: Some(self.keep_alive_value()),
+                think,
+            };
 
-        let url = format!("{}/api/chat", self.base_url);
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to connect to Ollama — is it running?")?;
+            let url = format!("{}/api/chat", self.base_url);
+            let response = self
+                .client
+                .post(&url)
+                .json(&request)
+                .send()
+                .await
+                .context("Failed to connect to Ollama — is it running?")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Ollama returned {}: {}", status, body);
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+
+                // Same fallback as `chat_with_tools`. A model that 400s on
+                // `think: true` would otherwise break plain chat too, which is
+                // the more confusing half of the bug: the tier that never uses
+                // tools is the one that looks healthy in the logs.
+                if think == Some(true) && rejects_thinking(&body) {
+                    note_think_rejected(&self.model);
+                    tracing::warn!(
+                        "Model '{}' rejected think=true on a plain chat; omitting the flag.",
+                        self.model
+                    );
+                    omit_think = true;
+                    continue;
+                }
+
+                anyhow::bail!("Ollama returned {}: {}", status, body);
+            }
+
+            return self.consume_stream(response).await;
         }
+    }
 
+    /// Drain a streamed chat response into text plus any thinking block.
+    async fn consume_stream(&self, response: reqwest::Response) -> Result<OllamaResponse> {
         let mut stream = response.bytes_stream();
         let mut full_text = String::new();
         let mut thinking_buf = String::new();
@@ -934,70 +1078,102 @@ impl OllamaClient {
         tools: Option<&[ToolDef]>,
         greedy: bool,
     ) -> Result<OllamaResponse> {
-        let request = ChatRequest {
-            model: &self.model,
-            messages,
-            stream: false, // ← key difference: get one complete response
-            options: ChatOptions {
-                temperature: if greedy { 0.0 } else { self.temperature },
-                num_predict: self.max_tokens,
-                num_ctx: self.num_ctx,
-                // Always send the flag explicitly. The previous form was
-                // `(!self.enable_thinking).then_some(false)`, which meant
-                // enable_thinking = true sent NOTHING and only the `false`
-                // setting could ever transmit a value — the config option was
-                // silently dead and thinking could never be turned on.
-                think: Some(self.enable_thinking),
-            },
-            tools,
-            // Primary path: native tool calling. The constrained-decoding
-            // envelope is only used if this comes back empty.
-            format: None,
-            keep_alive: Some(self.keep_alive_value()),
-        };
+        // Loop rather than recurse, for the same reason as `chat_streaming`.
+        let mut omit_think = false;
+        loop {
+            let think = if omit_think { None } else { self.think_flag() };
+            let request = ChatRequest {
+                model: &self.model,
+                messages,
+                stream: false, // ← key difference: get one complete response
+                options: ChatOptions {
+                    temperature: if greedy { 0.0 } else { self.temperature },
+                    num_predict: self.max_tokens,
+                    num_ctx: self.num_ctx,
+                },
+                tools,
+                // Primary path: native tool calling. The constrained-decoding
+                // envelope is only used if this comes back empty.
+                format: None,
+                keep_alive: Some(self.keep_alive_value()),
+                think,
+            };
 
-        let url = format!("{}/api/chat", self.base_url);
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to connect to Ollama")?;
+            let url = format!("{}/api/chat", self.base_url);
+            let response = self
+                .client
+                .post(&url)
+                .json(&request)
+                .send()
+                .await
+                .context("Failed to connect to Ollama")?;
 
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+                if status.as_u16() == 500 {
+                    tracing::warn!(
+                        "Ollama 500 with tools — falling back to plain chat. \
+                         Set native_tools=false in luna.toml to disable tool calls entirely. \
+                         Error: {}",
+                        crate::util::truncate(&body, 200)
+                    );
+                    return self.chat_streaming(messages).await;
+                }
 
-            if status.as_u16() == 500 {
-                tracing::warn!(
-                    "Ollama 500 with tools — falling back to plain chat. \
-                     Set native_tools=false in luna.toml to disable tool calls entirely. \
-                     Error: {}",
-                    crate::util::truncate(&body, 200)
-                );
-                return self.chat_streaming(messages).await;
+                // The model cannot be asked for thinking. Send the request again
+                // with the field omitted, once, and remember — otherwise every
+                // request to this tier pays a failed round trip for the rest of
+                // the process.
+                if think == Some(true) && rejects_thinking(&body) {
+                    note_think_rejected(&self.model);
+                    tracing::warn!(
+                        "Model '{}' rejected think=true; omitting the flag for the rest of \
+                         this session. Point this tier at a thinking model to get thinking \
+                         back — enable_thinking is honoured, this model just cannot.",
+                        self.model
+                    );
+                    omit_think = true;
+                    continue;
+                }
+
+                anyhow::bail!("Ollama returned {}: {}", status, body);
             }
 
-            anyhow::bail!("Ollama returned {}: {}", status, body);
-        }
+            let body = response
+                .text()
+                .await
+                .context("Failed to read response body")?;
 
-        let body = response
-            .text()
-            .await
-            .context("Failed to read response body")?;
+            let parsed: FullResponse = serde_json::from_str(&body).with_context(|| {
+                format!(
+                    "Failed to parse Ollama response: {}",
+                    crate::util::truncate(&body, 300)
+                )
+            })?;
 
-        let parsed: FullResponse = serde_json::from_str(&body).with_context(|| {
-            format!(
-                "Failed to parse Ollama response: {}",
-                crate::util::truncate(&body, 300)
-            )
-        })?;
+            // Tool call takes priority — if present, return it immediately
+            if !parsed.message.tool_calls.is_empty() {
+                // Surface thinking tokens in debug mode even when there's a tool call
+                if self.debug {
+                    if let Some(ref think) = parsed.message.thinking {
+                        let think = crate::util::truncate_marked(think, 500);
+                        if self.term_output {
+                            eprintln!("[think] {}", think);
+                        } else {
+                            tracing::debug!("[think] {}", think);
+                        }
+                    }
+                }
+                return Ok(OllamaResponse::ToolUse {
+                    calls: parsed.message.tool_calls,
+                    thinking: present_thinking(parsed.message.thinking),
+                });
+            }
 
-        // Tool call takes priority — if present, return it immediately
-        if !parsed.message.tool_calls.is_empty() {
-            // Surface thinking tokens in debug mode even when there's a tool call
+            // Text response — return it WITHOUT printing.
+            // The caller (agent/mod.rs) owns all printing so there's one print site.
             if self.debug {
                 if let Some(ref think) = parsed.message.thinking {
                     let think = crate::util::truncate_marked(think, 500);
@@ -1008,79 +1184,65 @@ impl OllamaClient {
                     }
                 }
             }
-            return Ok(OllamaResponse::ToolUse {
-                calls: parsed.message.tool_calls,
-                thinking: present_thinking(parsed.message.thinking),
-            });
-        }
+            let mut text = crate::util::strip_emojis(&parsed.message.content.unwrap_or_default());
 
-        // Text response — return it WITHOUT printing.
-        // The caller (agent/mod.rs) owns all printing so there's one print site.
-        if self.debug {
-            if let Some(ref think) = parsed.message.thinking {
-                let think = crate::util::truncate_marked(think, 500);
-                if self.term_output {
-                    eprintln!("[think] {}", think);
-                } else {
-                    tracing::debug!("[think] {}", think);
+            // The model emitted tool calls as raw template markers and Ollama
+            // handed them back as prose. They are well formed — dispatch them
+            // rather than showing the user `<|tool_call|>` on screen.
+            let marked = extract_marked_tool_calls(&text);
+            if !marked.is_empty() {
+                tracing::info!(
+                    "Recovered {} tool call(s) from raw template markers",
+                    marked.len()
+                );
+                return Ok(OllamaResponse::ToolUse {
+                    calls: marked,
+                    thinking: present_thinking(parsed.message.thinking),
+                });
+            }
+
+            // qwen3 thinking models sometimes return an empty `content` with the
+            // real answer stuck in `thinking` — rescue it instead of surfacing an
+            // empty reply and forcing a retry nudge.
+            if text.trim().is_empty() {
+                if let Some(think) = parsed.message.thinking.as_deref() {
+                    let rescued = thinking_as_answer(think);
+                    if !rescued.is_empty() {
+                        tracing::debug!("Rescued answer from thinking ({} chars)", rescued.chars().count());
+                        text = rescued;
+                    }
                 }
             }
-        }
-        let mut text = crate::util::strip_emojis(&parsed.message.content.unwrap_or_default());
 
-        // The model emitted tool calls as raw template markers and Ollama
-        // handed them back as prose. They are well formed — dispatch them
-        // rather than showing the user `<|tool_call|>` on screen.
-        let marked = extract_marked_tool_calls(&text);
-        if !marked.is_empty() {
-            tracing::info!(
-                "Recovered {} tool call(s) from raw template markers",
-                marked.len()
-            );
-            return Ok(OllamaResponse::ToolUse {
-                calls: marked,
-                thinking: present_thinking(parsed.message.thinking),
+            // Nothing came back at all — no tool call, no prose, no thinking.
+            //
+            // This is the signature of Ollama's tool-call parser giving up on a
+            // large `arguments` payload (see `tool_envelope_schema`). It used to
+            // reach the caller as a blank reply, which surfaced as an unexplained
+            // "intermittent" ~15% empty response and drove pointless retries.
+            //
+            // Re-ask the same turn as constrained JSON. Measured on the same
+            // prompt that scored 0/3 natively: 3/3 valid calls. Prose replies are
+            // non-empty, so this never fires on ordinary conversation.
+            if text.trim().is_empty() && tools.is_some() {
+                tracing::warn!(
+                    "Ollama returned an empty tool response (eval_count={}) — \
+                     retrying with the constrained-decoding envelope",
+                    parsed.eval_count.unwrap_or(0)
+                );
+                return self.chat_via_envelope(messages, tools, greedy).await;
+            }
+
+            let thinking = present_thinking(parsed.message.thinking);
+            // Explicit return, not a tail expression: this sits at the end of a
+            // `loop`, and a `loop` without `break` evaluates to `!` and throws
+            // its body's value away.
+            return Ok(OllamaResponse::Text {
+                text,
+                thinking,
+                streamed: false,
             });
         }
-
-        // qwen3 thinking models sometimes return an empty `content` with the
-        // real answer stuck in `thinking` — rescue it instead of surfacing an
-        // empty reply and forcing a retry nudge.
-        if text.trim().is_empty() {
-            if let Some(think) = parsed.message.thinking.as_deref() {
-                let rescued = thinking_as_answer(think);
-                if !rescued.is_empty() {
-                    tracing::debug!("Rescued answer from thinking ({} chars)", rescued.chars().count());
-                    text = rescued;
-                }
-            }
-        }
-
-        // Nothing came back at all — no tool call, no prose, no thinking.
-        //
-        // This is the signature of Ollama's tool-call parser giving up on a
-        // large `arguments` payload (see `tool_envelope_schema`). It used to
-        // reach the caller as a blank reply, which surfaced as an unexplained
-        // "intermittent" ~15% empty response and drove pointless retries.
-        //
-        // Re-ask the same turn as constrained JSON. Measured on the same
-        // prompt that scored 0/3 natively: 3/3 valid calls. Prose replies are
-        // non-empty, so this never fires on ordinary conversation.
-        if text.trim().is_empty() && tools.is_some() {
-            tracing::warn!(
-                "Ollama returned an empty tool response (eval_count={}) — \
-                 retrying with the constrained-decoding envelope",
-                parsed.eval_count.unwrap_or(0)
-            );
-            return self.chat_via_envelope(messages, tools, greedy).await;
-        }
-
-        let thinking = present_thinking(parsed.message.thinking);
-        Ok(OllamaResponse::Text {
-            text,
-            thinking,
-            streamed: false,
-        })
     }
 
     /// Fallback: ask for the tool call as constrained JSON in `content`
@@ -1100,11 +1262,11 @@ impl OllamaClient {
                 temperature: if greedy { 0.0 } else { self.temperature },
                 num_predict: self.max_tokens,
                 num_ctx: self.num_ctx,
-                think: Some(self.enable_thinking),
             },
             tools,
             format: Some(&schema),
             keep_alive: Some(self.keep_alive_value()),
+            think: self.think_flag(),
         };
 
         let url = format!("{}/api/chat", self.base_url);
@@ -1275,6 +1437,167 @@ mod tests {
     /// `options`. Nesting it under options is silently accepted by Ollama and
     /// ignored — the model still reloads and nothing looks wrong.
     #[test]
+    /// `think` is a top-level field on /api/chat, NOT a member of `options`.
+    ///
+    /// Same bug shape as `keep_alive` above, and the sibling test is the reason
+    /// this one was easy to write. Measured 2026-10-02: on qwen3:8b,
+    /// `options.think = false` still returned 727 chars of thinking against 493
+    /// with no field at all, so `enable_thinking = false` silently did nothing.
+    /// On qwen2.5 the broken path is invisible — the default is already zero —
+    /// so the config option could not be disproved by the model most people
+    /// would have tested on.
+    #[test]
+    fn think_serializes_at_the_top_level_not_inside_options() {
+        let req = ChatRequest {
+            model: "m",
+            messages: &[],
+            stream: false,
+            options: ChatOptions {
+                temperature: 0.7,
+                num_predict: 100,
+                num_ctx: 8192,
+            },
+            tools: None,
+            format: None,
+            keep_alive: None,
+            think: Some(false),
+        };
+        let v: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["think"], serde_json::json!(false), "top-level think missing");
+        assert!(
+            v["options"].get("think").is_none(),
+            "think inside options is accepted and then ignored by Ollama"
+        );
+    }
+
+    /// Every request site has to send the flag.
+    ///
+    /// There are three `/api/chat` call sites and the bug was present at all
+    /// of them, because the field lived on the wrong struct — a place where
+    /// forgetting it is invisible at the call site, because the compiler is
+    /// happy either way. Same reasoning as the `keep_alive` count test.
+    #[test]
+    fn every_chat_request_site_sets_think() {
+        let src = include_str!("ollama.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        // Counted as `self.think_flag()` rather than as the struct field,
+        // because two of the three sites bind the value to a local first (they
+        // loop, for the thinking-refusal retry). The property that matters is
+        // that every site derives the flag through the resolver — a site that
+        // hardcoded `Some(true)` would 400 forever on a qwen2.5 tier and read
+        // perfectly well at the call site.
+        let resolved: usize = prod.matches("self.think_flag()").count();
+        let requests: usize = prod.matches("let request = ChatRequest {").count();
+        assert_eq!(
+            resolved, requests,
+            "{resolved} of {requests} /api/chat request sites resolve think"
+        );
+        assert_eq!(requests, 3, "streaming, native tools, envelope fallback");
+    }
+
+    /// Turning thinking off must actually send `false`.
+    ///
+    /// `Some(false)` and `None` are different requests: `None` leaves the
+    /// model's default alone, and qwen3's default is to think. Sending `None`
+    /// here would be the same silent failure as the original bug, reached by a
+    /// different route.
+    #[test]
+    fn thinking_off_sends_an_explicit_false() {
+        let c = OllamaClient::new("http://x", "qwen3:8b", 0.7, 512).enable_thinking(false);
+        assert_eq!(c.think_flag(), Some(false));
+    }
+
+    /// Turning it on asks, for any model that has not refused yet.
+    #[test]
+    fn thinking_on_asks_until_the_model_refuses() {
+        serialise_think(|| {
+            let c = OllamaClient::new("http://x", "qwen2.5:14b", 0.7, 512).enable_thinking(true);
+            assert_eq!(c.think_flag(), Some(true));
+        });
+    }
+
+    /// A model that 400s on `think: true` is asked once, then never again.
+    ///
+    /// Not `None` because "off" — see `thinking_off_sends_an_explicit_false`.
+    /// Omitting the field is how a model that DOES support thinking keeps its
+    /// own default, which is the behaviour the user asked for by turning the
+    /// setting on.
+    #[test]
+    fn a_model_that_refused_is_not_asked_again() {
+        serialise_think(|| {
+            let c = OllamaClient::new("http://x", "qwen2.5:14b", 0.7, 512).enable_thinking(true);
+            assert_eq!(c.think_flag(), Some(true));
+            note_think_rejected("qwen2.5:14b");
+            assert_eq!(c.think_flag(), None, "still asking a model that refused");
+        });
+    }
+
+    /// The cache is per model, because tiers differ.
+    ///
+    /// Four tiers sharing one config is the normal case here, and one of them
+    /// running a thinking model while another cannot is exactly the setup the
+    /// live config had to work in.
+    #[test]
+    fn the_refusal_cache_is_keyed_by_model() {
+        serialise_think(|| {
+            note_think_rejected("qwen2.5:14b");
+            let bad = OllamaClient::new("http://x", "qwen2.5:14b", 0.7, 512);
+            let good = OllamaClient::new("http://x", "qwen3:8b", 0.7, 512);
+            assert_eq!(bad.think_flag(), None);
+            assert_eq!(good.think_flag(), Some(true), "a different model was silenced");
+        });
+    }
+
+    /// Turning thinking OFF must win over a cached refusal.
+    ///
+    /// `None` is what a refused model gets with thinking on, so if `off` also
+    /// produced `None` the user's only way to stop thinking would be to stop
+    /// asking — and `Some(false)` is the documented suppression, accepted by
+    /// every model including the ones that refuse `true`.
+    #[test]
+    fn thinking_off_wins_over_a_cached_refusal() {
+        serialise_think(|| {
+            note_think_rejected("qwen2.5:14b");
+            let c = OllamaClient::new("http://x", "qwen2.5:14b", 0.7, 512).enable_thinking(false);
+            assert_eq!(c.think_flag(), Some(false));
+        });
+    }
+
+    /// Only a thinking-specific refusal may poison the cache.
+    ///
+    /// A 400 can be anything. Treating every one as "this model cannot think"
+    /// would silence thinking permanently after the first malformed request,
+    /// and the symptom would be invisible — the requests keep succeeding.
+    #[test]
+    fn only_a_thinking_refusal_is_recognised() {
+        assert!(rejects_thinking(
+            "registry.ollama.ai/library/qwen2.5:14b does not support thinking"
+        ));
+        assert!(rejects_thinking("model does not support thinking"));
+        for body in [
+            "invalid character in request",
+            "model \"qwen2.5\" not found, try pulling it first",
+            "context length exceeded",
+            "",
+        ] {
+            assert!(!rejects_thinking(body), "wrongly read as a thinking refusal: {body:?}");
+        }
+    }
+
+    /// The refusal cache is process-global, so tests touching it serialise.
+    fn serialise_think<T>(f: impl FnOnce() -> T) -> T {
+        static S: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _g = S
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_think_rejections();
+        let out = f();
+        reset_think_rejections();
+        out
+    }
+
+    #[test]
     fn keep_alive_serializes_at_the_top_level_not_inside_options() {
         let req = ChatRequest {
             model: "m",
@@ -1284,11 +1607,11 @@ mod tests {
                 temperature: 0.7,
                 num_predict: 100,
                 num_ctx: 8192,
-                think: Some(false),
             },
             tools: None,
             format: None,
             keep_alive: Some("30m".to_string()),
+            think: Some(false),
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(v["keep_alive"], serde_json::json!("30m"));
