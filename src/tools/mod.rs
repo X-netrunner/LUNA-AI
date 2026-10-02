@@ -27,6 +27,7 @@ use crate::llm::ollama::{ToolCall, ToolDef, ToolFunction};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::borrow::Cow;
+use std::time::Instant;
 
 pub fn tool_definitions() -> Vec<ToolDef> {
     vec![
@@ -1279,7 +1280,35 @@ fn is_registered_tool(name: &str) -> bool {
         .any(|t| t.function.name == name)
 }
 
+/// Run a tool, reporting start and finish to `crate::activity`.
+///
+/// The reporting lives here rather than in the dispatch body for one reason:
+/// several tool arms `return Err(..)` early (a missing argument, a refused
+/// gate, an unconfigured browser), and an activity feed that goes silent exactly
+/// when a tool was refused is worse than none — the user would be left staring at
+/// a turn that apparently did nothing, which is indistinguishable from a hang.
+/// Wrapping the whole body means refusal is reported as a refusal.
 pub async fn execute(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> Result<String> {
+    let name = &tool_call.function.name;
+    let args = normalise_tool_args(&tool_call.function.arguments);
+    let started = Instant::now();
+    // `summarise` is what keeps a whole script or file body off the user's
+    // terminal: the point is to see that work is happening, not to read it.
+    crate::activity::publish(crate::activity::Event::ToolStart {
+        name: name.clone(),
+        summary: crate::activity::summarise(name, &args),
+    });
+    let result = dispatch(tool_call, config).await;
+    crate::activity::publish(crate::activity::Event::ToolEnd {
+        name: name.clone(),
+        ok: result.is_ok(),
+        elapsed: started,
+    });
+    result
+}
+
+/// The dispatch chokepoint: argument normalisation, both gates, then the arm.
+async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> Result<String> {
     let name = &tool_call.function.name;
 
     // Normalise the argument envelope ONCE, here, before any arm sees it.

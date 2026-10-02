@@ -282,6 +282,7 @@ impl<'a> ReactLoop<'a> {
             // Announced before the `await`, because this is the long silent part:
             // 16–37s per iteration on the 7B in the 2026-10-02 session, during
             // which the terminal showed nothing at all.
+            crate::activity::publish(crate::activity::Event::Iteration { n: iteration as u32 });
 
             // Greedy resample after an empty response, so we don't roll the
             // same dice again. `chat` takes the temperature override directly.

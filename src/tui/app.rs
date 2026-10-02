@@ -38,6 +38,11 @@ enum AppEvent {
     Voice(String),
     OnboardingLog(String),
     SpotifyAuthed,
+    /// A live progress line for the turn in flight — "step 2", "⚙ nmap_scan…",
+    /// "✓ run_shell (2.5s)". Carries a rendered string rather than the
+    /// `activity::Event` itself, so the status-bar formatting lives with the
+    /// other UI code instead of in the event plumbing.
+    Activity(String),
 }
 
 #[derive(Debug, Clone)]
@@ -864,6 +869,13 @@ pub struct TuiApp {
     dev_key_prompt: Option<DevKeyPrompt>,
     /// Index in slash command autocomplete popup.
     slash_selected: usize,
+    /// True while a turn is in flight, so live `Activity` lines are shown.
+    ///
+    /// Without this the status bar would be overwritten by progress from a turn
+    /// that has already finished — the subscription is dropped when the spawned
+    /// task ends, but an event can already be queued behind the `Response` that
+    /// ends the turn, and it would then stomp "Ready".
+    pending_turn: bool,
 }
 
 impl TuiApp {
@@ -889,6 +901,7 @@ impl TuiApp {
             debug_scroll: 0,
             focus: Focus::Chat,
             status: String::from("Ready"),
+            pending_turn: false,
             model_name,
             metrics: Arc::new(Metrics::default()),
             last_latency: Duration::ZERO,
@@ -1257,6 +1270,7 @@ impl TuiApp {
                 self.model_name = model;
                 self.chat_scroll = 0;
                 self.status = String::from("Ready");
+                self.pending_turn = false;
                 // Reply delivered (and spoken) — clear the thinking pulse.
                 crate::overlay::signal("idle");
                 // After a voice reply, keep the wake-word window open so the
@@ -1264,6 +1278,14 @@ impl TuiApp {
                 // an already-active window — a typed turn shouldn't open one.
                 if self.window_deadline.load(Ordering::Relaxed) > 0 {
                     self.refresh_conversation_window();
+                }
+            }
+            // Progress replaces the static "Thinking..." rather than appending to
+            // the chat, so a turn doing real work stays legible: the newest line
+            // is the current one, and the reply lands underneath it.
+            AppEvent::Activity(line) => {
+                if self.pending_turn {
+                    self.status = line;
                 }
             }
             AppEvent::Voice(text) => {
@@ -2296,12 +2318,48 @@ impl TuiApp {
             _ => {}
         }
         self.status = String::from("Thinking...");
+        self.pending_turn = true;
         let config = self.config.clone();
         let mut memory = self.memory.clone();
         let response_tx = self.tx.clone();
         let started = Instant::now();
 
         tokio::spawn(async move {
+            // Live tool progress in the status bar.
+            //
+            // The TUI previously showed "Thinking..." for the entire turn, which
+            // covered the 16–37s generations AND the tool calls — so a turn that
+            // was running `sudo pacman -Syu` looked identical to one that was
+            // generating a sentence. The subscription lives inside the spawned
+            // task, so it is dropped when the turn ends and cannot outlive it or
+            // leak into the next one.
+            //
+            // `activity_tx` is a separate clone moved into the 'static closure.
+            // Borrowing `response_tx` cannot work: subscribers outlive this task
+            // (they unregister on drop, and the compiler cannot prove that), so
+            // the closure must own what it sends on.
+            let activity_tx = response_tx.clone();
+            let _activity = crate::activity::subscribe(move |ev| {
+                let line = match ev {
+                    crate::activity::Event::Iteration { n } => {
+                        format!("Thinking… (step {n})")
+                    }
+                    crate::activity::Event::ToolStart { name, summary } => {
+                        if summary.is_empty() || summary == name {
+                            format!("⚙ {name}…")
+                        } else {
+                            format!("⚙ {name}: {summary}")
+                        }
+                    }
+                    crate::activity::Event::ToolEnd { name, ok, elapsed } => format!(
+                        "{} {name} ({:.1}s)",
+                        if *ok { "✓" } else { "✗" },
+                        elapsed.elapsed().as_secs_f64()
+                    ),
+                };
+                let _ = activity_tx.send(AppEvent::Activity(line));
+            });
+
             let result = crate::agent::run_routed_turn(&stripped, &mut memory, &config).await;
             let latency = started.elapsed();
             match result {

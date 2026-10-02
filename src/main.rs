@@ -6,6 +6,7 @@
 //!   3. Load config
 //!   4. Start the agent loop
 
+mod activity;
 mod agent;
 mod audio;
 mod browser;

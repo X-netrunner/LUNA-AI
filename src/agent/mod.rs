@@ -1008,6 +1008,34 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         println!("{}", crate::first_run::guide_text(config));
     }
 
+    // Live progress, so a slow turn is visibly a slow turn.
+    //
+    // Without this, the 2026-10-02 session went silent for 16s, 22s and 37s
+    // across three iterations with nothing on screen, and one of them ran
+    // `sudo pacman -Syu`. From the terminal that is indistinguishable from a
+    // hang. The guard is held in `_activity` for the whole loop: dropping it
+    // unregisters the sink, and this process runs one loop for its lifetime.
+    let _activity = crate::activity::subscribe(|ev| match ev {
+        crate::activity::Event::Iteration { n } => {
+            println!("  … thinking (step {n})");
+        }
+        crate::activity::Event::ToolStart { name, summary } => {
+            let what = if summary.is_empty() || summary == name {
+                name.clone()
+            } else {
+                format!("{name}: {summary}")
+            };
+            println!("  ⚙ {what}");
+        }
+        crate::activity::Event::ToolEnd { name, ok, elapsed } => {
+            println!(
+                "  {} {name} ({:.1}s)",
+                if *ok { "✓" } else { "✗" },
+                elapsed.elapsed().as_secs_f64()
+            );
+        }
+    });
+
     let client = build_client(config);
     let fast_client = build_fast_client(config);
     let deep_client = build_deep_client(config);
