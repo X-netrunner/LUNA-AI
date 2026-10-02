@@ -684,8 +684,55 @@ pub async fn tool_check(name: &str) -> Result<String> {
 /// model on the strength of a sentence. The list below covers the tools these
 /// turns actually reach for. Widen it in config rather than by editing here.
 pub const PKG_INSTALL_ALLOWLIST: &[&str] = &[
-    "hydra", "ncrack", "medusa", "john", "nikto", "sqlmap", "gobuster", "ffuf",
-    "whatweb", "socat", "nmap", "netcat-openbsd", "enum4linux", "smbclient", "openldap",
+    // Credential testing and wordlists.
+    "hydra", "ncrack", "medusa", "john", "hashcat",
+    // Recon. `masscan` complements the 71 nmap scripts rather than replacing
+    // them, and `wireshark-cli` is what actually provides `tshark` — the
+    // package is not named `tshark`, and `pacman -S tshark` fails.
+    // `netdiscover` is absent despite being widely recommended: check, don't
+    // guess. See NOT_IN_OFFICIAL_REPOS.
+    "nmap", "masscan", "wireshark-cli",
+    // Service probing and web.
+    "nikto", "sqlmap", "gobuster",
+    // Transport and shell.
+    "socat", "openbsd-netcat",
+    // Credential spraying and enumeration. `smbclient` and `openldap` are the
+    // official-repo clients; `enum4linux` and `dirb` are AUR-only and so are
+    // not here, see NOT_IN_OFFICIAL_REPOS.
+    "smbclient", "openldap",
+    // Wireless, for the WiFi-adjacent questions that keep coming up.
+    "aircrack-ng", "hcxtools",
+];
+
+/// Packages known NOT to be in the official repos, kept here so the mistake is
+/// recorded rather than repeated.
+///
+/// Four entries in the first version of the allowlist were AUR-only: `ffuf`,
+/// `whatweb`, `enum4linux` and `dirb`. `pacman -Ss` finds none of them, and
+/// `netcat-openbsd` was simply the wrong name — the package is
+/// `openbsd-netcat`. Since `pkg_install` runs `pacman -S` and nothing else,
+/// those four could never have installed: the tool would have reported
+/// `target not found`, and she would have learned that `pkg_install` is broken
+/// rather than that the package is unavailable. That is the worse failure of
+/// the two, because it teaches her the wrong lesson about a tool that works.
+///
+/// AUR packages need `yay`/`paru`, which is a deliberate non-goal: an AUR
+/// helper builds an arbitrary PKGBUILD and this installer runs as root.
+///
+/// The two tests at the bottom of `tool_availability_tests` check this list
+/// against pacman in both directions, and between them they have already
+/// earned their keep: writing this list is how I put `netdiscover` on the
+/// allowlist (it is not packaged) and how `wpscan` ended up here (it *is* in
+/// `extra`, version 1:4.0.1-1). Both were my errors, both caught the same
+/// day. A list of package names is a claim about a moving distribution and
+/// has to be re-checked, not trusted.
+///
+/// The real Arch names to watch for: `wireshark-cli` (provides `tshark`) and
+/// `openbsd-netcat` (provides `nc`) — searching for the binary's name finds
+/// nothing.
+const NOT_IN_OFFICIAL_REPOS: &[&str] = &[
+    "ffuf", "whatweb", "enum4linux", "dirb", "wfuzz", "responder", "netdiscover",
+    "metasploit-framework", "crackmapexec", "netexec", "cewl", "searchsploit",
 ];
 
 /// Install one allowlisted package, as root, non-interactively.
@@ -813,7 +860,93 @@ mod tool_availability_tests {
                 plain_command_name(pkg),
                 "'{pkg}' is allowlisted but the validator would refuse it"
             );
+            assert!(
+                !NOT_IN_OFFICIAL_REPOS.contains(pkg),
+                "'{pkg}' is in both the allowlist and NOT_IN_OFFICIAL_REPOS; \
+                 pkg_install runs pacman and can never install it"
+            );
         }
+    }
+
+    /// Every allowlisted package must actually exist in the official repos.
+    ///
+    /// This asks pacman instead of trusting the list, and that is the entire
+    /// point. The first allowlist shipped four AUR-only packages (`ffuf`,
+    /// `whatweb`, `enum4linux`, `dirb`) and one name that does not exist
+    /// (`netcat-openbsd`; the package is `openbsd-netcat`). Nothing caught it,
+    /// because the only test on this list asserted that the allowlist and the
+    /// validator agreed with *each other* — two things I wrote, checking each
+    /// other. The bug is only visible when something outside the codebase is
+    /// asked, which is the same lesson the fence-walker bugs taught today.
+    ///
+    /// Skips when there is no supported package manager, so a non-Arch checkout
+    /// gets a skip rather than a spurious failure. Slow: one `pacman -Ss` per
+    /// entry, ~1s each on a warm cache.
+    #[test]
+    fn every_allowlisted_package_exists_in_the_official_repos() {
+        if detect_pkg_manager().is_none() {
+            eprintln!("skipping: no supported package manager on this host");
+            return;
+        }
+        let mut missing: Vec<&str> = Vec::new();
+        for pkg in PKG_INSTALL_ALLOWLIST {
+            let probe = format!(
+                "timeout 25 pacman -Ss '^{}$' 2>/dev/null \
+                 | grep -Eo '^(extra|core|multilib)/' | head -1",
+                pkg.replace('\'', "")
+            );
+            let found = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&probe)
+                .output()
+                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                .unwrap_or(false);
+            if !found {
+                missing.push(pkg);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "allowlisted but not in the official repos: {missing:?}\n\
+             pkg_install runs `pacman -S` and nothing else, so these can never \
+             install — she would see `target not found` and conclude the tool \
+             is broken. Drop them, or install an AUR helper deliberately and \
+             accept that it builds arbitrary PKGBUILDs as root."
+        );
+    }
+
+    /// `NOT_IN_OFFICIAL_REPOS` is a claim about the world too, so it gets the
+    /// same treatment. It is easy to leave a package in that list after it is
+    /// packaged upstream, at which point it silently stops being a useful
+    /// record of the mistake and starts being a reason to omit a good tool.
+    #[test]
+    fn the_aur_only_list_is_still_true() {
+        if detect_pkg_manager().is_none() {
+            eprintln!("skipping: no supported package manager on this host");
+            return;
+        }
+        let mut wrongly_excluded: Vec<&str> = Vec::new();
+        for pkg in NOT_IN_OFFICIAL_REPOS {
+            let probe = format!(
+                "timeout 25 pacman -Ss '^{}$' 2>/dev/null \
+                 | grep -Eo '^(extra|core|multilib)/' | head -1",
+                pkg.replace('\'', "")
+            );
+            let present = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&probe)
+                .output()
+                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                .unwrap_or(false);
+            if present {
+                wrongly_excluded.push(pkg);
+            }
+        }
+        assert!(
+            wrongly_excluded.is_empty(),
+            "listed as AUR-only but present in the official repos: \
+             {wrongly_excluded:?} — remove them from NOT_IN_OFFICIAL_REPOS"
+        );
     }
 
     /// Every capability hint must be a plausible substring, and must not be so
@@ -917,9 +1050,17 @@ mod tool_availability_tests {
     /// A real refusal case from this session's shape: a package that exists,
     /// works, and is not on the list. The refusal must be actionable rather
     /// than a bare "no".
+    ///
+    /// `nvim` is the example because it is the one the user actually asked
+    /// about, and it is a good specimen: harmless, real, packaged, and
+    /// unrelated to anything on this list. Note that this is a fixture that
+    /// can rot — it was `masscan` until this session's allowlist revision
+    /// added masscan, and the test then failed for the *right* reason. If the
+    /// refusal ever stops firing, check whether the example got allowlisted
+    /// before assuming `pkg_install` broke.
     #[tokio::test]
     async fn a_package_outside_the_allowlist_is_refused_with_the_list() {
-        let err = pkg_install("masscan", Some("x"), &[])
+        let err = pkg_install("nvim", Some("x"), &[])
             .await
             .expect_err("must refuse");
         let msg = err.to_string();
@@ -956,5 +1097,57 @@ mod show_output {
     #[ignore]
     async fn show() {
         println!("{}", super::tool_check("hydra").await.unwrap());
+    }
+}
+
+/// What the allowlist does and does not buy, stated as a test.
+///
+/// Added because "Luna cannot install unlisted packages" is the natural thing
+/// to believe after reading `PKG_INSTALL_ALLOWLIST`, and it is not true.
+/// `run_shell` is in neither `gated_tools` nor `capability_tools`, it forwards
+/// `sudo_pass`, and it runs `bash -c` on a model-authored string — so
+/// `sudo pacman -S nvim` already works today, allowlist or not.
+///
+/// The allowlist is a speed bump on the *honest* path: it stops the common case,
+/// where she reaches for `pkg_install` because it is right there and
+/// documented, and it makes that refusal legible instead of silent. It is not a
+/// sandbox and nothing should imply it is.
+///
+/// The alternative is not a stricter list. A list strong enough to hold against
+/// `run_shell` would have to forbid installing anything at all, at which point
+/// `pkg_install` is pointless. The real question is what `run_shell` is for on
+/// an offensive turn, which is a design decision rather than a patch. Until that
+/// is answered this test exists so the allowlist does not quietly acquire a
+/// reputation it has not earned.
+#[cfg(test)]
+mod allowlist_scope_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_allowlist_refuses_a_package_outside_it() {
+        let err = pkg_install("nvim", Some("x"), &[])
+            .await
+            .expect_err("nvim is not on the list and must be refused");
+        assert!(
+            err.to_string().contains("not on the install allowlist"),
+            "unexpected refusal: {err}"
+        );
+    }
+
+    /// The premise of the note above, pinned. If `run_shell` ever becomes
+    /// gated this test fails, and the note has to be rewritten rather than left
+    /// claiming a boundary that has moved.
+    #[test]
+    fn run_shell_is_ungated_so_the_allowlist_is_not_a_boundary() {
+        let cfg = crate::config::LunaConfig::default();
+        assert!(
+            !cfg.external.is_gated("run_shell"),
+            "run_shell is gated: update the note above, the allowlist may now be \
+             a real boundary rather than a speed bump"
+        );
+        assert!(
+            !cfg.external.is_capability_gated("run_shell"),
+            "run_shell is capability-gated: update the note above"
+        );
     }
 }
