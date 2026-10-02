@@ -2373,7 +2373,13 @@ impl TuiApp {
                     let msg = Msg {
                         role: "assistant".into(),
                         content: outcome.text,
-                        thinking: None,
+                        // Was hardcoded `None`. The field was populated the whole
+                        // way down — `run_routed_turn` fills it from
+                        // `ReactLoop::run`, and widgets.rs has rendered it for
+                        // some time — and this line threw it away, so the
+                        // Thinking toggle could never show anything no matter
+                        // which model was configured.
+                        thinking: outcome.thinking,
                     };
                     let _ = response_tx.send(AppEvent::Response(
                         msg,

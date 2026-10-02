@@ -371,7 +371,7 @@ async fn summarize_text(config: &LunaConfig, text: &str) -> Option<(String, Stri
     let response = client.chat(&context, None).await.ok()?;
     let out = match response {
         OllamaResponse::Text { text, .. } => text,
-        OllamaResponse::ToolUse(_) => return None,
+        OllamaResponse::ToolUse { .. } => return None,
     };
     let mut title = String::new();
     let mut summary = String::new();

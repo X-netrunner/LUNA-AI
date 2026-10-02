@@ -671,7 +671,27 @@ pub enum OllamaResponse {
     /// Plain-text reply. `streamed` is true when tokens were already printed
     /// live to stdout, so the caller must not print the text again.
     Text { text: String, thinking: Option<String>, streamed: bool },
-    ToolUse(Vec<ToolCall>),
+    /// `thinking` is carried here too, not just on `Text`.
+    ///
+    /// It used to be dropped on this arm: the tools path returned the calls and
+    /// nothing else, logging the thinking block only under `self.debug`
+    /// (default false). Every full and security turn goes through here, so Luna
+    /// reasoned on every iteration and the reasoning never left the client. The
+    /// `Text` arm already returned it, which is exactly why the omission was
+    /// invisible — the one path that worked was the one that carries no tools.
+    ToolUse {
+        calls: Vec<ToolCall>,
+        thinking: Option<String>,
+    },
+}
+
+/// Drop a blank thinking block so callers don't have to distinguish "the model
+/// thought nothing" from "the model isn't a thinking model".
+///
+/// Both arrive as `Some("")` or `Some("   ")` on some builds, and showing an
+/// empty reasoning panel is worse than showing none.
+fn present_thinking(t: Option<String>) -> Option<String> {
+    t.filter(|s| !s.trim().is_empty())
 }
 
 // ── The client ────────────────────────────────────────────────────────────────
@@ -988,7 +1008,10 @@ impl OllamaClient {
                     }
                 }
             }
-            return Ok(OllamaResponse::ToolUse(parsed.message.tool_calls));
+            return Ok(OllamaResponse::ToolUse {
+                calls: parsed.message.tool_calls,
+                thinking: present_thinking(parsed.message.thinking),
+            });
         }
 
         // Text response — return it WITHOUT printing.
@@ -1014,7 +1037,10 @@ impl OllamaClient {
                 "Recovered {} tool call(s) from raw template markers",
                 marked.len()
             );
-            return Ok(OllamaResponse::ToolUse(marked));
+            return Ok(OllamaResponse::ToolUse {
+                calls: marked,
+                thinking: present_thinking(parsed.message.thinking),
+            });
         }
 
         // qwen3 thinking models sometimes return an empty `content` with the
@@ -1049,7 +1075,7 @@ impl OllamaClient {
             return self.chat_via_envelope(messages, tools, greedy).await;
         }
 
-        let thinking = parsed.message.thinking.filter(|t| !t.trim().is_empty());
+        let thinking = present_thinking(parsed.message.thinking);
         Ok(OllamaResponse::Text {
             text,
             thinking,
@@ -1110,7 +1136,10 @@ impl OllamaClient {
         match read_envelope(parsed.message.content.unwrap_or_default().trim()) {
             EnvelopeRead::Call(call) => {
                 tracing::info!("Recovered tool call '{}' via envelope", call.function.name);
-                Ok(OllamaResponse::ToolUse(vec![call]))
+                Ok(OllamaResponse::ToolUse {
+                    calls: vec![call],
+                    thinking: present_thinking(parsed.message.thinking),
+                })
             }
             EnvelopeRead::Text(text) => {
                 let text = crate::util::strip_emojis(&text);
@@ -1118,7 +1147,7 @@ impl OllamaClient {
                     // The envelope is constrained, so this is genuinely rare.
                     tracing::warn!("Envelope retry produced neither a call nor prose");
                 }
-                let thinking = parsed.message.thinking.filter(|t| !t.trim().is_empty());
+                let thinking = present_thinking(parsed.message.thinking);
                 Ok(OllamaResponse::Text {
                     text,
                     thinking,
@@ -1164,6 +1193,52 @@ impl OllamaClient {
 
 #[cfg(test)]
 mod tests {
+    /// A blank reasoning block must not become an empty panel. Some builds send
+    /// `Some("")` rather than omitting the field, and a visible empty thinking
+    /// block is worse than none — it reads as a broken feature.
+    #[test]
+    fn a_blank_thinking_block_is_treated_as_absent() {
+        assert_eq!(present_thinking(None), None);
+        assert_eq!(present_thinking(Some(String::new())), None);
+        assert_eq!(present_thinking(Some("   \n\t ".into())), None);
+        assert_eq!(present_thinking(Some("reasoned".into())), Some("reasoned".into()));
+    }
+
+    /// The tool arm must be able to carry reasoning.
+    ///
+    /// This is the regression that motivated the change: `ToolUse` was a bare
+    /// `Vec<ToolCall>`, so a tools turn had nowhere to put thinking even when
+    /// Ollama sent it. Verified live against qwen3:8b, which returns a thinking
+    /// block alongside `tool_calls` on both a direct tool request (389 chars)
+    /// and one that asks for reasoning first (3172 chars).
+    #[test]
+    fn the_tool_arm_can_carry_thinking_alongside_the_calls() {
+        let call = ToolCall {
+            function: ToolCallFunction {
+                name: "run_shell".into(),
+                arguments: serde_json::json!({"command": "echo hi"}),
+            },
+        };
+
+        let reasoned = OllamaResponse::ToolUse {
+            calls: vec![call.clone()],
+            thinking: Some("worked out 23*17 first".into()),
+        };
+        let OllamaResponse::ToolUse { calls, thinking } = &reasoned else {
+            panic!("the tool arm changed shape again")
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(thinking.as_deref(), Some("worked out 23*17 first"));
+
+        // A turn that acted without reasoning must still read as None, or the
+        // TUI shows an empty panel on every ordinary tool call.
+        let plain = OllamaResponse::ToolUse { calls: vec![call], thinking: None };
+        let OllamaResponse::ToolUse { thinking, .. } = &plain else {
+            panic!("the tool arm changed shape again")
+        };
+        assert!(thinking.is_none());
+    }
+
     use super::*;
 
     // ── keep_alive ─────────────────────────────────────────────────────────

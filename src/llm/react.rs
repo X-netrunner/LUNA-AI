@@ -617,8 +617,21 @@ impl<'a> ReactLoop<'a> {
                     return Ok((text, think_opt, streamed));
                 }
 
-                OllamaResponse::ToolUse(tool_calls) => {
+                OllamaResponse::ToolUse {
+                    calls: tool_calls,
+                    thinking,
+                } => {
                     empty_retries = 0;
+                    // Same accumulation as the `Text` arm, joined the same way.
+                    // Iterations run before the answer, so a turn that reasoned
+                    // for four steps and answered in the fifth keeps all four
+                    // blocks rather than only the last.
+                    if let Some(think) = thinking {
+                        if !accumulated_thinking.is_empty() {
+                            accumulated_thinking.push('\n');
+                        }
+                        accumulated_thinking.push_str(&think);
+                    }
                     for tool_call in &tool_calls {
                         let tool_name = tool_call.function.name.clone();
                         tracing::info!("Tool call: {}", tool_name);
@@ -1230,7 +1243,7 @@ fn truncate_control(text: &str) -> String {
 fn text_of(response: &OllamaResponse) -> String {
     match response {
         OllamaResponse::Text { text, .. } => text.clone(),
-        OllamaResponse::ToolUse(calls) => {
+        OllamaResponse::ToolUse { calls, .. } => {
             let names: Vec<String> = calls.iter().map(|c| c.function.name.clone()).collect();
             format!("[tools: {}]", names.join(", "))
         }
@@ -1663,6 +1676,29 @@ fn build_call(
 
 #[cfg(test)]
 mod tests {
+    /// `text_of` feeds the `model output (tools): …` log line. The tool arm
+    /// became a struct variant, and this is the one place that destructures it,
+    /// so it is the place a future edit would silently stop compiling — or worse,
+    /// stop listing the tool that ran.
+    #[test]
+    fn __pin_text_of_still_names_the_tool_on_a_tool_turn() {
+        let call = crate::llm::ollama::ToolCall {
+            function: crate::llm::ollama::ToolCallFunction {
+                name: "run_shell".into(),
+                arguments: json!({"command": "echo hi"}),
+            },
+        };
+        let r = OllamaResponse::ToolUse {
+            calls: vec![call],
+            thinking: Some("thought about it".into()),
+        };
+        let out = text_of(&r);
+        assert!(out.contains("run_shell"), "tool name lost from the log line: {out}");
+        // Thinking must not leak into the log line — it is shown in its own
+        // panel, and duplicating it here would double every reasoning block.
+        assert!(!out.contains("thought about it"), "thinking leaked into text_of: {out}");
+    }
+
     use super::*;
 
     // ── Third tool-call encoding: name inside the payload ─────────────────────
