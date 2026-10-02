@@ -839,6 +839,33 @@ pub async fn run_routed_turn(
                 // of a correctness guard means one of them silently stops being
                 // updated, and the tests would still pass against the other.
                 crate::agent::learning::append_turn("assistant", &response);
+
+                // ── Auto-execute: the turn may not END as "here is a script, you
+                // run it" ──────────────────────────────────────────────────────
+                //
+                // Same shape as the recon block above and for the same reason: a
+                // prompt ask has been measured not to bind on this behaviour, so
+                // the guarantee is structural. The narration guard in `react.rs`
+                // detects the hand-off and she apologises for it — 12/12 cells
+                // still handed off. Here the code is run whether or not she
+                // complies, and the outcome is appended to what the user sees, so
+                // the turn cannot return an unexecuted script as if it were a
+                // result.
+                //
+                // Runs after `append_turn`, so the audit log holds the text she
+                // actually produced and not the text plus a results block. Runs
+                // before the return, so `TurnOutcome.text` is what the user sees
+                // and no caller can get the pre-execution answer by accident.
+                let response = if crate::exec::should_execute(&response, input, config) {
+                    tracing::info!(
+                        "Auto-execute: Luna handed over runnable code on an offensive turn"
+                    );
+                    let report = crate::exec::run(&response, config).await;
+                    crate::exec::render(&response, &report)
+                } else {
+                    response
+                };
+
                 return Ok(TurnOutcome {
                     text: response,
                     thinking,

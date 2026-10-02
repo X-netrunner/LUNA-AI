@@ -12,6 +12,7 @@ mod audio;
 mod browser;
 mod config;
 mod daemon;
+mod exec;
 mod first_run;
 mod llm;
 mod memory;

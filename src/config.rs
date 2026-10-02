@@ -476,6 +476,30 @@ pub struct LlmConfig {
     /// before knowing they are needed is the wrong order.
     #[serde(default = "default_recon_scan_type")]
     pub recon_scan_type: String,
+    /// Run the code Luna hands over, instead of handing it back to the user.
+    ///
+    /// Off by default, unlike `security_auto_recon`. The difference is risk
+    /// class: recon is a read-only port scan the harness chooses itself, and
+    /// execution is model-authored code acting on the machine. A fresh install
+    /// should not begin running code it did not write because a turn mentioned
+    /// attacks.
+    ///
+    /// Requires the capability receipt *and* an explicit allowlist entry, so
+    /// turning this on does not by itself authorise anything. See `crate::exec`
+    /// for what this does and does not constrain — in particular the loopback
+    /// check there is a literal scan, not a sandbox, and that limit is real.
+    #[serde(default)]
+    pub security_auto_execute: bool,
+    /// Wall-clock limit per executed block. See `shell::run_command_bounded`.
+    #[serde(default = "default_exec_timeout")]
+    pub auto_execute_timeout_secs: u64,
+    /// Most blocks executed from a single turn.
+    ///
+    /// Bounded because the count is hers, not ours: measured 2026-10-02, one
+    /// turn called `write_file` eight times. A turn that emits eight scripts is
+    /// a turn where the scripts are not the answer.
+    #[serde(default = "default_exec_max_blocks")]
+    pub auto_execute_max_blocks: usize,
     /// Local embedding model used for semantic memory recall (RAG-lite).
     /// Pull once with: ollama pull nomic-embed-text
     pub embedding_model: String,
@@ -522,16 +546,30 @@ fn default_security_num_ctx() -> u32 {
     8192
 }
 
-/// Default home for security-tier scripts: `~/Documents/luna-scripts`.
-///
-/// `XDG_DOCUMENTS_DIR` is honoured when set, because on Arch the user may well
-/// have moved Documents (a symlink into another partition is common) and a
-/// hard-coded path would then write somewhere the user does not look.
 /// Full port range rather than a version scan; see `recon_scan_type`.
 fn default_recon_scan_type() -> String {
     "ports".into()
 }
 
+/// Wall-clock limit for one executed block.
+///
+/// Long enough for a `pip install` or an SSH probe against a service that never
+/// answers, short enough that a turn is not lost. See `auto_execute_timeout_secs`.
+fn default_exec_timeout() -> u64 {
+    60
+}
+
+/// Three blocks. Above the 1-3 she emits per turn in the measured set, below
+/// the eight-tool turn that showed the count is hers and not a bound.
+fn default_exec_max_blocks() -> usize {
+    3
+}
+
+/// Default home for security-tier scripts: `~/Documents/luna-scripts`.
+///
+/// `XDG_DOCUMENTS_DIR` is honoured when set, because on Arch the user may well
+/// have moved Documents (a symlink into another partition is common) and a
+/// hard-coded path would then write somewhere the user does not look.
 pub fn default_security_scripts_dir() -> String {
     if let Ok(docs) = std::env::var("XDG_DOCUMENTS_DIR") {
         let docs = docs.trim();
@@ -564,6 +602,9 @@ impl Default for LlmConfig {
             scan_allowlist: Vec::new(),
             security_auto_recon: true,
             recon_scan_type: "ports".into(),
+            security_auto_execute: false,
+            auto_execute_timeout_secs: default_exec_timeout(),
+            auto_execute_max_blocks: default_exec_max_blocks(),
             embedding_model: "nomic-embed-text".into(),
             num_ctx: default_num_ctx(),
         }

@@ -1299,7 +1299,15 @@ fn claims_message_sent(text: &str) -> bool {
 /// definition of "offensive" in the codebase — the failure mode when two
 /// copies exist is one silently stops being updated and the feature fires on
 /// some phrasings and not others.
-fn requests_execution(input: &str) -> bool {
+/// Public because `crate::exec` must agree with this guard on *when* runnable
+/// code was handed over. A second, similar predicate living in `exec` is how
+/// the two drift apart and the guard warns about one thing while the executor
+/// runs another.
+///
+/// `crate::exec::should_execute` composes this with `requests_execution` and a
+/// real tagged fence, so it is strictly narrower than the guard: the guard may
+/// flag an untagged command fence, and `exec` will not run one.
+pub(crate) fn requests_execution(input: &str) -> bool {
     const VERBS: &[&str] = &[
         "run", "execute", "perform", "launch", "invoke", "apply", "go ahead",
     ];
@@ -1382,7 +1390,10 @@ const _: () = {
 /// the command and the numbers instead, so it does not match signal 1; and where
 /// it does repeat the command, `nmap_scan_ran` is true and the whole guard is
 /// skipped.
-fn narrates_shell_execution(text: &str) -> bool {
+/// `pub(crate)` for the same reason as `requests_execution` above: this is the
+/// single definition of "she handed over runnable code", and `crate::exec` uses
+/// it rather than restating it.
+pub(crate) fn narrates_shell_execution(text: &str) -> bool {
     // Signal 1: a fenced block holding something the reader could run — a shell
     // command, or a script.
     //
