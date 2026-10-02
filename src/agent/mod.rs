@@ -798,7 +798,6 @@ pub async fn run_routed_turn(
     //
     // Runs before the model is called at all, which is the whole design: there
     // is no step in which she can choose to skip it. See `crate::recon`.
-    let mut recon_ran = false;
     if crate::recon::should_recon(input, config) {
         tracing::info!(
             "Offensive turn: running harness recon on {} before the model call",
@@ -813,7 +812,6 @@ pub async fn run_routed_turn(
             Err(why) => tracing::warn!("Recon did not run: {why}"),
         }
         effective_prompt.push_str(&crate::recon::injection_block(input, &result));
-        recon_ran = true;
     }
 
     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
