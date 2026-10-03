@@ -155,6 +155,25 @@ async fn detect_screen_size() -> Option<(u32, u32)> {
     None
 }
 
+/// What the page copy says, split by the remedy each implies.
+///
+/// Checked bot-first: a bot wall is sometimes dressed in login wording ("log in
+/// to buy"), and telling the user to log in when the site is refusing
+/// automation sends them to do something that will not work.
+///
+/// Every `bot` marker is a *phrase*, never the single distinctive word. Bare
+/// "not a robot" would fire on a product page for the book or film of that
+/// name, and the response to a false positive here is "stop using this site" —
+/// so the marker set is biased toward the longer wording that only a real
+/// challenge produces.
+#[derive(serde::Deserialize)]
+struct WallMarkers {
+    #[serde(default)]
+    login: Vec<String>,
+    #[serde(default)]
+    bot: Vec<String>,
+}
+
 impl CdpBrowser {
     /// Launch or connect to a Chromium instance with a persistent profile.
     pub async fn new(config: &crate::config::BrowserConfig) -> Result<Self> {
@@ -388,8 +407,17 @@ impl CdpBrowser {
     /// "you must log in to continue" prompt. Returns a short human reason.
     ///
     /// Only STRONG signals count (sign-in URL paths, explicit login-required
-    /// copy), so a site's harmless "Sign in" header link never trips it.
-    pub async fn login_wall_reason(&self) -> Option<String> {
+    /// copy, anti-bot challenge URLs), so a site's harmless "Sign in" header
+    /// link never trips it.
+    ///
+    /// Why this page cannot be used as the one that was asked for.
+    ///
+    /// Two kinds of wall, which need different remedies and are easy to
+    /// confuse. A login wall needs the user to log in; a bot wall needs the
+    /// automation to *stop*, because retrying is what extends the block. On
+    /// 2026-10-03 Amazon served a bot interstitial and the run carried on
+    /// reading it as a product page.
+    pub async fn page_wall_reason(&self) -> Option<String> {
         let page = self.current_page().await.ok()?;
 
         // 1. The browser landed on a sign-in page.
@@ -405,12 +433,33 @@ impl CdpBrowser {
                      without logging into an account"
                 ));
             }
+
+            // 2. The URL says this is an anti-bot challenge. Distinct from a
+            //    login wall and worth separating from one: signing in does not
+            //    clear it, and reloading does not either.
+            for marker in [
+                "validatecaptcha",
+                "/captcha",
+                "/errors/validate",
+                "challenge-form",
+                "px-captcha",
+                "unusual traffic",
+                "are you a robot",
+                "/bot-detect",
+            ] {
+                if lower.contains(marker) {
+                    return Some(format!(
+                        "the site served an anti-bot challenge ({url}) — it is blocking \
+                         automated access, not asking for a login. Stop navigating \
+                         this site; further requests are what deepen the block"
+                    ));
+                }
+            }
         }
 
-        // 2. Explicit "must log in" copy near the bottom of the page (modals,
-        //    interstitial screens, empty-cart nags).
+        // 3. Copy that means the same thing without saying it in the URL.
         let expr = r#"(() => {
-            const markers = [
+            const login = [
                 "log in to continue", "login to continue", "please sign in",
                 "please login", "sign in to continue", "you must be logged in",
                 "you need to log in", "you need to login", "login required",
@@ -418,16 +467,39 @@ impl CdpBrowser {
                 "log in to buy", "login to buy", "login to place your order",
                 "login to add", "please sign in to continue"
             ];
+            const bot = [
+                "make sure you're not a robot",
+                "enter the characters you see below",
+                "type the characters you see",
+                "sorry, we just need to make sure",
+                "automated access to amazon",
+                "discuss automated access",
+                "unusual traffic from your computer",
+                "verify you are human",
+                "checking your browser before accessing",
+                "enable javascript and cookies to continue"
+            ];
             const t = ((document.body && document.body.innerText) || "").toLowerCase();
-            return markers.filter(m => t.includes(m));
+            return {
+                login: login.filter(m => t.includes(m)),
+                bot: bot.filter(m => t.includes(m))
+            };
         })()"#;
         if let Ok(res) = page.evaluate(expr).await {
-            if let Ok(matched) = res.into_value::<Vec<String>>() {
-                if !matched.is_empty() {
+            if let Ok(found) = res.into_value::<WallMarkers>() {
+                if !found.bot.is_empty() {
+                    return Some(format!(
+                        "the page is an anti-bot check — it shows \"{}\" and the site \
+                         is refusing automated access. Stop; repeated requests make \
+                         the block worse",
+                        found.bot[0]
+                    ));
+                }
+                if !found.login.is_empty() {
                     return Some(format!(
                         "the page requires an account — it shows \"{}\" and the \
                          purchase cannot continue without logging in",
-                        matched[0]
+                        found.login[0]
                     ));
                 }
             }

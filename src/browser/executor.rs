@@ -245,7 +245,30 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
                 return Ok(ActionResult::fail(action_name, step_index, 1, "navigate needs a url".into()));
             }
             browser.navigate(url).await?;
-            Ok(ActionResult::ok(action_name, step_index, 1))
+            // `navigate` returning Ok means a request was made, not that we got
+            // the page. Verify where we actually are, and name it, so the next
+            // step is not handed a wall it will try to scrape.
+            let landed = browser.current_url().await.unwrap_or_default();
+            if !arrived_at(url, &landed) {
+                let wall = browser.page_wall_reason().await;
+                return Ok(ActionResult::fail(
+                    action_name,
+                    step_index,
+                    1,
+                    navigate_miss_reason(url, &landed, wall.as_deref()),
+                ));
+            }
+            // The landed URL is the receipt. On a redirect it differs from what
+            // was asked for, and that difference is worth seeing.
+            let note = if landed.trim_end_matches('/') == url.trim_end_matches('/') {
+                None
+            } else {
+                Some(format!("landed on {landed}"))
+            };
+            Ok(match note {
+                Some(n) => ActionResult::ok_note(action_name, step_index, 1, n),
+                None => ActionResult::ok(action_name, step_index, 1),
+            })
         }
         "click" => {
             let target = step.target.as_deref().unwrap_or("");
@@ -261,7 +284,7 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
             if result.get("ok").and_then(Value::as_bool).unwrap_or(false)
                 && is_purchase_click(target)
             {
-                if let Some(reason) = browser.login_wall_reason().await {
+                if let Some(reason) = browser.page_wall_reason().await {
                     let err = format!(
                         "purchase blocked — {reason}. Do NOT retry clicking; this site \
                          needs the user logged in. Continue elsewhere or report back."
@@ -572,6 +595,27 @@ fn arrived_at(requested: &str, actual: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Why a navigation that did not arrive is not a success.
+///
+/// `Page.navigate` resolves for any HTTP status, and `wait_for_navigation`
+/// resolves for any page load — including a bot interstitial, a consent wall, or
+/// a login redirect. So `browser.navigate` returning `Ok(())` says only that a
+/// request was made, and the third live run on 2026-10-03 reported
+/// `✔ open https://www.amazon.com` on the page Amazon had actually served.
+///
+/// Split out so the message can be tested; `arrived_at` already is.
+fn navigate_miss_reason(requested: &str, landed: &str, wall: Option<&str>) -> String {
+    let because = match wall {
+        Some(w) => format!("Blocked: {w}."),
+        None => "That is a different page than the one asked for.".to_string(),
+    };
+    format!(
+        "asked to open {requested} but ended up on {landed}. {because} Do not read \
+         this page as the one requested, and do not navigate again to \"fix\" it — \
+         repeated requests are what earns a block."
+    )
 }
 
 /// Generate JS to find an element by description and click it.
@@ -1110,6 +1154,44 @@ mod tests {
         let expr = find_and_click_expr(r#"the "best" laptop button"#);
         assert!(expr.contains(r#"\"best\""#), "{expr}");
         assert!(!expr.contains(r#""the "best""#), "unescaped quote: {expr}");
+    }
+
+    // --- did the navigation land on the page that was asked for? ------------
+
+    /// The 2026-10-03 outcome: `navigate` returned `Ok`, so the step was logged
+    /// `✔ open https://www.amazon.com`, on an anti-bot page.
+    ///
+    /// `Page.navigate` resolves for any status and `wait_for_navigation`
+    /// resolves for any page load, so neither said anything about what arrived.
+    #[test]
+    fn navigating_somewhere_else_is_not_arriving() {
+        let why = navigate_miss_reason(
+            "https://www.amazon.com",
+            "https://www.amazon.com/errors/validateCaptcha",
+            Some("the site served an anti-bot challenge"),
+        );
+        assert!(why.contains("validateCaptcha"), "must name where it went: {why}");
+        // It must tell the model not to retry, or the re-plan loop will hammer.
+        assert!(why.contains("do not navigate again"), "{why}");
+        assert!(why.to_lowercase().contains("anti-bot"), "{why}");
+    }
+
+    /// A redirect to the same host is arrival, so this path must not fire.
+    #[test]
+    fn a_redirect_within_the_site_is_still_arrival() {
+        assert!(arrived_at(
+            "https://amazon.com/dp/B08N5WRWNW",
+            "https://www.amazon.com/gp/product/B08N5WRWNW/ref=sr_1_1"
+        ));
+        let _ = navigate_miss_reason("x", "y", None);
+    }
+
+    /// With no wall identified, say so rather than implying a cause.
+    #[test]
+    fn an_unexplained_miss_does_not_invent_a_reason() {
+        let why = navigate_miss_reason("https://example.com/a", "https://other.test/", None);
+        assert!(why.contains("different page"), "{why}");
+        assert!(!why.contains("Blocked:"), "invented a cause: {why}");
     }
 
     // --- what a click is allowed to get away with -------------------------
