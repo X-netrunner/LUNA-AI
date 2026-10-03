@@ -369,7 +369,19 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
                     format!("searched '{query}' but ended up on '{landed}', not '{url}'"),
                 ));
             }
-            Ok(ActionResult::ok(action_name, step_index, 1))
+            // "✔ search for X" reads as *the results were there*. What has been
+            // proven is narrower: the search was issued and the page came back on
+            // the same host. Whether results rendered is `pick_best`'s question,
+            // and it answers that one separately. Showing the URL keeps the two
+            // claims from being read as one, and a redirect — a different query
+            // encoding, a country sub-path — shows up in the note instead of
+            // being silently absorbed.
+            let note = if landed.trim_end_matches('/') == url.trim_end_matches('/') {
+                format!("issued on {landed}")
+            } else {
+                format!("issued on {landed} (redirected from {url})")
+            };
+            Ok(ActionResult::ok_note(action_name, step_index, 1, note))
         }
         "fillform" => {
             let _instructions = step.target.as_deref().unwrap_or("use sensible sample values");
