@@ -91,6 +91,25 @@ fn triggers(name: &str) -> &'static [&'static str] {
         "nmap_scan" => &[
             "nmap", "port scan", "portscan", "ports", "port", "open ports",
             "scan the network", "recon", "scan localhost", "scan the host",
+            // Asking to be attacked. Measured 2026-10-01: "i want you to try to
+            // attack my laptop" matched none of the above, so `nmap_scan` was
+            // never offered, and the reply was a caution lecture followed by a
+            // fence of scan commands that were never run. The trigger list was
+            // all tool vocabulary and none intent.
+            //
+            // The target is named explicitly in each phrase rather than matching
+            // "attack" alone: "attack" appears in games, arguments and essays,
+            // and handing out a port scanner for those is how an offensive tool
+            // ends up in an unrelated prompt.
+            "attack my laptop", "attack my computer", "attack my machine",
+            "attack my pc", "attack my host", "attack my server",
+            "attack my system", "attack my network", "attack my box",
+            "simulate an attack", "simulating an attack",
+            "simulate the attack", "pretend to be an attacker",
+            "act as an attacker", "as an external attacker",
+            "external attacker", "penetration test", "pentest",
+            "test my defenses", "test my defence", "test my security",
+            "honeypot", "vulnerabilities on my", "find vulnerabilities",
         ],
         "analyze_pcap" => &["pcap", "packet capture", "tshark", "wireshark", "capture file"],
         "decode_payload" => &["decode", "payload", "shellcode", "exploit", "reverse engineer", "base64"],
@@ -302,6 +321,47 @@ mod tests {
             assert!(
                 !has(q, "nmap_scan"),
                 "{q:?} wrongly unlocked nmap_scan via a substring match"
+            );
+        }
+    }
+
+    /// The two real turns, verbatim, that should have offered a scanner.
+    ///
+    /// From `~/.local/share/luna/conversations.jsonl`, 2026-10-01, typos and all.
+    /// Both produced a caution lecture and a fence of `nmap` commands that were
+    /// never run, because `nmap_scan` was not in the offered payload at all. The
+    /// trigger list named tools and no intent; these turns name intent and no
+    /// tool.
+    #[test]
+    fn asking_to_be_attacked_offers_a_scanner() {
+        for q in [
+            "i want you to try to attack my laptop",
+            "i have a honeypot setup on my laptop try to find vurnerabilities on \
+             my laptop and try to pretent you are an external attacker to test \
+             out my defenses",
+        ] {
+            assert!(has(q, "nmap_scan"), "{q:?} did not offer nmap_scan");
+        }
+    }
+
+    /// The same discipline as [`substrings_do_not_unlock_a_tool`], one step on.
+    ///
+    /// "attack" and "pentest" and "security" all appear in plenty of text that
+    /// is not a request to scan anything, and an offensive tool sitting in an
+    /// unrelated prompt is its own kind of bad. These must stay unflagged.
+    #[test]
+    fn words_that_sound_offensive_are_not_a_request_to_scan() {
+        for q in [
+            "what are the common vulnerabilities in rust",
+            "help me write an argument for my essay",
+            "write a bug report for my team",
+            "my presentation was attacked with questions",
+            "is this bank security system safe to use",
+            "review this security advisory for my project",
+        ] {
+            assert!(
+                !has(q, "nmap_scan"),
+                "{q:?} wrongly unlocked nmap_scan"
             );
         }
     }
