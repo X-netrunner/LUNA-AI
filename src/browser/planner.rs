@@ -112,6 +112,79 @@ pub struct Planner {
     model: String,
 }
 
+/// Is `needle` a whole word inside `text`?
+///
+/// Substring matching is what makes a loose test loose: "keyboard" hides inside
+/// "keyboard shortcuts", and "best" inside "bestest". Boundaries are the whole
+/// point.
+fn word_in(text: &str, needle: &str) -> bool {
+    let tb = text.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = text[from..].find(needle) {
+        let at = from + rel;
+        let end = at + needle.len();
+        let left_ok = at == 0 || !tb[at - 1].is_ascii_alphanumeric();
+        let right_ok = end >= tb.len() || !tb[end].is_ascii_alphanumeric();
+        if left_ok && right_ok {
+            return true;
+        }
+        from = at + needle.len();
+        if from >= text.len() {
+            return false;
+        }
+    }
+    false
+}
+
+/// First `http(s)://` URL in free text, if any.
+fn url_in_text(text: &str) -> Option<String> {
+    let start = text.find("http://").or_else(|| text.find("https://"))?;
+    let rest = &text[start..];
+    // Stop at whitespace or a quote/bracket. Trailing sentence punctuation is
+    // trimmed so "visit https://x.com/y." yields "https://x.com/y".
+    let end = rest
+        .find(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | '}' | '`')
+        })
+        .unwrap_or(rest.len());
+    let mut url = rest[..end]
+        .trim_end_matches(['.', ',', ';', ':', '!', '?'])
+        .to_string();
+    if url.is_empty() {
+        return None;
+    }
+    Some(url)
+}
+
+/// Does this URL point at a specific page, rather than a bare homepage?
+///
+/// A bare host is not a destination the user chose: "search on duckduckgo.com"
+/// names a *site*, and planner rule 7 explicitly allows shortening those to a
+/// domain. A path, query or fragment is a page they pointed at, and truncating
+/// it is what turns a request into the wrong page.
+fn is_specific_url(url: &str) -> bool {
+    let Some(rest) = url.split_once("://").map(|(_, r)| r) else {
+        return false;
+    };
+    match rest.find('/') {
+        None => false,          // "example.com"
+        Some(i) => &rest[i..] != "/", // "example.com/" is still the homepage
+    }
+}
+
+/// Scheme, `www.` and a trailing `/` are not distinctions the user cares about.
+fn norm_url(u: &str) -> &str {
+    let s = u.trim();
+    let s = s.split_once("://").map(|(_, r)| r).unwrap_or(s);
+    let s = s.strip_prefix("www.").unwrap_or(s);
+    s.trim_end_matches('/')
+}
+
+/// Do two URLs land on the same page?
+fn same_destination(a: &str, b: &str) -> bool {
+    norm_url(a) == norm_url(b)
+}
+
 impl Planner {
     pub fn new(ollama_url: impl Into<String>, model: impl Into<String>) -> Self {
         let base = ollama_url.into();
@@ -135,14 +208,14 @@ impl Planner {
         let mut steps = self.parse_plan(&response)?;
         // Post-process for "best product" goals to ensure correct step order
         steps = Self::fix_best_product_plan(goal, steps);
+        // A URL the user gave is not the planner's to shorten.
+        steps = Self::enforce_goal_url(goal, steps);
         Ok(steps)
     }
 
     /// Fix plan for "best product" queries: ensure pick_best is used correctly.
     fn fix_best_product_plan(goal: &str, steps: Vec<Step>) -> Vec<Step> {
-        let goal_lower = goal.to_lowercase();
-        let is_best_product = goal_lower.contains("best product") || goal_lower.contains("best value");
-        if !is_best_product {
+        if !Self::wants_best_product(goal) {
             return steps;
         }
         // Find if pick_best exists
@@ -179,6 +252,123 @@ impl Planner {
         fixed
     }
 
+    /// Does the goal ask for a *chosen* product rather than a named one?
+    ///
+    /// The old check was `contains("best product") || contains("best value")`,
+    /// which is a phrase match against wording nobody types. Measured
+    /// 2026-10-03: the user asked for "the best laptop", so the predicate was
+    /// false, the whole post-processor was skipped, and the plan kept its
+    /// `click: the first product result` step — the exact step rule 11 exists
+    /// to forbid. The model was told to omit it and did not.
+    ///
+    /// The signal is "best" applied to something buyable, not one fixed phrase.
+    /// "the best laptop", "best value", "best rated", "best deal" are the same
+    /// request.
+    ///
+    /// The noun has to be *near* "best", and the goal has to read as a purchase.
+    ///
+    /// A flat `noun in goal` test is not enough: "what's the best way to clean a
+    /// keyboard" mentions a keyboard and is not a shopping request. Proximity
+    /// alone is not enough either — "find the best keyboard shortcuts" is a
+    /// lookup, and "best keyboard" is a purchase, and the two are the same four
+    /// words. The discriminator is the buying: cart, buy, order, price.
+    ///
+    /// Both conditions are required because the cost is asymmetric. This
+    /// function gates a rewrite that appends `click: Add to Cart`, so a false
+    /// positive puts something in the user's basket that they never asked for —
+    /// a side effect on the world, not a wrong answer in the chat. A false
+    /// negative only leaves a suboptimal step in a plan the model already chose.
+    /// When unsure, do nothing.
+    fn wants_best_product(goal: &str) -> bool {
+        const PURCHASE: &[&str] = &[
+            "cart", "buy", "purchase", "order", "checkout", "price", "cost",
+            "deal", "cheapest", "budget",
+        ];
+        const BUYABLE: &[&str] = &[
+            "laptop", "phone", "tablet", "monitor", "headphone", "keyboard", "mouse",
+            "camera", "watch", "tv", "console", "gpu", "ssd", "product", "value",
+            "deal", "option", "choice", "book", "router", "printer", "speaker",
+            "vacuum", "fridge", "oven", "laptop", "smartwatch", "earbuds", "tablet",
+        ];
+        let g = goal.to_lowercase();
+        let bytes = g.as_bytes();
+        let mut from = 0usize;
+        while let Some(rel) = g[from..].find("best") {
+            let at = from + rel;
+            // Whole word only: "bestest" or a name containing it is not a
+            // superlative.
+            let before_ok = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+            let after = at + 4;
+            let after_ok =
+                after >= bytes.len() || !bytes[after].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                // Four words is enough for "best rated 27 inch monitor" and
+                // short enough to exclude "best way to clean a keyboard".
+                let tail_end = g[after..]
+                    .char_indices()
+                    .filter(|(_, c)| c.is_whitespace())
+                    .nth(4)
+                    .map(|(i, _)| after + i)
+                    .unwrap_or(g.len());
+                let window = &g[after..tail_end];
+                if BUYABLE.iter().any(|n| word_in(window, n))
+                    && PURCHASE.iter().any(|p| word_in(&g, p))
+                {
+                    return true;
+                }
+            }
+            from = at + 4;
+            if from >= g.len() {
+                break;
+            }
+        }
+        false
+    }
+
+    /// Force a user-supplied URL to be the first navigate step, verbatim.
+    ///
+    /// Planner rule 7 asks the model to keep a full URL intact. Asking is not
+    /// the same as guaranteeing: the same 7B model that ignored rule 11 also
+    /// trimmed a DuckDuckGo AI URL down to the bare domain, which is the
+    /// "wrong url" confusion reported on 2026-10-03. A trimmed
+    /// `https://duckduckgo.com/?q=...&ia=chat` becomes the DDG homepage — the
+    /// page loads, looks plausible, and contains none of what was asked for.
+    ///
+    /// So the URL comes from the goal, not the plan. If the goal names a URL
+    /// with a path, a query or a fragment, that URL is what gets navigated to,
+    /// whatever the planner emitted. A goal with only a bare domain is left
+    /// alone: rule 7 allows shortening those, and `duckduckgo.com` in prose is
+    /// often shorthand for a search the planner should build.
+    fn enforce_goal_url(goal: &str, steps: Vec<Step>) -> Vec<Step> {
+        let Some(url) = url_in_text(goal) else {
+            return steps;
+        };
+        // A bare domain is not evidence of a specific destination.
+        if !is_specific_url(&url) {
+            return steps;
+        }
+
+        let first_nav = steps.iter().position(|s| s.action == "navigate");
+        match first_nav {
+            // Replace only if the planner navigated somewhere else first.
+            Some(i) => {
+                if steps[i].target.as_deref().map(|t| same_destination(t, &url)).unwrap_or(false) {
+                    return steps;
+                }
+                let mut fixed = steps;
+                fixed[i] = Step::navigate(&url);
+                fixed
+            }
+            // No navigate at all: prepend, rather than trusting the model to
+            // have meant the page it was already on.
+            None => {
+                let mut fixed = vec![Step::navigate(&url)];
+                fixed.extend(steps);
+                fixed
+            }
+        }
+    }
+
     /// Re-plan after a failure, given context.
     pub async fn replan(
         &self,
@@ -190,7 +380,11 @@ impl Planner {
     ) -> Result<Vec<Step>> {
         let prompt = self.build_replan_prompt(goal, completed, failed_step, error, remaining);
         let response = self.call_ollama(&prompt).await?;
-        self.parse_plan(&response)
+        let steps = self.parse_plan(&response)?;
+        // The same guarantee has to hold on the repair path, and it matters more
+        // there: a re-plan that trims the URL navigates away from the page the
+        // failing step was working on, so the retry starts from the homepage.
+        Ok(Self::enforce_goal_url(goal, steps))
     }
 
     fn build_prompt(&self, goal: &str) -> String {
@@ -424,6 +618,136 @@ Output ONLY JSON: {{"values":[{{"index":0,"value":"..."}}, {{"index":3,"choose":
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wording from the 2026-10-03 session. The old predicate matched
+    /// "best product" and "best value"; the user said "the best laptop", so the
+    /// post-processor returned early and left the forbidden
+    /// `click: the first product result` step in place.
+    #[test]
+    fn the_best_laptop_counts_as_a_best_product_goal() {
+        assert!(Planner::wants_best_product("open amazon and add the best laptop to my cart"));
+        assert!(Planner::wants_best_product("add the best value tablet to cart"));
+        assert!(Planner::wants_best_product("buy the best rated monitor"));
+    }
+
+    /// Widening the predicate must not hijack non-purchase "best" requests. A
+    /// plan for "what's the best way to clean a keyboard" must be left alone,
+    /// or pick_best gets inserted into a plan that has nothing to pick.
+    #[test]
+    fn best_without_a_product_is_not_a_purchase() {
+        assert!(!Planner::wants_best_product("what's the best way to clean a keyboard"));
+        assert!(!Planner::wants_best_product("find the best keyboard shortcuts"));
+        assert!(!Planner::wants_best_product("tell me a joke"));
+        // The case that forced the purchase requirement. "best keyboard" is a
+        // purchase; "best keyboard shortcuts" is a lookup, and the two differ
+        // only in the words after the noun. Proximity to "best" cannot tell
+        // them apart, so the buying verb is what decides.
+        assert!(!Planner::wants_best_product("find the best keyboard shortcuts for vscode"));
+        assert!(
+            Planner::wants_best_product("find the best keyboard and buy it"),
+            "a purchase verb anywhere in the goal is enough"
+        );
+    }
+
+    /// The full post-processor, on the plan the model actually produced.
+    #[test]
+    fn the_forbidden_product_click_is_removed_for_a_best_laptop_goal() {
+        let steps = vec![
+            Step::navigate("https://www.amazon.com"),
+            Step::search("best laptop"),
+            Step::click("the first product result"),
+            Step::pick_best(),
+            Step::click("Add to Cart"),
+        ];
+        // The goal string exactly as Luna passed it in the 2026-10-03 log.
+        let fixed = Planner::fix_best_product_plan(
+            "open amazon and add the best laptop to cart",
+            steps,
+        );
+        assert!(
+            !fixed.iter().any(|s| {
+                s.target.as_deref().is_some_and(|t| t.contains("first product"))
+            }),
+            "the product-click step rule 11 forbids survived: {:?}",
+            fixed.iter().map(|s| (&s.action, &s.target)).collect::<Vec<_>>()
+        );
+        assert!(fixed.iter().any(|s| s.action == "pick_best"));
+    }
+
+    /// The DuckDuckGo case. The model emitted the bare domain, so the browser
+    /// landed on the homepage: a page that loads fine and contains none of what
+    /// was asked for, which is what read as "wrong url".
+    #[test]
+    fn a_query_string_url_in_the_goal_survives_the_planner() {
+        let goal = "check https://duckduckgo.com/?q=best+laptop+2026&ia=chat and tell me the answer";
+        let steps = vec![
+            Step::navigate("duckduckgo.com"),
+            Step::search("best laptop 2026"),
+        ];
+        let fixed = Planner::enforce_goal_url(goal, steps);
+        assert_eq!(
+            fixed[0].action, "navigate",
+            "first step should still be the navigation"
+        );
+        assert_eq!(
+            fixed[0].target.as_deref(),
+            Some("https://duckduckgo.com/?q=best+laptop+2026&ia=chat"),
+            "the planner's trimmed domain replaced the user's URL"
+        );
+    }
+
+    /// A bare domain is not a specific destination. Rule 7 allows shortening
+    /// those, and hijacking them would break ordinary searches.
+    #[test]
+    fn a_bare_domain_is_left_to_the_planner() {
+        let steps = vec![Step::navigate("duckduckgo.com"), Step::search("best laptop")];
+        let fixed = Planner::enforce_goal_url("search on duckduckgo.com for a laptop", steps);
+        assert_eq!(
+            fixed[0].target.as_deref(),
+            Some("duckduckgo.com"),
+            "a bare host was rewritten"
+        );
+    }
+
+    /// When the planner got it right, leave it right. A fix that rewrites
+    /// correct plans is its own bug.
+    #[test]
+    fn an_already_correct_navigation_is_untouched() {
+        let url = "https://docs.google.com/forms/d/e/xyz/viewform";
+        let steps = vec![Step::navigate(url), Step::fill_form("use my email")];
+        let fixed = Planner::enforce_goal_url(&format!("fill out {url} please"), steps.clone());
+        assert_eq!(fixed.len(), steps.len());
+        assert_eq!(fixed[0].target.as_deref(), Some(url));
+    }
+
+    /// A plan with no navigation at all still gets the user's URL, rather than
+    /// being left to act on a page nobody chose.
+    #[test]
+    fn a_url_in_the_goal_is_prepended_when_the_plan_never_navigates() {
+        let url = "https://example.com/reports/42";
+        let steps = vec![Step::click("Download"), Step::click("Add to Cart")];
+        let n = steps.len();
+        let fixed = Planner::enforce_goal_url(&format!("download the report from {url}"), steps);
+        assert_eq!(fixed[0].action, "navigate");
+        assert_eq!(fixed[0].target.as_deref(), Some(url));
+        assert_eq!(fixed.len(), n + 1);
+    }
+
+    #[test]
+    fn urls_are_read_out_of_running_text() {
+        assert_eq!(
+            url_in_text("go to https://example.com/a/b?c=1 and read it"),
+            Some("https://example.com/a/b?c=1".into())
+        );
+        assert_eq!(
+            url_in_text("see (https://example.com/x)."),
+            Some("https://example.com/x".into())
+        );
+        assert_eq!(url_in_text("no url here"), None);
+        assert!(is_specific_url("https://example.com/a"));
+        assert!(!is_specific_url("https://example.com"));
+        assert!(!is_specific_url("https://example.com/"));
+    }
 
     #[test]
     fn parse_step_variants() {

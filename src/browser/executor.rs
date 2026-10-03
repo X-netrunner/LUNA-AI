@@ -10,6 +10,174 @@ use crate::browser::{cdp::CdpBrowser, dom, planner::Planner, Step, types::Action
 const MAX_RETRIES: u32 = 3;
 const STEP_TIMEOUT_SECS: u64 = 30;
 
+/// Hard ceiling on steps executed in one plan, replans included.
+///
+/// The loop this bounds had no ceiling at all. Measured 2026-10-03: a five-step
+/// "add the best laptop to cart" plan reached step 16 and was still going when
+/// the user hit Ctrl-C, with `steps` growing by two on every failure.
+const MAX_TOTAL_STEPS: usize = 30;
+
+/// Hard ceiling on re-plans across the whole plan, not per step.
+const MAX_REPLANS: u32 = 6;
+
+/// Why a plan stopped, so the caller can report a reason instead of a hang.
+///
+/// Every variant here is a case that used to be indistinguishable from "still
+/// working". `PlanFinished` is the only one that means the goal was met.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    PlanFinished,
+    RetriesExhausted,
+    ReplansExhausted,
+    StepBudgetExhausted,
+}
+
+impl std::fmt::Display for Stop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Stop::PlanFinished => "the plan finished",
+            Stop::RetriesExhausted => {
+                "a step failed three times in a row and was skipped"
+            }
+            Stop::ReplansExhausted => "it re-planned six times without converging",
+            Stop::StepBudgetExhausted => {
+                "it ran out of steps before finishing the plan"
+            }
+        };
+        f.write_str(s)
+    }
+}
+
+/// Bookkeeping for the re-plan loop, with no browser and no planner in it.
+///
+/// Extracted so the loop's *decisions* are testable. The bug this exists for
+/// was not reachable from a test: `execute_plan` needs a live `CdpBrowser` and
+/// a model call, so a loop that provably never terminates sat behind both.
+///
+/// # The loop, and why it never ended
+///
+/// `retry_count` was reset to zero by every successful step, and every re-plan
+/// *inserted* a step that then succeeded. So the counter never accumulated past
+/// one, `MAX_RETRIES` was never reached, and the `while current_step <
+/// steps.len()` condition kept being satisfied by the very steps being added.
+/// The plan grew without bound.
+///
+/// The fix is not a bigger `MAX_RETRIES`. It is that a step the re-plan itself
+/// inserted is not evidence of recovery: it is the repair, running. Only a
+/// success on a step from the original plan may clear the failure count.
+#[derive(Debug)]
+pub struct LoopControl {
+    /// `(step, inserted_by_replan)`.
+    steps: Vec<(Step, bool)>,
+    cursor: usize,
+    consecutive_failures: u32,
+    replans: u32,
+    executed: usize,
+}
+
+impl LoopControl {
+    pub fn new(steps: Vec<Step>) -> Self {
+        Self {
+            steps: steps.into_iter().map(|s| (s, false)).collect(),
+            cursor: 0,
+            consecutive_failures: 0,
+            replans: 0,
+            executed: 0,
+        }
+    }
+
+    /// The step to run now, or `None` if the plan is done or out of budget.
+    pub fn current(&self) -> Option<&Step> {
+        if self.stop_reason().is_some() {
+            return None;
+        }
+        self.steps.get(self.cursor).map(|(s, _)| s)
+    }
+
+    /// Why the plan will not run another step, if it will not.
+    pub fn stop_reason(&self) -> Option<Stop> {
+        if self.cursor >= self.steps.len() {
+            return Some(Stop::PlanFinished);
+        }
+        if self.executed >= MAX_TOTAL_STEPS {
+            return Some(Stop::StepBudgetExhausted);
+        }
+        if self.replans >= MAX_REPLANS {
+            return Some(Stop::ReplansExhausted);
+        }
+        None
+    }
+
+    /// A step ran and worked.
+    ///
+    /// Returns `true` if it was an original-plan step, which is the only thing
+    /// permitted to clear the failure count.
+    pub fn record_success(&mut self) -> bool {
+        let from_plan = self.steps.get(self.cursor).map(|(_, r)| !r).unwrap_or(false);
+        self.executed += 1;
+        self.cursor += 1;
+        if from_plan {
+            self.consecutive_failures = 0;
+        }
+        from_plan
+    }
+
+    /// A step ran and failed. Returns whether a re-plan is still permitted.
+    pub fn record_failure(&mut self) -> bool {
+        self.executed += 1;
+        self.consecutive_failures += 1;
+        self.consecutive_failures < MAX_RETRIES && self.replans < MAX_REPLANS
+    }
+
+    /// Splice corrective steps in at the cursor and account for the re-plan.
+    pub fn insert_replan(&mut self, corrective: Vec<Step>) {
+        self.replans += 1;
+        self.steps.splice(
+            self.cursor..self.cursor,
+            corrective.into_iter().map(|s| (s, true)),
+        );
+    }
+
+    /// Give up on the failing step and move past it.
+    pub fn skip(&mut self) {
+        self.executed += 1;
+        self.cursor += 1;
+        self.consecutive_failures = 0;
+    }
+
+    #[cfg(test)]
+    pub fn executed(&self) -> usize {
+        self.executed
+    }
+
+    /// The plan length, which grows as re-plans insert steps. The old loop
+    /// used this as its only termination condition, so a growing plan was a
+    /// reason to keep going rather than a reason to stop.
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
+
+    pub fn cursor_index(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn completed_steps(&self) -> Vec<Step> {
+        self.steps[..self.cursor].iter().map(|(s, _)| s.clone()).collect()
+    }
+
+    pub fn remaining_steps(&self) -> Vec<Step> {
+        self.steps
+            .iter()
+            .skip(self.cursor + 1)
+            .map(|(s, _)| s.clone())
+            .collect()
+    }
+
+    pub fn replans(&self) -> u32 {
+        self.replans
+    }
+}
+
 /// Execute a single step in the browser.
 async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step: &Step, step_index: u64) -> Result<ActionResult> {
     let action_name = step.action.clone();
@@ -215,18 +383,20 @@ pub async fn execute_plan(
     browser: &CdpBrowser,
     planner: &Planner,
     goal: &str,
-    mut steps: Vec<Step>,
+    steps: Vec<Step>,
 ) -> Result<Vec<String>> {
     let mut history = Vec::new();
-    let mut current_step = 0;
-    let mut retry_count = 0;
-    let total_steps = steps.len();
+    let mut plan = LoopControl::new(steps);
+    let total_steps = plan_len(&plan);
 
-    while current_step < steps.len() {
-        let step = steps[current_step].clone();
+    loop {
+        let Some(step) = plan.current().cloned() else {
+            break;
+        };
+        let index = plan.cursor_index();
 
         // Execute with timeout
-        let result = timeout(Duration::from_secs(STEP_TIMEOUT_SECS), execute_step(browser, planner, goal, &step, current_step as u64))
+        let result = timeout(Duration::from_secs(STEP_TIMEOUT_SECS), execute_step(browser, planner, goal, &step, index as u64))
             .await
             .context("step timed out")??;
 
@@ -234,42 +404,66 @@ pub async fn execute_plan(
         history.push(desc.clone());
 
         if result.success {
-            current_step += 1;
-            retry_count = 0;
-            tracing::info!("Step {}/{}: {}", current_step, total_steps, desc);
-        } else {
-            let error = result.error.unwrap_or_else(|| "unknown error".into());
-            tracing::warn!("Step {}/{} failed: {}", current_step + 1, total_steps, error);
+            let from_plan = plan.record_success();
+            tracing::info!("Step {}/{}: {}", plan.cursor_index(), total_steps, desc);
+            if !from_plan {
+                // Worth saying out loud, because it is the whole reason this
+                // loop used to be infinite: the repair running is not recovery.
+                tracing::debug!("  (re-plan step succeeded; retry count stands)");
+            }
+            continue;
+        }
 
-            if retry_count < MAX_RETRIES {
-                let completed: Vec<Step> = steps.iter().take(current_step).cloned().collect();
-                let remaining: Vec<Step> = steps.iter().skip(current_step + 1).cloned().collect();
+        let error = result.error.unwrap_or_else(|| "unknown error".into());
+        tracing::warn!(
+            "Step {}/{} failed: {}",
+            plan.cursor_index() + 1,
+            total_steps,
+            error
+        );
 
-                match planner.replan(goal, &completed, &step, &error, &remaining).await {
-                    Ok(corrective_steps) if !corrective_steps.is_empty() => {
-                        tracing::info!("Replan: inserting {} corrective step(s)", corrective_steps.len());
-                        steps.splice(current_step..current_step, corrective_steps);
-                        retry_count += 1;
-                        continue;
-                    }
-                    _ => {
-                        retry_count += 1;
-                        if retry_count >= MAX_RETRIES {
-                            tracing::error!("Max retries reached for step, skipping");
-                            current_step += 1;
-                            retry_count = 0;
-                        }
-                    }
-                }
-            } else {
-                tracing::error!("Max retries reached for step, skipping");
-                current_step += 1;
-                retry_count = 0;
+        if !plan.record_failure() {
+            tracing::error!(
+                "Giving up on this step after {} attempts: {}",
+                MAX_RETRIES,
+                error
+            );
+            plan.skip();
+            continue;
+        }
+
+        let completed = plan.completed_steps();
+        let remaining = plan.remaining_steps();
+        match planner.replan(goal, &completed, &step, &error, &remaining).await {
+            Ok(corrective) if !corrective.is_empty() => {
+                tracing::info!(
+                    "Replan {}/{}: inserting {} corrective step(s) — {}",
+                    plan.replans() + 1,
+                    MAX_REPLANS,
+                    corrective.len(),
+                    error
+                );
+                plan.insert_replan(corrective);
+            }
+            _ => {
+                tracing::warn!("Re-plan returned nothing usable; skipping this step");
+                plan.skip();
             }
         }
     }
 
+    if let Some(stop) = plan.stop_reason() {
+        if stop != Stop::PlanFinished {
+            tracing::warn!("Plan stopped early: {stop}");
+            history.push(format!("  ✘ stopped: {stop}"));
+        }
+    }
+
     Ok(history)
+}
+
+fn plan_len(plan: &LoopControl) -> usize {
+    plan.len()
 }
 
 fn describe_step(step: &Step, result: &ActionResult) -> String {
@@ -318,6 +512,153 @@ fn percent_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn step(action: &str, target: &str) -> Step {
+        Step {
+            action: action.into(),
+            target: Some(target.into()),
+            value: None,
+            is_last: false,
+        }
+    }
+
+    /// The loop from the 2026-10-03 session, driven exactly as the log drove it.
+    ///
+    /// The plan was: navigate, search, click the first product, add to cart.
+    /// `pick_best` failed with "no scorable product cards found", the re-plan
+    /// inserted a step, that step succeeded, the retry count reset to zero, and
+    /// the next step failed — forever. The log reached step 16 and the user
+    /// killed it.
+    ///
+    /// The shape that matters is the alternation: fail, repair-succeeds,
+    /// fail, repair-succeeds. Against the old bookkeeping this never ends.
+    #[test]
+    fn the_replan_loop_terminates_where_it_used_to_run_forever() {
+        let mut plan = LoopControl::new(vec![
+            step("navigate", "amazon.com"),
+            step("search", "best laptop"),
+            step("pick_best", ""),
+            step("click", "Add to Cart"),
+        ]);
+
+        let mut iterations = 0;
+        // The old loop's only stop condition was `cursor < steps.len()`, which
+        // the re-plans kept satisfying. Bound the harness too, so this test
+        // fails loudly rather than hanging if the bug returns.
+        while plan.current().is_some() && iterations < 500 {
+            iterations += 1;
+            let s = plan.current().unwrap().clone();
+            if s.action == "pick_best" || s.action == "click" {
+                if plan.record_failure() {
+                    plan.insert_replan(vec![step("click", "the first product result")]);
+                } else {
+                    plan.skip();
+                }
+            } else {
+                plan.record_success();
+            }
+        }
+
+        assert!(
+            iterations < 100,
+            "the loop did not converge in {iterations} iterations"
+        );
+        assert!(
+            plan.current().is_none(),
+            "still running after {iterations} iterations"
+        );
+        assert_eq!(
+            plan.stop_reason(),
+            Some(Stop::ReplansExhausted),
+            "should stop because re-planning never converged, not because the plan finished"
+        );
+        assert!(
+            plan.len() > 4,
+            "the test did not actually exercise re-planning (len {})",
+            plan.len()
+        );
+    }
+
+    /// The specific mechanism. A step the re-plan inserted is the repair
+    /// running; it is not evidence that the plan recovered. When it was allowed
+    /// to clear the failure count, the count could never reach `MAX_RETRIES`.
+    #[test]
+    fn a_successful_repair_step_does_not_clear_the_failure_count() {
+        let mut plan = LoopControl::new(vec![step("click", "Add to Cart")]);
+
+        assert!(plan.record_failure(), "first failure may re-plan");
+        plan.insert_replan(vec![step("click", "the first product result")]);
+
+        // The repair succeeds. This must NOT hand the plan a clean slate.
+        let from_plan = plan.record_success();
+        assert!(!from_plan, "a re-plan step must not count as plan progress");
+
+        // So the next failure is the second consecutive one, and only the third
+        // may skip the step.
+        assert!(plan.record_failure(), "second failure may still re-plan");
+        assert!(!plan.record_failure(), "third failure must skip");
+        // Refusing a re-plan is not itself "stopped" — the caller skips the
+        // step, which is what ends a one-step plan.
+        plan.skip();
+        assert_eq!(plan.stop_reason(), Some(Stop::PlanFinished));
+        assert_eq!(plan.executed(), 5, "3 failures + 1 repair + the skip");
+    }
+
+    /// The absolute bound. Even a plan where every step succeeds and every
+    /// failure re-plans must stop.
+    #[test]
+    fn the_step_budget_bounds_a_plan_that_never_settles() {
+        let mut plan = LoopControl::new(vec![step("navigate", "amazon.com")]);
+        let mut n = 0;
+        while plan.current().is_some() && n < 1000 {
+            n += 1;
+            if plan.record_failure() {
+                plan.insert_replan(vec![step("click", "Add to Cart")]);
+            } else {
+                plan.skip();
+            }
+        }
+        assert!(plan.current().is_none(), "still running after {n} iterations");
+        assert!(plan.executed() <= MAX_TOTAL_STEPS + MAX_RETRIES as usize);
+        assert!(matches!(
+            plan.stop_reason(),
+            Some(Stop::ReplansExhausted) | Some(Stop::StepBudgetExhausted)
+        ));
+    }
+
+    /// A plan that just works is unaffected, and reports `PlanFinished` rather
+    /// than one of the failure stops.
+    #[test]
+    fn a_working_plan_finishes_normally() {
+        let mut plan = LoopControl::new(vec![
+            step("navigate", "amazon.com"),
+            step("click", "Add to Cart"),
+        ]);
+        assert!(plan.record_success());
+        assert!(plan.record_success());
+        assert_eq!(plan.stop_reason(), Some(Stop::PlanFinished));
+        assert!(plan.current().is_none());
+        assert_eq!(plan.replans(), 0);
+    }
+
+    /// Two original steps failing in a row *should* count. The fix must not
+    /// have broken the ordinary retry case it was protecting.
+    #[test]
+    fn two_real_failures_still_count_as_two() {
+        let mut plan = LoopControl::new(vec![
+            step("click", "a"),
+            step("click", "b"),
+        ]);
+        assert!(plan.record_failure());
+        plan.insert_replan(vec![step("wait", "")]);
+        // The repair runs and the ORIGINAL step is retried.
+        plan.record_success(); // the wait
+        let at_b = plan.current().unwrap().clone();
+        assert_eq!(at_b.action, "click");
+        assert!(plan.record_failure(), "b's first failure may re-plan");
+        assert!(!plan.record_failure(), "b's second failure must skip");
+    }
+
     #[test]
     fn test_percent_encode() {
         assert_eq!(percent_encode("ps4 on amazon.com"), "ps4%20on%20amazon.com");

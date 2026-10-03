@@ -162,8 +162,14 @@ pub fn dom_pick_best_expr() -> &'static str {
     const m = (s || '').match(/([\d,]+\.?\d*)/);
     return m ? parseFloat(m[1].replace(/,/g, '')) : null;
   };
-  const cards = [...document.querySelectorAll('[data-component-type="s-search-result"], .sg-col-20of24 .a-cardui, .product-card, [data-asin], .a-section.a-spacing-base')];
+  const cards = [...document.querySelectorAll('[data-component-type="s-search-result"], .sg-col-20of24 .a-cardui, .product-card, [data-asin], [data-testid="product-card"], .a-section.a-spacing-base')];
   let best = null, bestScore = -Infinity, bestLink = null;
+  // Counts for the failure message. "found no cards" and "found cards but
+  // could not score them" are different bugs with different fixes, and the old
+  // code reported both as "no scorable product cards found", which is why a
+  // stale selector looked like a broken planner and sent the re-plan loop
+  // guessing six times.
+  let withStars = 0, withReviews = 0, withPrice = 0;
   for (const card of cards) {
     // Title element (usually a link)
     const titleEl = card.querySelector('h2 a, h3 a, .a-text-bold a, [data-cy="title-recipe"] a, h2, h3, .a-text-bold, [data-cy="title-recipe"]');
@@ -173,23 +179,45 @@ pub fn dom_pick_best_expr() -> &'static str {
     const starsEl = card.querySelector('[aria-label*="out of 5 stars" i], [aria-label*="star" i], .a-icon-alt');
     const starsText = starsEl?.getAttribute('aria-label') || starsEl?.textContent || '';
     const stars = parseNum(starsText);
+    if (stars != null) withStars++;
     // Reviews (aria-label like "12,345 ratings")
     const revEl = card.querySelector('[aria-label*="rating" i], [aria-label*="review" i], .a-size-base.a-link-normal');
     const revText = revEl?.getAttribute('aria-label') || revEl?.textContent || '';
     const reviews = parseNum(revText);
+    if (reviews != null) withReviews++;
     // Price (whole + fraction)
     const priceWhole = card.querySelector('.a-price-whole, [data-a-color="price"] .a-offscreen')?.textContent || '';
     const priceFrac = card.querySelector('.a-price-fraction')?.textContent || '';
     const priceText = priceWhole + (priceFrac ? '.' + priceFrac : '');
-    const price = parseNum(priceText) || 1;
+    const price = parseNum(priceText);
+    if (price != null && price > 0) withPrice++;
     if (stars == null || reviews == null) continue;
-    const score = stars * Math.log(reviews + 1) / price;
+    // An unreadable price must NOT become 1.
+    //
+    // `parseNum(priceText) || 1` scored a card with no readable price as
+    // stars*ln(reviews+1)/1, which beats every genuinely-priced card on the
+    // page. If the price selector stops matching a site — one selector miss,
+    // and these are Amazon-class class names — the ranking silently becomes
+    // "most reviewed item" and reports it as a confident pick rather than as a
+    // failure. Cost becomes the one input that gets ignored precisely when it
+    // cannot be read.
+    //
+    // Rank unpriced cards last instead of dropping them: dropping them is what
+    // produced "no scorable product cards found" in the first place.
+    const UNPRICED = 1e9;
+    const divisor = (price != null && price > 0) ? price : UNPRICED;
+    const score = stars * Math.log(reviews + 1) / divisor;
     // Find clickable link for the product
     const link = titleEl?.tagName === 'A' ? titleEl : card.querySelector('a[href*="/dp/"], a[href*="/gp/product/"], a.a-link-normal');
     if (!link) continue;
-    if (score > bestScore) { bestScore = score; best = { title, stars, reviews, price, score }; bestLink = link; }
+    if (score > bestScore) { bestScore = score; best = { title, stars, reviews, price: (price != null && price > 0) ? price : null, score: Math.round(score * 1000) / 1000 }; bestLink = link; }
   }
-  if (!bestLink) return { ok: false, error: "no scorable product cards found" };
+  if (!bestLink) {
+    if (!cards.length) {
+      return { ok: false, error: 'no product cards matched the selectors on this page — the layout may have changed, or the page has not finished loading', cards_seen: 0, with_stars: 0, with_reviews: 0, with_prices: 0 };
+    }
+    return { ok: false, error: 'found ' + cards.length + ' product cards but could not score any: ' + withStars + ' had a star rating, ' + withReviews + ' had a review count, ' + withPrice + ' had a readable price', cards_seen: cards.length, with_stars: withStars, with_reviews: withReviews, with_prices: withPrice };
+  }
   // Click the product link to open detail page
   const r = bestLink.getBoundingClientRect();
   const x = r.left + r.width / 2, y = r.top + r.height / 2;
