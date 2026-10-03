@@ -1698,6 +1698,9 @@ pub(crate) enum Unsupported {
     PortsNotReported(Vec<u16>),
     /// A service version that no tool reported.
     VersionNotReported { service: String, version: String },
+    /// One CVE identifier repeated across enough services that at most one of
+    /// those attributions can be correct.
+    CveRepeated { id: String, times: usize },
     /// Output presented as a result that matches nothing any tool returned.
     NoSuchOutput,
 }
@@ -1718,6 +1721,14 @@ impl std::fmt::Display for Unsupported {
                     list.join(", ")
                 )
             }
+            Unsupported::CveRepeated { id, times } => write!(
+                f,
+                "{id} appears {times} times, attributed to different services. One \
+                 identifier cannot be the known vulnerability of all of them, so at \
+                 least one of those attributions is invented. `searchsploit {id}` \
+                 and `nmap --script vuln` give the real associations — report \
+                 what those return, or say you did not look"
+            ),
             Unsupported::VersionNotReported { service, version } => write!(
                 f,
                 "no tool reported {service} running version {version}. If you do \
@@ -2379,7 +2390,82 @@ fn strip_version_claim(text: &str, service: &str, version: &str) -> String {
 }
 
 /// The first claim in `text` that this turn's tools did not produce.
+    /// How many times one CVE identifier may appear in a reply before the reply is
+/// treated as having invented it.
+///
+/// This is a threshold and not a proof, and the honest reason is that no purely
+/// local rule can be. A CVE genuinely does sometimes apply to several products
+/// at once when they share a library, so "the same CVE twice" cannot be called
+/// false on its own. But the corpus case is not twice: on 2026-10-02 at 20:00 a
+/// single identifier, `CVE-2023-27869`, was attributed to Postfix, BIND, Apache
+/// (twice), Samba, MySQL, xrdp and PostgreSQL — eight mentions, seven distinct
+/// services, one string. At most one of those associations can be right, and a
+/// shared-library CVE does not plausibly cover all seven.
+///
+/// Three is where the shape stops reading as advice and starts reading as a
+/// token filling every slot. The cost when the threshold is wrong is that a
+/// correct reply gets asked to show its work — which is why the correction
+/// demands evidence rather than declaring the reply false, since it might not
+/// be.
+const CVE_REPEAT_LIMIT: usize = 3;
+
+/// CVE identifiers mentioned in a reply, lowercased, with how often each appears.
+fn cve_mentions(text: &str) -> Vec<(String, usize)> {
+    let bytes = text.as_bytes();
+    // Case-insensitive, because "cve-2023-27869" is the same identifier and a
+    // reply that mixes cases is still one claim. Offsets into the lowercased
+    // copy are used to slice the original, so the lengths must line up.
+    let lower = text.to_lowercase();
+    if lower.len() != bytes.len() {
+        return Vec::new();
+    }
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel) = lower[cursor..].find("cve-") {
+        let start = cursor + rel;
+        let mut end = start + 4;
+        while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'-') {
+            end += 1;
+        }
+        let id = &text[start..end];
+        let b = id.as_bytes();
+        // Canonical shape `CVE-YYYY-N`: "CVE" is b[0..3], so the first dash
+        // is b[3], not b[4]. Both dashes present, trailing group all digits with
+        // at least one. "CVE-" alone, "see CVE-notes" and "CVE-2023" are prose
+        // about the scheme, not claims about a product.
+        let valid = b.len() >= 10
+            && b[3] == b'-'
+            && b[4..8].iter().all(u8::is_ascii_digit)
+            && b[8] == b'-'
+            && b[9..].iter().all(u8::is_ascii_digit);
+        if valid {
+            let key = id.to_lowercase();
+            match counts.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((key, 1)),
+            }
+        }
+        cursor = if end > start { end } else { start + 4 };
+    }
+    counts
+}
+
+/// The first CVE that appears too many times to be a finding.
+fn cve_overused(text: &str) -> Option<Unsupported> {
+    cve_mentions(text)
+        .into_iter()
+        .find(|(_, n)| *n >= CVE_REPEAT_LIMIT)
+        .map(|(id, times)| Unsupported::CveRepeated { id, times })
+}
+
 pub(crate) fn unsupported_evidence(text: &str, receipt: &[Receipt]) -> Option<Unsupported> {
+    // A repeated CVE identifier is caught first because no fence walk finds it:
+    // the same string in her own voice, eight times, across a service inventory.
+    // It is also the claim least like a formatting slip and most like a
+    // placeholder, so it is the one most worth interrupting.
+    if let Some(over) = cve_overused(text) {
+        return Some(over);
+    }
     // A port table is the most consequential thing she can invent here and the
     // most exactly checkable, so it goes first and is checked across the whole
     // answer rather than per block — the table and the prose around it are
@@ -2432,7 +2518,8 @@ pub(crate) fn unsupported_evidence(text: &str, receipt: &[Receipt]) -> Option<Un
         });
     }
 
-    // A service version is the next most consequential exactly-checkable claim
+
+// A service version is the next most consequential exactly-checkable claim
     // after a port, and unlike prose it needs no paraphrase matching: a version
     // is a token, so either the scan printed it or it did not.
     //
@@ -3725,8 +3812,8 @@ line2"}"#,
 #[cfg(test)]
 mod fabrication_tests {
     use super::{
-        receipt_footer, strip_unsupported, unsupported_evidence, version_claims,
-        version_supported, Receipt, Unsupported,
+        cve_mentions, receipt_footer, strip_unsupported, unsupported_evidence,
+        version_claims, version_supported, Receipt, Unsupported,
     };
 
     /// What `nmap -p-` actually returned on this host. Note 443 is absent, and
@@ -3845,6 +3932,90 @@ Nmap done: 1 IP address (1 host up) scanned in 0.01 seconds";
             ),
             "'2.4' was accepted from '2.45' — a different version sharing a prefix"
         );
+    }
+
+    // ── repeated CVE identifiers ─────────────────────────────────────────
+
+    /// The real turn, trimmed to the pattern. 2026-10-02 at 20:00, in reply to
+    /// "go through each of the ports and find which of them are exploitable".
+    ///
+    /// One identifier, `CVE-2023-27869`, attributed to seven unrelated services
+    /// in a single answer. Whatever that CVE actually is — and it is a SAP
+    /// NetWeaver deserialization bug, not a general one — at most one of those
+    /// seven associations is correct. This is the one fabrication in the corpus
+    /// that needs no database to prove.
+    #[test]
+    fn one_cve_pasted_across_every_service_is_caught() {
+        let answer = "### Port 25 (SMTP)\n- **Service:** Postfix smtpd 3.4.10\n\
+             - **Vulnerability:** Postfix has several known vulnerabilities, \
+             including CVE-2023-27869.\n\n\
+             ### Port 53 (DNS)\n- **Service:** ISC BIND 9.11.3-1ubuntu1.14-Ubuntu\n\
+             - **Vulnerability:** BIND has several known vulnerabilities, \
+             including CVE-2023-27869.\n\n\
+             ### Port 80 (HTTP)\n- **Service:** Apache httpd 2.4.41\n\
+             - **Vulnerability:** Apache 2.4.41 has several known \
+             vulnerabilities, including CVE-2023-27869.\n\n\
+             ### Port 139/445 (SMB)\n- **Service:** Samba smbd 4.9.9-Ubuntu\n\
+             - **Vulnerability:** Samba has several known vulnerabilities, \
+             including CVE-2023-27869.\n\n\
+             ### Port 3306 (MySQL)\n- **Service:** MySQL 5.7.31\n\
+             - **Vulnerability:** MySQL has several known vulnerabilities, \
+             including CVE-2023-27869.";
+        match unsupported_evidence(answer, &[]) {
+            Some(Unsupported::CveRepeated { id, times }) => {
+                assert_eq!(id, "cve-2023-27869");
+                assert_eq!(times, 5);
+            }
+            other => panic!("the pasted CVE passed: {other:?}"),
+        }
+        // And the message points at the actual means of finding out, rather than
+        // only objecting.
+        let why = Unsupported::CveRepeated { id: "cve-2023-27869".into(), times: 5 }.to_string();
+        assert!(why.contains("searchsploit"), "{why}");
+    }
+
+    /// The threshold exists to avoid accusing correct advice, so the correct
+    /// shape has to survive it.
+    ///
+    /// One mention per affected service, and different CVEs per service, are
+    /// both ordinary. Also: a CVE quoted *twice* is not flagged even though a
+    /// shared-library CVE can legitimately apply to two products.
+    #[test]
+    fn correct_cve_advice_is_not_flagged() {
+        for answer in [
+            "- **vsftpd 3.0.3** has a known vulnerability (CVE-2011-1487) where a \
+             malicious user can exploit it to gain root access.",
+            "Postfix has several known vulnerabilities, including CVE-2023-27869.",
+            // Same identifier, two products: legal under the threshold.
+            "This affects both Postfix and BIND. See CVE-2021-1234 for details, \
+             and CVE-2021-1234 also covers the resolver.",
+        ] {
+            // A receipt that reports the version, so this tests the CVE rule and
+            // not the version rule. Without it the first case is flagged for
+            // naming a version no scan returned — correctly, but not the point.
+            let ok = vec![Receipt::new(
+                "nmap_scan",
+                true,
+                "21/tcp open ftp vsftpd 3.0.3\n25/tcp open smtp Postfix 3.4.10\n",
+            )];
+            assert_eq!(
+                unsupported_evidence(answer, &ok),
+                None,
+                "correct CVE advice was flagged:\n{answer}"
+            );
+        }
+    }
+
+    /// The scheme is not a claim. "CVE-" with no identifier, and prose about the
+    /// naming scheme, must not be counted or crash the parser.
+    #[test]
+    fn mentions_of_the_scheme_are_not_identifiers() {
+        assert_eq!(cve_mentions("see the CVE- scheme for details"), Vec::new());
+        assert_eq!(cve_mentions("CVE-notes and CVE-2023 are prefixes"), Vec::new());
+        assert_eq!(cve_mentions("").len(), 0);
+        assert_eq!(cve_mentions("CVE-2023-27869").len(), 1);
+        // Lowercased, so "CVE-2023-27869" and "cve-2023-27869" count as one.
+        assert_eq!(cve_mentions("CVE-2023-27869 and cve-2023-27869")[0].1, 2);
     }
 
     /// The reply that motivated the whole check, and the clearest case in the
