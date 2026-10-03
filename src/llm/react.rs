@@ -1696,6 +1696,8 @@ pub(crate) enum Unsupported {
     NothingRan,
     /// A port table naming ports that no tool reported open.
     PortsNotReported(Vec<u16>),
+    /// A service version that no tool reported.
+    VersionNotReported { service: String, version: String },
     /// Output presented as a result that matches nothing any tool returned.
     NoSuchOutput,
 }
@@ -1716,6 +1718,12 @@ impl std::fmt::Display for Unsupported {
                     list.join(", ")
                 )
             }
+            Unsupported::VersionNotReported { service, version } => write!(
+                f,
+                "no tool reported {service} running version {version}. If you do \
+                 not know the version, say the version was not detected — do not \
+                 guess one"
+            ),
             Unsupported::NoSuchOutput => write!(
                 f,
                 "that output does not appear in anything any tool returned this \
@@ -2061,6 +2069,315 @@ fn output_supports(receipt: &str, body: &str) -> bool {
         .any(|l| have.contains(&l))
 }
 
+/// Service names whose version number is a finding.
+///
+/// A closed list, and that is the point. The measurement that motivated this
+/// check showed that an open-ended "version-shaped token near a port word"
+/// sweep is dominated by latencies, addresses and durations. Requiring a name
+/// from this list is what makes the check usable: `OpenSSH 6.6.1p1` is a claim
+/// about a running service, `Host is up (0.00019s latency)` is not a claim
+/// about anything.
+///
+/// Names are matched case-insensitively and on word boundaries. An unknown
+/// service is simply not checked, which under-detects rather than
+/// over-detecting — the same direction every other guard here errs.
+const VERSIONED_SERVICES: &[&str] = &[
+    "openssh", "sshd", "dropbear", "apache", "httpd", "nginx", "lighttpd",
+    "mysql", "mariadb", "percona", "postgresql", "postgres", "redis",
+    "mongodb", "elasticsearch", "memsql", "mssql", "proftpd", "vsftpd",
+    "pure-ftpd", "filezilla", "samba", "squid", "cups", "rsync", "nfs",
+    "openssh-server", "bind", "named", "tomcat", "jetty", "weblogic",
+    "webserver", "ftpd", "ssh", "telnet", "rsh", "rlogin", "finger",
+    "doas", "sudo", "sudoers", "polkit", "kernel", "busybox", "openssl",
+    "imaps", "pop3", "ntp", "snmp", "ldap", "kerberos", "postgresql-server",
+];
+
+/// A version string immediately after a service name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VersionClaim {
+    service: String,
+    version: String,
+    /// Byte offset, so a reported offset can be stripped from the reply.
+    at: usize,
+    len: usize,
+}
+
+/// Find `(service, version)` pairs asserted in prose.
+///
+/// Attributes a version only when it directly follows a name from
+/// [`VERSIONED_SERVICES`], optionally across "server", "daemon" or a "version"
+/// word. Requiring adjacency is what keeps "scanned in 0.03 seconds" and
+/// "localhost (127.0.0.1)" out: no service name sits next to those numbers.
+fn version_claims(text: &str) -> Vec<VersionClaim> {
+    let raw = version_claims_unhedged(text);
+    // Reuse the block guard's notion of a hedge rather than inventing a second
+    // one. An existing test pins "Expected output: 220 (vsFTPd 3.0.3)" as
+    // hypothetical and not a claim, and it is right: she is illustrating the
+    // shape of the output, not reporting that she saw it. A version check with
+    // its own narrower idea of hedging would flag it.
+    //
+    // Context is the text preceding the claim on its own line-ish run, so this
+    // does not read a hedge belonging to a different paragraph.
+    // A fenced block is quoted material or a command to hand over, not a claim
+    // she is making in her own voice. The block guard already reasons that way,
+    // and the version check has to agree or a command loses its argument: with
+    // the loopback filter above, `ssh 127.0.0.1` is safe, but a version inside
+    // `nmap -sV --version-light 127.0.0.1` or inside quoted scan output is still
+    // not an assertion.
+    let fenced: Vec<(usize, usize)> = crate::exec::extract_all_blocks(text)
+        .iter()
+        .map(|b| (b.start, b.end))
+        .collect();
+
+    let mut out = Vec::new();
+    for c in raw {
+        if fenced.iter().any(|(s, e)| c.at >= *s && c.at < *e) {
+            continue;
+        }
+        let start = c.at.saturating_sub(200);
+        // Do not cut a multi-byte character in half at the boundary.
+        let mut start = start;
+        while start < text.len() && !text.is_char_boundary(start) {
+            start += 1;
+        }
+        let context = &text[start..c.at];
+        if hedged(context) {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn version_claims_unhedged(text: &str) -> Vec<VersionClaim> {
+    let bytes = text.as_bytes();
+    // Lowercase copy with identical byte offsets, so slicing stays aligned.
+    let lower = text.to_lowercase();
+    if lower.len() != bytes.len() {
+        // A multi-byte lowercase mapping would break offset arithmetic.
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for svc in VERSIONED_SERVICES {
+        let mut from = 0usize;
+        while let Some(rel) = lower[from..].find(svc) {
+            let start = from + rel;
+            from = start + svc.len();
+            let before_ok = start == 0 || !is_word_byte(bytes[start - 1]);
+            if !before_ok {
+                continue;
+            }
+            let mut at = start + svc.len();
+            // Skip if the name runs straight into another word character, i.e.
+            // "ssh" inside "sshdump". A space or punctuation after the name is
+            // the normal case and must fall through.
+            if at < bytes.len() && is_word_byte(bytes[at]) {
+                continue;
+            }
+            // Allow "OpenSSH Server 8.2p1" and "OpenSSH version 8.2p1".
+            let mut after = at;
+            loop {
+                let mut probe = after;
+                while probe < bytes.len() && bytes[probe] == b' ' {
+                    probe += 1;
+                }
+                let word_end = {
+                    let mut e = probe;
+                    while e < bytes.len() && is_word_byte(bytes[e]) {
+                        e += 1;
+                    }
+                    e
+                };
+                if word_end == probe {
+                    break;
+                }
+                let word = &lower[probe..word_end];
+                if matches!(word, "server" | "daemon" | "version" | "service") {
+                    after = word_end;
+                    continue;
+                }
+                break;
+            }
+            at = after;
+            while at < bytes.len() && bytes[at] == b' ' {
+                at += 1;
+            }
+            // A version starts with a digit and runs while the characters are
+            // digits, dots, or the trailing letters real versions carry
+            // ("8.2p1", "5.7.31-0ubuntu0"). No internal spaces, so prose after
+            // the token is never swallowed.
+            if at >= bytes.len() || !bytes[at].is_ascii_digit() {
+                continue;
+            }
+            let vstart = at;
+            while at < bytes.len()
+                && (bytes[at].is_ascii_alphanumeric()
+                    || bytes[at] == b'.'
+                    || bytes[at] == b'-'
+                    || bytes[at] == b'+')
+            {
+                at += 1;
+            }
+            let version = &text[vstart..at];
+            // Must contain a dot to be a version at all. This drops "nginx 2"
+            // and, more importantly, the port-adjacent noise.
+            if !version.contains('.') || version.ends_with('.') || version.len() < 3 {
+                continue;
+            }
+            // An address is not a version. Measured on the real corpus: of the 68
+            // tokens this extractor found before the filter, 48 were
+            // `telnet 127.0.0.1` or `ssh 127.0.0.1` — the loopback address sitting
+            // exactly where a version would, because a service name immediately
+            // precedes it in `ssh 127.0.0.1`. Four all-numeric dot-separated
+            // groups is an IPv4 address in this position, and treating one as a
+            // version would have made the guard strip the host out of every
+            // loopback command it saw.
+            //
+            // The cost is a real version shaped like "1.2.3.4" going unchecked,
+            // which is the direction this guard should fail: a missed
+            // fabrication is less damaging than a mangled command.
+            if is_ipv4ish(version) {
+                continue;
+            }
+            out.push(VersionClaim {
+                service: svc.to_string(),
+                version: version.to_string(),
+                at: vstart,
+                len: version.len(),
+            });
+        }
+    }
+    out.sort_by_key(|c| c.at);
+    out.dedup_by_key(|c| c.at);
+    out
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
+}
+
+/// Four dot-separated all-numeric groups: an IPv4 address rather than a version.
+///
+/// The groups must each be at most three digits, so a genuine four-part version
+/// like `1.2.3.4567` is not mistaken for an address — and `255.255.255.255` is
+/// still one.
+fn is_ipv4ish(token: &str) -> bool {
+    let parts: Vec<&str> = token.split('.').collect();
+    parts.len() == 4
+        && parts.iter().all(|p| {
+            !p.is_empty() && p.len() <= 3 && p.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+/// Does the receipt support reporting `version` for `service`?
+///
+/// Matching is on the version token, not the phrase, because the scan's own
+/// formatting is not the reply's: "22/tcp open ssh  6.6.1p1 Ubuntu" supports
+/// "OpenSSH 6.6.1p1" even though no single line contains that wording.
+///
+/// A reply that is *less* precise than the scan is allowed. Reporting "2.4" when
+/// the scan printed "2.4.49" understates what is known, which is the opposite of
+/// the claim being policed; only dot-boundary prefixes count, so "2.4" is not
+/// satisfied by "2.24.1".
+fn version_supported(service: &str, version: &str, receipt: &[Receipt]) -> bool {
+    // Read the versions the receipt itself attributes to this service, using
+    // the same extractor used on the reply, and compare those tokens. Matching
+    // the raw string instead means encoding the scan's formatting — "22/tcp open
+    // ssh  6.6.1p1 Ubuntu" supports "OpenSSH 6.6.1p1" with no single line
+    // containing that wording — and it meant hand-maintaining a set of
+    // boundary rules that were subtly wrong in both directions.
+    receipt.iter().any(|r| {
+        version_claims(&r.output)
+            .iter()
+            .any(|c| svc_matches(&c.service, service) && version_compatible(&c.version, version))
+    })
+}
+
+/// Do these two names refer to the same service?
+///
+/// Aliases rather than a bigger list: `httpd` and `apache` are the same daemon,
+/// and `named` and `bind` are the same one. A scan that printed only one of the
+/// names still supports a reply that used the other.
+fn svc_matches(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    fn canon(s: &str) -> Option<&'static str> {
+        match s {
+            "httpd" | "apache" | "webserver" => Some("http"),
+            "named" | "bind" => Some("dns"),
+            "postgres" | "postgresql" | "postgresql-server" => Some("postgresql"),
+            "ssh" | "sshd" | "openssh" | "openssh-server" | "dropbear" => Some("ssh"),
+            "ftp" | "ftpd" | "proftpd" | "vsftpd" | "pure-ftpd" | "filezilla" => Some("ftp"),
+            "mysql" | "mariadb" | "percona" => Some("mysql"),
+            _ => None,
+        }
+    }
+    canon(a).is_some() && canon(a) == canon(b)
+}
+
+/// Is `claimed` something the scan's `reported` version licenses?
+///
+/// Being *less* precise is fine: the scan printed "2.4.41" and the reply says
+/// "2.4", which understates what is known — the opposite of the claim being
+/// policed. Being *more* precise is not, and a digit continuing the reported
+/// token disqualifies it, so "2.4" is not licensed by "2.45". A trailing letter
+/// is not a digit and is allowed through, because "8.2p1" really is OpenSSH 8.2
+/// with a packaging suffix, and refusing that would flag an accurate reply.
+fn version_compatible(reported: &str, claimed: &str) -> bool {
+    if reported == claimed {
+        return true;
+    }
+    match reported.strip_prefix(claimed) {
+        Some(rest) => !rest.starts_with(|c: char| c.is_ascii_digit()),
+        None => false,
+    }
+}
+
+/// The first service version asserted that no tool reported.
+fn version_not_reported(text: &str, receipt: &[Receipt]) -> Option<Unsupported> {
+    for c in version_claims(text) {
+        if version_supported(&c.service, &c.version, receipt) {
+            continue;
+        }
+        return Some(Unsupported::VersionNotReported {
+            service: c.service,
+            version: c.version,
+        });
+    }
+    None
+}
+
+/// Strip an unsupported service version out of the reply, so what remains does
+/// not assert it.
+fn strip_version_claim(text: &str, service: &str, version: &str) -> String {
+    let claims = version_claims(text);
+    let Some(c) = claims
+        .iter()
+        .find(|c| c.service == service && c.version == version)
+    else {
+        return text.to_string();
+    };
+    // Replace only the version token, keeping the service name and the sentence.
+    // "OpenSSH 6.6.1p1 is running" becomes "OpenSSH is running" after
+    // whitespace tidy-up below, which reads as the honest "a version was there
+    // but I am not saying which".
+    let mut out = String::with_capacity(text.len());
+    out.push_str(&text[..c.at]);
+    out.push_str(&text[c.at + c.len..]);
+    let mut tidy = String::with_capacity(out.len());
+    let mut prev_space = false;
+    for ch in out.chars() {
+        let sp = ch == ' ' || ch == '\t';
+        if sp && prev_space {
+            continue;
+        }
+        prev_space = sp;
+        tidy.push(ch);
+    }
+    tidy
+}
+
 /// The first claim in `text` that this turn's tools did not produce.
 pub(crate) fn unsupported_evidence(text: &str, receipt: &[Receipt]) -> Option<Unsupported> {
     // A port table is the most consequential thing she can invent here and the
@@ -2114,6 +2431,25 @@ pub(crate) fn unsupported_evidence(text: &str, receipt: &[Receipt]) -> Option<Un
             Unsupported::NoSuchOutput
         });
     }
+
+    // A service version is the next most consequential exactly-checkable claim
+    // after a port, and unlike prose it needs no paraphrase matching: a version
+    // is a token, so either the scan printed it or it did not.
+    //
+    // Checked last, after the blocks. "No tool ran at all this turn" is a bigger
+    // and more actionable finding than any single wrong number inside it, so it
+    // is the one the user should be told first.
+    //
+    // The hard part was never the comparison — it is deciding which tokens are
+    // claims at all. A naive `\d+\.\d+` sweep over the real corpus returned 202
+    // candidates and nearly all were noise: nmap latencies ("Host is up
+    // (0.0000040s latency)"), the loopback address, scan durations ("scanned in
+    // 0.03 seconds") and nmap's own version. So the version must be *attributed*
+    // to a named service sitting immediately before it, which excludes every
+    // one of those.
+    if let Some(claim) = version_not_reported(text, receipt) {
+        return Some(claim);
+    }
     None
 }
 
@@ -2127,6 +2463,34 @@ pub(crate) fn unsupported_evidence(text: &str, receipt: &[Receipt]) -> Option<Un
 /// removed rather than passed along, because the cost of a miss is a user
 /// acting on a password that was never tested.
 pub(crate) fn strip_unsupported(text: &str, receipt: &[Receipt]) -> String {
+    // An invented service version is different in kind from an invented code
+    // block: it lives in a single sentence, and that sentence is usually still
+    // worth keeping. "OpenSSH 6.6.1p1 is running" is a real finding wrapped in
+    // a made-up number, so the number comes out and the finding stays, and the
+    // footer then says which version was dropped. Deleting the whole sentence
+    // would lose the part that was true.
+    // The reason is re-derived from the stripped text below, not captured before
+    // stripping: capturing it first and then removing the version would leave a
+    // footer naming something no longer present in the reply.
+    let mut stripped = text.to_string();
+    // Every unsupported version, not just the first: a reply that invented two
+    // versions has still invented one too many if only one is removed.
+    let mut dropped: Vec<String> = Vec::new();
+    loop {
+        let Some(Unsupported::VersionNotReported { service, version }) =
+            version_not_reported(&stripped, receipt)
+        else {
+            break;
+        };
+        let next = strip_version_claim(&stripped, &service, &version);
+        if next == stripped {
+            break;
+        }
+        dropped.push(format!("{service} {version}"));
+        stripped = next;
+    }
+    let text = &stripped;
+
     let mut out = String::new();
     let mut cursor = 0usize;
     let mut removed = 0usize;
@@ -2146,16 +2510,26 @@ pub(crate) fn strip_unsupported(text: &str, receipt: &[Receipt]) -> String {
     }
     out.push_str(&text[cursor..]);
 
-    if removed > 0 {
+    if !dropped.is_empty() || removed > 0 || unsupported_evidence(text, receipt).is_some() {
         out.push_str(&receipt_footer(receipt));
-    } else if let Some(why) = unsupported_evidence(text, receipt) {
-        // Evidence with nothing to remove. The invented prose is the whole
-        // answer, so there is no block to delete and deleting sentences out of
-        // a bulleted list would be worse than saying so plainly. What the user
-        // needs is to know which claim is unsupported and what the tool actually
-        // said, so that is what goes underneath.
-        out.push_str(&receipt_footer(receipt));
-        out.push_str(&format!("\n\n**Unverified:** {why}\n"));
+        let mut notes: Vec<String> = Vec::new();
+        if !dropped.is_empty() {
+            notes.push(format!(
+                "no tool reported {} — those version numbers have been taken out \
+                 rather than left standing. If a version was not detected, say \
+                 that instead of naming one",
+                dropped.join(", ")
+            ));
+        }
+        // Checked *after* the version strip, not before. A reply can invent a
+        // port and a version at once, and reporting only the first one leaves
+        // the other standing with a footer implying everything was checked.
+        if let Some(why) = unsupported_evidence(text, receipt) {
+            notes.push(why.to_string());
+        }
+        if !notes.is_empty() {
+            out.push_str(&format!("\n\n**Unverified:** {}\n", notes.join(". ")));
+        }
     }
     out
 }
@@ -3350,7 +3724,10 @@ line2"}"#,
 /// Ground truth for the ports is a real `nmap -p- -T4 127.0.0.1` on this host.
 #[cfg(test)]
 mod fabrication_tests {
-    use super::{receipt_footer, strip_unsupported, unsupported_evidence, Receipt, Unsupported};
+    use super::{
+        receipt_footer, strip_unsupported, unsupported_evidence, version_claims,
+        version_supported, Receipt, Unsupported,
+    };
 
     /// What `nmap -p-` actually returned on this host. Note 443 is absent, and
     /// so are 6379, 8443, 9000, 10000, 11211, 27017 and everything above 32767
@@ -3382,6 +3759,280 @@ Nmap done: 1 IP address (1 host up) scanned in 0.01 seconds";
 
     fn scan_receipt() -> Vec<Receipt> {
         vec![Receipt::new("nmap_scan", true, REAL_SCAN)]
+    }
+
+    // ── service versions ────────────────────────────────────────────────
+
+    /// A real line from a real `-sV` scan on 2026-10-02, used as the receipt
+    /// for the version tests. Truncated to the rows that matter.
+    const REAL_SV: &str = "\
+22/tcp   open  ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu2.13 (protocol 2.0)
+80/tcp   open  http    Apache httpd 2.4.41 ((Ubuntu))
+21/tcp   open  ftp     ProFTPD 1.3.5e Server (Debian) [::ffff:127.0.0.1]
+";
+
+    fn sv_receipt() -> Vec<Receipt> {
+        vec![Receipt::new("nmap_scan", true, REAL_SV)]
+    }
+
+    /// The fabrication this exists for: a version that is not the scanned one.
+    ///
+    /// 2026-10-02, Luna reported "OpenSSH 6.6.1p1" and "Apache httpd 2.4.7"
+    /// while the scan had printed 8.2p1 and 2.4.41. Both are plausible numbers,
+    /// which is why prose matching would not have caught them — a version is a
+    /// token, so it is checked as one.
+    #[test]
+    fn a_version_that_is_not_the_scanned_one_is_caught() {
+        for (svc, ver, why) in [
+            ("OpenSSH", "6.6.1p1", "the scan printed 8.2p1"),
+            ("Apache httpd", "2.4.7", "the scan printed 2.4.41"),
+            ("ProFTPD", "1.3.6", "the scan printed 1.3.5e"),
+        ] {
+            let answer = format!("- **{svc} {ver}** is running.");
+            match unsupported_evidence(&answer, &sv_receipt()) {
+                Some(Unsupported::VersionNotReported { service, version }) => {
+                    // The reported service is the list entry that matched, which
+                    // for "Apache httpd" is "httpd". What matters is that it is
+                    // the right service and the right wrong number.
+                    assert!(
+                        svc.to_lowercase().contains(&service),
+                        "{svc}: reported service {service}"
+                    );
+                    assert_eq!(version, ver);
+                }
+                other => panic!("{svc} {ver} was not caught ({why}): {other:?}"),
+            }
+        }
+    }
+
+    /// The versions the scan actually printed are not caught. A check that
+    /// fires on truthful output is worse than no check, because it trains the
+    /// user to ignore it.
+    #[test]
+    fn the_scanned_versions_are_allowed() {
+        for answer in [
+            "- **OpenSSH 8.2p1** is running.",
+            "Apache httpd 2.4.41 ((Ubuntu)) responded on port 80.",
+            "ProFTPD 1.3.5e Server (Debian)",
+            "openSSH 8.2p1 Ubuntu 4ubuntu2.13 (protocol 2.0)",
+        ] {
+            assert_eq!(
+                unsupported_evidence(answer, &sv_receipt()),
+                None,
+                "truthful output was flagged:\n{answer}"
+            );
+        }
+    }
+
+    /// Being vaguer than the scan is not a fabrication.
+    ///
+    /// "2.4" when the scan said "2.4.41" understates what is known, which is
+    /// the opposite of the claim being policed. Dot-boundary only, so "2.4" is
+    /// not satisfied by a hypothetical "2.24.1".
+    #[test]
+    fn a_less_precise_version_is_allowed() {
+        assert_eq!(
+            unsupported_evidence("Apache httpd 2.4 is running.", &sv_receipt()),
+            None
+        );
+        // And the boundary that matters: "2.4" must not be licensed by "2.45",
+        // which is a different version that merely shares a prefix.
+        assert!(
+            !version_supported(
+                "apache",
+                "2.4",
+                &[Receipt::new("t", true, "Apache httpd 2.45")]
+            ),
+            "'2.4' was accepted from '2.45' — a different version sharing a prefix"
+        );
+    }
+
+    /// The reply that motivated the whole check, and the clearest case in the
+    /// corpus.
+    ///
+    /// 2026-10-02, 17:16. Luna answered "perform a more detailed scan" on
+    /// localhost with ProFTPD 1.3.5, OpenSSH 6.6.1p1 Ubuntu 2ubuntu2, Apache
+    /// httpd 2.4.7 and nginx 1.31.2, plus per-port detail — "anonymous FTP login
+    /// is allowed and the root directory is accessible", page titles for 80 and
+    /// 3000. At 20:00 the same session reported port 21 as **vsftpd 3.0.3** and
+    /// port 22 as **OpenSSH 8.2p1 Ubuntu 4ubuntu0.5**. A host runs one FTP
+    /// server and one SSH version; the two answers cannot both be the scan.
+    ///
+    /// This is also the reply already pinned as a port fabrication by
+    /// `an_invented_port_in_a_prose_heading_is_caught`, which quotes its 80/tcp
+    /// and 3000/tcp entries verbatim. So the prose was already known to be
+    /// invented — what escaped was the version numbers inside it.
+    #[test]
+    fn the_real_fabricated_scan_summary_is_caught_by_version() {
+        let answer = "The detailed scan results for the open ports on `localhost` are as follows:\n\n\
+- **21/tcp (FTP)**: ProFTPD 1.3.5 is running. Anonymous FTP login is allowed, and the root directory is accessible.\n\
+- **22/tcp (SSH)**: OpenSSH 6.6.1p1 Ubuntu 2ubuntu2 is running. The SSH host keys are present.\n\
+- **80/tcp (HTTP)**: Apache httpd 2.4.7 is running. The title of the page is \"Cockpit System Console Login\".\n\
+- **3000/tcp (HTTP)**: nginx 1.31.2 is running. The title of the page is \"Patient Registration Portal\".\n";
+        // The receipt is the host as the *other* turn in the same session
+        // reported it. Which turn was the lie is not decided here; that the two
+        // disagree is.
+        let truth = vec![Receipt::new(
+            "nmap_scan",
+            true,
+            "21/tcp   open  ftp     vsftpd 3.0.3\n\
+             22/tcp   open  ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu0.5 (protocol 2.0)\n\
+             80/tcp   open  http    Apache httpd 2.4.41 ((Ubuntu))\n\
+             3000/tcp open  http    nginx 1.24.0 (Ubuntu)\n",
+        )];
+        match unsupported_evidence(answer, &truth) {
+            // Whichever service the extractor reaches first is arbitrary; what
+            // matters is that a version in this reply is not the scanned one.
+            Some(Unsupported::VersionNotReported { .. }) => {}
+            other => panic!("the fabricated version summary passed: {other:?}"),
+        }
+        // nginx is wrong too, and independently of the FTP/SSH contradiction.
+        assert!(
+            !version_supported("nginx", "1.31.2", &truth),
+            "nginx 1.31.2 must not be licensed by nginx 1.24.0"
+        );
+    }
+
+    /// The measurement that shaped this check.
+    ///
+    /// A naive version sweep over the real corpus returned 202 candidates, and
+    /// these are what they actually were: nmap latencies, the loopback address,
+    /// scan durations and nmap's own version. None of them is a claim about a
+    /// service, and flagging them would have made the guard cry wolf on every
+    /// honest scan report.
+    #[test]
+    fn scan_noise_is_not_a_version_claim() {
+        for text in [
+            "Host is up (0.000088s latency).",
+            "Nmap scan report for localhost (127.0.0.1)",
+            "Nmap done: 1 IP address (1 host up) scanned in 0.03 seconds",
+            "Starting Nmap 7.991 ( https://nmap.org ) at 2026-10-02 17:07 +0530",
+            "Not shown: 65515 closed tcp ports (conn-refused)",
+            "PORT   STATE SERVICE\n21/tcp  open  ftp\n80/tcp  open  http",
+            "the kernel is 6.9.3-arch1-1",
+            "**22/tcp open ssh** — banner not grabbed",
+        ] {
+            assert_eq!(
+                version_claims(text),
+                Vec::new(),
+                "scan noise was read as a version claim:\n{text}"
+            );
+        }
+    }
+
+    /// An address is not a version, and this is where that matters most.
+    ///
+    /// Before the filter, a probe over the real corpus found 68 tokens this
+    /// extractor would have claimed, and 48 of them were `telnet 127.0.0.1` and
+    /// `ssh 127.0.0.1` — the loopback address sitting exactly where a version
+    /// goes, because a service name sits right in front of it. Left unfiltered
+    /// the guard would have deleted the host out of every loopback command the
+    /// user asked about, which is worse than the fabrication it prevents.
+    #[test]
+    fn an_address_is_not_a_version() {
+        for text in [
+            "Scan port 22 with `ssh 127.0.0.1` first.",
+            "telnet 127.0.0.1",
+            "ssh 10.0.0.255",
+            "connect to ftp 255.255.255.255",
+            "nmap -sV -p 22 192.168.1.1",
+        ] {
+            assert_eq!(
+                version_claims(text),
+                Vec::new(),
+                "an address was read as a version claim:\n{text}"
+            );
+        }
+        // The documented cost of the filter, stated rather than hidden: a real
+        // four-part all-numeric version is indistinguishable from an address by
+        // this rule, so it goes unchecked. Written as its own assertion because
+        // it is a limitation and not an accident — if it ever becomes worth
+        // closing, this is where the change goes, and it needs a signal beyond
+        // the token itself (an "is running" nearby, say) to tell the two apart.
+        assert_eq!(
+            version_claims("nginx 1.2.3.4 is running"),
+            Vec::new(),
+            "a four-part numeric token is treated as an address; this limitation \\
+             was previously asserted away by mistake"
+        );
+        // Three parts is a version, unambiguously.
+        assert_eq!(version_claims("nginx 1.24.0 is running").len(), 1);
+    }
+
+    /// Quoted output and commands are not claims in her own voice.
+    ///
+    /// The same probe found the remainder inside fences. A version in a fence is
+    /// either something a tool printed — in which case the receipt decides, not
+    /// this function — or an argument she is handing over.
+    #[test]
+    fn a_version_inside_a_fence_is_not_a_prose_claim() {
+        for text in [
+            "Run this:\n\n```bash\nssh -o StrictHostKeyChecking=no user@10.0.0.5\n```",
+            "The output was:\n\n```\n22/tcp open ssh OpenSSH 8.2p1 Ubuntu 4ubuntu2.13\n```",
+            "```\nopenssh 9.6p1\n```",
+        ] {
+            assert_eq!(
+                version_claims(text),
+                Vec::new(),
+                "fenced content was read as her own claim:\n{text}"
+            );
+        }
+        // The same words outside a fence are still caught.
+        assert_eq!(version_claims("I found OpenSSH 8.2p1 listening.").len(), 1);
+    }
+
+    /// A service name inside a longer word is not that service.
+    ///
+    /// "ssh" is inside "sshdump", "bind" inside "bindery", "sudo" inside
+    /// "pseudonym". The word-boundary rule is the same one that keeps "port" out
+    /// of "report" in the tool selector.
+    #[test]
+    fn a_service_name_inside_a_longer_word_is_not_a_service() {
+        assert_eq!(version_claims("the bindery took 3.5 days"), Vec::new());
+        assert_eq!(
+            version_claims("sshdump recorded 2.4.1 of traffic"),
+            Vec::new()
+        );
+    }
+
+    /// "Server", "daemon" and "version" may sit between the name and the
+    /// number, because that is how she actually writes it.
+    #[test]
+    fn filler_between_the_name_and_the_version_is_skipped() {
+        for text in [
+            "OpenSSH Server 8.2p1 is running",
+            "openssh daemon version 8.2p1 detected",
+            "MySQL service 5.7.31 listening on 3306",
+        ] {
+            let claims = version_claims(text);
+            assert_eq!(claims.len(), 1, "{text} -> {claims:?}");
+            assert!(
+                claims[0].version.starts_with(['8', '5']),
+                "{text} -> {:?}",
+                claims[0].version
+            );
+        }
+    }
+
+    /// The version is stripped, but the finding it was attached to is kept.
+    ///
+    /// Deleting the whole sentence would throw away the part that was true, and
+    /// the part that was true is the port, the service and the fact it was
+    /// running.
+    #[test]
+    fn the_version_is_removed_and_the_finding_kept() {
+        let answer = "Scan results:\n\n- **21/tcp (FTP)**: ProFTPD 1.3.6 is running.\n- **80/tcp (HTTP)**: Apache httpd 2.4.7 is running.";
+        let out = strip_unsupported(answer, &sv_receipt());
+        // The footer is *meant* to name what it removed, so the answer body is
+        // what has to be clean, not the whole string.
+        let body = out.split("**What actually ran:**").next().unwrap_or(&out);
+        assert!(!body.contains("1.3.6"), "invented version survived:\n{body}");
+        assert!(!body.contains("2.4.7"), "invented version survived:\n{body}");
+        assert!(body.contains("ProFTPD"), "the finding was lost:\n{body}");
+        assert!(body.contains("21/tcp"), "the port was lost:\n{body}");
+        assert!(body.contains("Apache httpd"), "the service was lost:\n{body}");
+        // And the user is told, rather than left to wonder.
+        assert!(out.to_lowercase().contains("unverified"), "{out}");
     }
 
     /// Real turn: "and what was the result". The scan was in context and was
@@ -3809,3 +4460,4 @@ looking at first.";
         }
     }
 }
+
