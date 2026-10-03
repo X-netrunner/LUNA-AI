@@ -736,6 +736,13 @@ impl SettingsMenuState {
     }
 
     /// Enable or disable the no-refusal mode, subject to the gate.
+    ///
+    /// Test-only: it names the switch `llm.security_unrestricted` so the tests
+    /// do not repeat the string, but no UI path calls it — the TUI has no
+    /// control for this switch, and adding one is a feature rather than a
+    /// refinement. Without `#[cfg(test)]` it sits in the production build as a
+    /// public-looking method that nothing can reach.
+    #[cfg(test)]
     pub fn set_security_unrestricted(&mut self, want: bool) -> bool {
         self.set_signed_switch("llm.security_unrestricted", want)
     }

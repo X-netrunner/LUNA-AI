@@ -1954,7 +1954,7 @@ fn reads_as_transcript(body: &str) -> bool {
             !head.is_empty() && l[head.len()..].starts_with("/tcp") || l[head.len()..].starts_with("/udp")
         };
         let is_border = {
-            let mut t = l.trim_end();
+            let t = l.trim_end();
             if t.starts_with('|') && t.ends_with('|') && t.len() > 2 {
                 true
             } else {
@@ -2508,8 +2508,6 @@ pub(crate) fn is_escalation_response(text: &str) -> bool {
 
 /// Try to read `tool_name {json}` out of the middle of a response.
 fn parse_json_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> {
-    use crate::llm::ollama::{ToolCall, ToolCallFunction};
-
     let open = text.find('{')?;
     let head = text[..open].trim();
     let defs = crate::tools::tool_definitions();

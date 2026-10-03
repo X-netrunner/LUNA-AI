@@ -40,10 +40,16 @@ const MAX_REPLANS: u32 = 6;
 /// Why a plan stopped, so the caller can report a reason instead of a hang.
 ///
 /// Every variant here is a case that used to be indistinguishable from "still
-/// working". `PlanFinished` is the only one that means the goal was met.
+/// working". `PlanFinished` is the only one that means every step ran — but see
+/// `RetriesExhausted`, which is also "finished" and is not a success.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
     PlanFinished,
+    /// Every step was attempted, but at least one was tried `MAX_RETRIES` times
+    /// and given up on. This is reported rather than folded into `PlanFinished`
+    /// because "the plan ran to the end" and "the plan did everything" are
+    /// different claims, and the tool result said the first while the user
+    /// needed to hear the second.
     RetriesExhausted,
     ReplansExhausted,
     StepBudgetExhausted,
@@ -90,6 +96,8 @@ pub struct LoopControl {
     consecutive_failures: u32,
     replans: u32,
     executed: usize,
+    /// Indices of steps that were attempted and then given up on.
+    abandoned: Vec<usize>,
 }
 
 impl LoopControl {
@@ -100,6 +108,7 @@ impl LoopControl {
             consecutive_failures: 0,
             replans: 0,
             executed: 0,
+            abandoned: Vec::new(),
         }
     }
 
@@ -114,7 +123,13 @@ impl LoopControl {
     /// Why the plan will not run another step, if it will not.
     pub fn stop_reason(&self) -> Option<Stop> {
         if self.cursor >= self.steps.len() {
-            return Some(Stop::PlanFinished);
+            // Reaching the end is not the same as completing the plan. A step
+            // that was abandoned still counts as un-done.
+            return Some(if self.abandoned.is_empty() {
+                Stop::PlanFinished
+            } else {
+                Stop::RetriesExhausted
+            });
         }
         if self.executed >= MAX_TOTAL_STEPS {
             return Some(Stop::StepBudgetExhausted);
@@ -156,10 +171,34 @@ impl LoopControl {
     }
 
     /// Give up on the failing step and move past it.
+    ///
+    /// Records that a step was abandoned, so the caller can say so. Skipping
+    /// used to be silent: the plan carried on and the history showed the next
+    /// step's ✔ with nothing in between, so a step that was tried three times
+    /// and dropped read the same as one that never existed.
     pub fn skip(&mut self) {
         self.executed += 1;
         self.cursor += 1;
         self.consecutive_failures = 0;
+        self.abandoned.push(self.cursor - 1);
+    }
+
+    /// Steps that were tried and given up on, as indices into the plan.
+    pub fn abandoned(&self) -> &[usize] {
+        &self.abandoned
+    }
+
+    /// A short name for the step at `idx`, for reporting.
+    pub fn step_label(&self, idx: usize) -> Option<String> {
+        let (step, _) = self.steps.get(idx)?;
+        Some(match step.action.as_str() {
+            "navigate" => format!("open {}", step.target.as_deref().unwrap_or("")),
+            "click" => format!("click {}", step.target.as_deref().unwrap_or("")),
+            "type" => format!("type: {}", step.value.as_deref().unwrap_or("")),
+            "search" => format!("search for \"{}\"", step.target.as_deref().unwrap_or("")),
+            "pick_best" => "pick best product".to_string(),
+            other => other.to_string(),
+        })
     }
 
     #[cfg(test)]
@@ -212,6 +251,10 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
             let target = step.target.as_deref().unwrap_or("");
             let expr = find_and_click_expr(target);
             let result = browser.eval_resilient(&expr).await?;
+
+            if let Err(why) = purchase_click_verdict(target, &result) {
+                return Ok(ActionResult::fail(action_name, step_index, 1, why));
+            }
             // Click might trigger navigation - wait a moment for potential page
             // load, then check whether a purchase click ran into a login wall.
             tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -229,6 +272,21 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
                         1,
                         err,
                     ));
+                }
+            }
+            // Say what was clicked, not just that something was clicked. A bare
+            // "✔ click Add to Cart" is indistinguishable from having clicked
+            // Add to Wishlist; the element's own text is the evidence.
+            if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                let clicked = result.get("clicked").and_then(Value::as_str).unwrap_or("");
+                if !clicked.is_empty() {
+                    let exact = result.get("exact").and_then(Value::as_bool).unwrap_or(false);
+                    let note = if exact {
+                        format!("clicked \"{clicked}\"")
+                    } else {
+                        format!("clicked \"{clicked}\" — closest match, not an exact one")
+                    };
+                    return Ok(ActionResult::ok_note(action_name, step_index, 1, note));
                 }
             }
             Ok(dom::result_from(result, action_name, step_index, 1))
@@ -390,6 +448,53 @@ fn is_purchase_click(desc: &str) -> bool {
     .any(|k| lower.contains(k))
 }
 
+/// Whether the click the expression actually performed may go ahead.
+///
+/// A purchase click that only matched *part* of the request is not the action
+/// that was asked for, and it has side effects. The old matcher scored any
+/// element containing "add" as a hit for "Add to Cart" — `+3` per word over
+/// length 2 — and separately handed every visible `BUTTON`/`A` a flat `+2+1`
+/// whether or not any word matched, so on any page with a button the "no
+/// matching element" branch was unreachable. The net effect on 2026-10-03 was
+/// that "Add to Wishlist" was clicked and logged as `✔ click Add to Cart`.
+///
+/// So: `Ok(())` to proceed, `Err(reason)` to refuse. Split out from the
+/// executor so the rule can be tested without a browser, which is the only
+/// reason it is a function.
+///
+/// Non-purchase clicks are allowed to be fuzzy. Missing a button labelled
+/// "first product result" costs a wrong-but-recoverable click; buying the wrong
+/// thing does not come back.
+fn purchase_click_verdict(target: &str, result: &Value) -> Result<(), String> {
+    if !result.get("ok").and_then(Value::as_bool).unwrap_or(false)
+        || !is_purchase_click(target)
+    {
+        return Ok(());
+    }
+    if result.get("exact").and_then(Value::as_bool).unwrap_or(false) {
+        return Ok(());
+    }
+    let missing: Vec<&str> = result
+        .get("missing")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let clicked = result
+        .get("clicked")
+        .and_then(Value::as_str)
+        .unwrap_or("something else");
+    Err(format!(
+        "refused to click: asked for \"{target}\", the closest element says \
+         \"{clicked}\"{} — that is a different action. Do not retry this click; \
+         report what is actually on the page.",
+        if missing.is_empty() {
+            String::new()
+        } else {
+            format!(" (missing: {})", missing.join(", "))
+        }
+    ))
+}
+
 /// Build a search URL *for the site currently open*.
 ///
 /// The `search` action used to be hardcoded to DuckDuckGo, which meant "search
@@ -475,61 +580,80 @@ fn find_and_click_expr(description: &str) -> String {
 
     format!(
         r#"(() => {{
-  const desc = {desc}.toLowerCase();
+  const DESC = {desc};
 
-  // Try to find element by various matching strategies
   const candidates = Array.from(document.querySelectorAll('button,a,input,textarea,select,[role="button"],[role="link"],[role="radio"],[role="checkbox"],[role="option"],[onclick],[tabindex]'));
 
-  // Score each candidate by how well it matches the description
-  let best = null;
-  let bestScore = -1;
+  const textOf = el => (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '');
+  const haystack = el => [textOf(el), el.id || '', String(el.className || ''), el.getAttribute('aria-label') || ''].join(' ').toLowerCase();
+
+  // Words that carry the request. "to", "the", "a" are length <= 2 and drop out
+  // on their own; these are dropped because they appear in almost every label.
+  const STOP = new Set(['the', 'and', 'for', 'with', 'button', 'link', 'page']);
+  const words = DESC.toLowerCase().split(/\s+/).filter(w => w.length > 2 && !STOP.has(w));
+
+  const hitsFor = el => {{
+    const hay = haystack(el);
+    return words.filter(w => hay.includes(w));
+  }};
+
+  // Only visible, on-screen elements are clickable. This ranks; it must never
+  // decide that something matched.
+  const visible = el => {{
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.top < window.innerHeight && r.bottom > 0;
+  }};
+
+  // Pass 1: every significant word present. Only these may be clicked without
+  // disclosure, because only these are known to be the thing asked for.
+  let exact = null, exactScore = -1;
+  // Pass 2: the closest partial, kept for an explicitly labelled fallback.
+  let partial = null, partialScore = -1, partialHits = 0;
 
   for (const el of candidates) {{
-    let score = 0;
-    const text = (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').toLowerCase();
-    const id = (el.id || '').toLowerCase();
-    const cls = (el.className || '').toLowerCase();
-    const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-
-    // Exact substring match
-    if (text.includes(desc) || id.includes(desc) || cls.includes(desc) || aria.includes(desc)) score += 10;
-    // Word overlap
-    const descWords = desc.split(/\\s+/);
-    for (const w of descWords) {{
-      if (w.length > 2 && (text.includes(w) || id.includes(w) || cls.includes(w))) score += 3;
-    }}
-    // Prefer buttons/links for "click" actions
-    if (el.tagName === 'BUTTON' || el.tagName === 'A') score += 2;
-    // Prefer visible elements
+    const hits = hitsFor(el);
+    if (!hits.length) continue;
     const rect = el.getBoundingClientRect();
-    if (rect.width > 0 && rect.height > 0 && rect.top < window.innerHeight && rect.bottom > 0) score += 1;
-
-    if (score > bestScore) {{
-      bestScore = score;
-      best = el;
+    let score = 0;
+    if (textOf(el).toLowerCase().includes(DESC)) score += 10;
+    if (el.tagName === 'BUTTON' || el.tagName === 'A') score += 2;
+    if (visible(el)) score += 1;
+    if (hits.length > partialHits || (hits.length === partialHits && score > partialScore)) {{
+      partial = el; partialScore = score; partialHits = hits.length;
+    }}
+    if (hits.length === words.length && score > exactScore) {{
+      exact = el; exactScore = score;
     }}
   }}
 
-  if (!best || bestScore === 0) {{
-    return {{ ok: false, error: "no matching element found for: " + desc }};
-  }}
+  const best = exact || partial;
+  if (!best) return {{ ok: false, error: 'no element mentions ' + words.join(' or ') + ' (asked for "' + DESC + '")' }};
 
-  // Click the best match
-  const rect = best.getBoundingClientRect();
-  const x = rect.left + rect.width / 2;
-  const y = rect.top + rect.height / 2;
+  const missing = words.filter(w => !hitsFor(best).includes(w));
+  const label = (textOf(best) || best.getAttribute('aria-label') || best.id || best.tagName).replace(/\s+/g, ' ').trim().slice(0, 80);
+
+  const r = best.getBoundingClientRect();
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
   const ev = {{ bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }};
-  best.dispatchEvent(new PointerEvent("pointerdown", ev));
-  best.dispatchEvent(new MouseEvent("mousedown", ev));
-  best.focus();
-  best.dispatchEvent(new PointerEvent("pointerup", ev));
-  best.dispatchEvent(new MouseEvent("mouseup", ev));
-  best.click();
-  return {{ ok: true }};
+  best.dispatchEvent(new PointerEvent('pointerdown', ev));
+  best.dispatchEvent(new MouseEvent('mousedown', ev));
+  best.focus && best.focus();
+  best.dispatchEvent(new PointerEvent('pointerup', ev));
+  best.dispatchEvent(new MouseEvent('mouseup', ev));
+  best.click && best.click();
+
+  return {{
+    ok: true,
+    clicked: label,
+    exact: !!exact,
+    missing,
+    // A purchase click that only matched some of the words is not the action
+    // that was asked for, and it has side effects. The caller decides.
+    purchase: /add to cart|add to bag|buy now|checkout|place order|proceed to/i.test(DESC)
+  }};
 }})()"#
     )
 }
-
 /// Execute a full plan with retry/rethink logic.
 pub async fn execute_plan(
     browser: &CdpBrowser,
@@ -609,6 +733,21 @@ pub async fn execute_plan(
                 plan.skip();
             }
         }
+    }
+
+    // Report the steps that were attempted and dropped. This used to be
+    // silent, so a plan that gave up on "click: Add to Cart" and carried on
+    // read exactly like one that had never tried it — and the tool reported
+    // success. Naming the abandoned steps is the difference between "the plan
+    // ran" and "the goal was met".
+    for &idx in plan.abandoned() {
+        let label = plan
+            .step_label(idx)
+            .unwrap_or_else(|| format!("step {}", idx + 1));
+        tracing::warn!("gave up on {label} after {MAX_RETRIES} attempts");
+        history.push(format!(
+            "  ✘ gave up on {label} after {MAX_RETRIES} attempts"
+        ));
     }
 
     if let Some(stop) = plan.stop_reason() {
@@ -755,9 +894,14 @@ mod tests {
         assert!(plan.record_failure(), "second failure may still re-plan");
         assert!(!plan.record_failure(), "third failure must skip");
         // Refusing a re-plan is not itself "stopped" — the caller skips the
-        // step, which is what ends a one-step plan.
+        // step, which is what ends a one-step plan. Ending the plan by giving up
+        // on its only step is not `PlanFinished`: that word means everything ran.
         plan.skip();
-        assert_eq!(plan.stop_reason(), Some(Stop::PlanFinished));
+        assert_eq!(plan.stop_reason(), Some(Stop::RetriesExhausted));
+        // Index 1, not 0: the repair step was spliced in at 0, so the abandoned
+        // step is the original "Add to Cart" now sitting after it.
+        assert_eq!(plan.abandoned(), &[1]);
+        assert_eq!(plan.step_label(1).as_deref(), Some("click Add to Cart"));
         assert_eq!(plan.executed(), 5, "3 failures + 1 repair + the skip");
     }
 
@@ -796,6 +940,40 @@ mod tests {
         assert_eq!(plan.stop_reason(), Some(Stop::PlanFinished));
         assert!(plan.current().is_none());
         assert_eq!(plan.replans(), 0);
+        assert!(plan.abandoned().is_empty());
+    }
+
+    /// A plan that gave up on a step did not finish, whatever it reached.
+    ///
+    /// Both the run and the report said "Done. The browser automation (10 steps)
+    /// executed" on 2026-10-03, while `click: Add to Cart` had been tried three
+    /// times and dropped. The tool reported the plan completing; the user needed
+    /// to hear that a step did not happen.
+    #[test]
+    fn reaching_the_end_after_giving_up_is_not_finishing() {
+        let mut plan = LoopControl::new(vec![
+            step("navigate", "amazon.com"),
+            step("click", "Add to Cart"),
+        ]);
+        plan.record_success();
+        // Three failures, because MAX_RETRIES is three. One is not a give-up.
+        assert!(plan.record_failure());
+        assert!(plan.record_failure());
+        assert!(!plan.record_failure(), "the third failure must end the attempts");
+        plan.skip();
+
+        assert_eq!(
+            plan.stop_reason(),
+            Some(Stop::RetriesExhausted),
+            "a plan that dropped a step must not report PlanFinished"
+        );
+        assert_eq!(plan.abandoned(), &[1]);
+        // And the step is nameable, so the report can say which one.
+        assert_eq!(
+            plan.step_label(1).as_deref(),
+            Some("click Add to Cart"),
+            "the abandoned step cannot be named in the report"
+        );
     }
 
     /// Two original steps failing in a row *should* count. The fix must not
@@ -898,6 +1076,104 @@ mod tests {
     fn an_uncounted_failure_is_treated_as_maybe_still_loading() {
         let legacy = serde_json::json!({"ok": false, "error": "no scorable product cards found"});
         assert!(pick_best_should_retry(&legacy));
+    }
+
+    /// The generated expression must still be the JS that was tested.
+    ///
+    /// The click expression is a `format!` raw string, so every literal brace is
+    /// doubled to survive. That is a silent-failure shape: a mis-escaped brace
+    /// compiles, and the expression is then wrong at runtime in the browser,
+    /// which is exactly where it cannot be unit tested. So it is checked here by
+    /// round-tripping through the same formatter the real call uses.
+    #[test]
+    fn the_click_expression_survives_brace_escaping() {
+        let expr = find_and_click_expr("Add to Cart");
+        assert!(!expr.contains("{{"), "unescaped brace leaked into the output");
+        assert!(!expr.contains("}}"), "unescaped brace leaked into the output");
+        assert!(expr.contains("const DESC = \"Add to Cart\";"), "{expr}");
+        // The three fields Rust reads back to decide what actually happened.
+        for field in ["clicked:", "exact:", "missing,", "purchase:"] {
+            assert!(expr.contains(field), "result lost `{field}`: {expr}");
+        }
+        // And the refusal path.
+        assert!(expr.contains("ok: false"), "the refusal path is gone: {expr}");
+        // The scoring gate: bonuses must rank, never create a match.
+        assert!(
+            expr.contains("if (!hits.length) continue;"),
+            "an element with no word hit can still be chosen: {expr}"
+        );
+    }
+
+    /// A description with a quote in it must not break out of the JS string.
+    #[test]
+    fn a_description_containing_a_quote_is_escaped() {
+        let expr = find_and_click_expr(r#"the "best" laptop button"#);
+        assert!(expr.contains(r#"\"best\""#), "{expr}");
+        assert!(!expr.contains(r#""the "best""#), "unescaped quote: {expr}");
+    }
+
+    // --- what a click is allowed to get away with -------------------------
+
+    fn clicked(el: &str, exact: bool, missing: &[&str]) -> Value {
+        serde_json::json!({
+            "ok": true, "clicked": el, "exact": exact, "missing": missing
+        })
+    }
+
+    /// The 2026-10-03 outcome, pinned.
+    ///
+    /// "Add to Cart" on a page whose only "add" element was "Add to Wishlist".
+    /// It ran, and it was logged as a success, and nothing entered any cart.
+    #[test]
+    fn a_near_miss_is_not_a_purchase() {
+        let r = clicked("Add to Wishlist", false, &["cart"]);
+        let why = purchase_click_verdict("Add to Cart", &r).unwrap_err();
+        assert!(why.contains("Add to Wishlist"), "{why}");
+        assert!(why.contains("missing: cart"), "{why}");
+        // It must say "refused", or a retry loop reads it as a soft failure.
+        assert!(why.to_lowercase().contains("refused"), "{why}");
+    }
+
+    /// The exact match is allowed through. A rule that refuses this is useless.
+    #[test]
+    fn the_real_button_is_allowed_through() {
+        assert!(purchase_click_verdict("Add to Cart", &clicked("Add to Cart", true, &[])).is_ok());
+    }
+
+    /// A fuzzy *non*-purchase click is allowed, and the asymmetry is deliberate.
+    #[test]
+    fn a_fuzzy_non_purchase_click_is_allowed() {
+        let r = clicked("Product result 1 of 48", false, &["first"]);
+        assert!(purchase_click_verdict("the first product result", &r).is_ok());
+    }
+
+    /// "Add to Wishlist" is a purchase by this table, so a near-miss on it is
+    /// refused too — it changes the user's account, not just their basket.
+    #[test]
+    fn wishlist_is_treated_as_a_purchase() {
+        let r = clicked("Add to List", false, &["wishlist"]);
+        assert!(purchase_click_verdict("Add to Wishlist", &r).is_err());
+    }
+
+    /// A failed expression is the click path's own error, not a fuzzy match.
+    #[test]
+    fn a_refused_expression_is_not_also_a_fuzzy_purchase() {
+        let r = serde_json::json!({"ok": false, "error": "no element mentions cart"});
+        // Otherwise the caller would report "refused to click" over an error
+        // that already explains itself, hiding the real cause.
+        assert!(purchase_click_verdict("Add to Cart", &r).is_ok());
+    }
+
+    /// A result with no `exact` field is an *older* expression, not an exact one.
+    ///
+    /// `unwrap_or(false)` means an unfamiliar shape is treated as inexact, which
+    /// for a purchase means refused. That is the right direction: the cost of
+    /// wrongly refusing is a retry loop against a page that will not resolve,
+    /// and the cost of wrongly allowing is an irreversible purchase.
+    #[test]
+    fn a_result_with_no_match_fields_is_refused_not_assumed_exact() {
+        let r = serde_json::json!({"ok": true});
+        assert!(purchase_click_verdict("Add to Cart", &r).is_err());
     }
 
     #[test]

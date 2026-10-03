@@ -36,6 +36,9 @@
 //!      `allow_external_actions` gate on top. Subsetting reduces what she can
 //!      reach; it never grants anything.
 
+// Only the test-only helpers below reach for the full registry; the live path
+// is handed its list by the caller. See `tool_subset_for`.
+#[cfg(test)]
 use super::tool_definitions;
 use crate::llm::ollama::ToolDef;
 
@@ -176,24 +179,22 @@ fn signal_present(haystack: &str, signal: &str) -> bool {
 /// The tools to offer for this request: the core set, plus anything the request
 /// signals.
 ///
-/// Always returns at least the core set, so a request that matches nothing
-/// still gets a fully conversational assistant.
+/// Test-only, and that is the honest description of it. Production narrows the
+/// agent's *own* tool list with [`subset_of`] (see `ToolSelector::narrow`),
+/// because a caller may have already trimmed the registry; this wrapper reaches
+/// for the full global registry, which nothing at runtime does. It is kept
+/// because the tests want "what would be offered from scratch", which is a
+/// different question from "what does this agent have". Left public and
+/// unannotated it would read as the live entry point and quietly disagree with
+/// the path that actually runs.
+#[cfg(test)]
 pub fn tool_subset_for(input: &str) -> Vec<ToolDef> {
     subset_of(&tool_definitions(), input)
 }
 
-/// The names [`subset_of`] would keep. Useful when filtering a caller-supplied
-/// list rather than the full registry.
-pub fn allowed_names(input: &str) -> Vec<String> {
-    tool_subset_for(input)
-        .into_iter()
-        .map(|t| t.function.name)
-        .collect()
-}
-
 /// Filter an arbitrary tool list down to what `input` needs.
 ///
-/// Kept separate from [`tool_subset_for`] so callers that pass a custom list
+/// Kept separate from `tool_subset_for` so callers that pass a custom list
 /// (the fast-tier subset, tests) can be narrowed the same way, instead of the
 /// selector assuming it owns the registry.
 pub fn subset_of(all: &[ToolDef], input: &str) -> Vec<ToolDef> {

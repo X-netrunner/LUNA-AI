@@ -147,7 +147,7 @@ fn url_in_text(text: &str) -> Option<String> {
             c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ']' | '}' | '`')
         })
         .unwrap_or(rest.len());
-    let mut url = rest[..end]
+    let url = rest[..end]
         .trim_end_matches(['.', ',', ';', ':', '!', '?'])
         .to_string();
     if url.is_empty() {

@@ -683,6 +683,13 @@ pub async fn tool_check(name: &str) -> Result<String> {
 /// root, so an open-ended installer is arbitrary code execution chosen by a 7B
 /// model on the strength of a sentence. The list below covers the tools these
 /// turns actually reach for. Widen it in config rather than by editing here.
+///
+/// The cost of getting an entry wrong is not a failed install. `pkg_install`
+/// would report `target not found`, and she would conclude that `pkg_install`
+/// is broken — teaching the wrong lesson about a tool that works. Which is why
+/// every entry is checked against `pacman` in both directions by the tests in
+/// `tool_availability_tests`, and why the names that *cannot* be resolved are
+/// written down below rather than left as folklore.
 pub const PKG_INSTALL_ALLOWLIST: &[&str] = &[
     // Credential testing and password recovery.
     "hydra", "ncrack", "medusa", "john", "hashcat",
@@ -743,9 +750,14 @@ pub const PKG_INSTALL_ALLOWLIST: &[&str] = &[
 /// checked against `pacman` in both directions by the two tests at the bottom
 /// of `tool_availability_tests`.
 ///
-/// The cost of getting this wrong is not a failed install. `pkg_install`
-/// would report `target not found`, and she would conclude that `pkg_install`
-/// is broken — teaching the wrong lesson about a tool that works.
+/// Test-only, and that is the honest description of it. Every entry is a claim
+/// about the world — that `pacman` cannot resolve it — and claims about the
+/// world decay as the repos move. So the list is data for the tests that check
+/// it against the real package database, not production logic: nothing at
+/// runtime reads it. Left unannotated it would sit in the shipping build
+/// looking load-bearing while being unreachable, which is how a stale entry
+/// survives for years.
+#[cfg(test)]
 const NOT_IN_OFFICIAL_REPOS: &[&str] = &[
     "ffuf", "whatweb", "enum4linux", "dirb", "wfuzz", "responder", "netdiscover",
     "metasploit-framework", "crackmapexec", "netexec", "cewl", "burpsuite",

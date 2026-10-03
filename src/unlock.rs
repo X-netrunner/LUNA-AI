@@ -392,6 +392,21 @@ pub fn unlock(public_key: &str, private_key: &str) -> Result<()> {
     // `verify_slices_are_equal` returns Err on mismatch, and the comparison is
     // constant-time. Either the keys match or they do not; the error text is
     // the same in both cases, and no part of either key is echoed.
+    // `ring::constant_time::verify_slices_are_equal` is deprecated, and ring
+    // disclaims side-channel guarantees for it. There is no public replacement
+    // in ring 0.17 — the function is a re-export of the crate-internal
+    // `bb::verify_slices_are_equal`, which is not reachable from outside.
+    //
+    // So the alternative is hand-rolling a constant-time comparison or taking on
+    // a new dependency, and both are worse than the warning: neither can be
+    // validated for side-channel behaviour from here. Left as-is deliberately,
+    // with the limitation recorded rather than silenced.
+    //
+    // The realistic exposure is low: this compares two locally derived key
+    // digests with no remote party and no oracle that returns early. That is an
+    // argument, not a proof — if this ever guards a remotely observable
+    // comparison, it needs a real constant-time primitive, not this.
+    #[allow(deprecated)]
     if ring::constant_time::verify_slices_are_equal(derived, &configured).is_err() {
         // Deliberately does not say which half was wrong, and does not echo any
         // part of the key. A wrong key is a wrong key; there is nothing useful to
