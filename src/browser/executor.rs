@@ -10,6 +10,23 @@ use crate::browser::{cdp::CdpBrowser, dom, planner::Planner, Step, types::Action
 const MAX_RETRIES: u32 = 3;
 const STEP_TIMEOUT_SECS: u64 = 30;
 
+/// How long `pick_best` waits for a results page to render before giving up.
+const PICK_BEST_WAIT: Duration = Duration::from_secs(8);
+const PICK_BEST_POLL: Duration = Duration::from_millis(300);
+
+/// Should `pick_best` look at the page again?
+///
+/// Yes only when there were no cards at all. Cards present but unscorable means
+/// the selectors or the markup changed, and waiting will not fix that; cards
+/// absent means the page has not finished rendering, and re-reading it is the
+/// whole difference between a working pick and a false "no products here".
+fn pick_best_should_retry(result: &Value) -> bool {
+    if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return false;
+    }
+    result.get("cards_seen").and_then(Value::as_u64).unwrap_or(0) == 0
+}
+
 /// Hard ceiling on steps executed in one plan, replans included.
 ///
 /// The loop this bounds had no ceiling at all. Measured 2026-10-03: a five-step
@@ -194,7 +211,7 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
         "click" => {
             let target = step.target.as_deref().unwrap_or("");
             let expr = find_and_click_expr(target);
-            let result = browser.eval(&expr).await?;
+            let result = browser.eval_resilient(&expr).await?;
             // Click might trigger navigation - wait a moment for potential page
             // load, then check whether a purchase click ran into a login wall.
             tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -221,12 +238,12 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
             if text.is_empty() {
                 return Ok(ActionResult::fail(action_name, step_index, 1, "type needs text".into()));
             }
-            let result = browser.eval(&dom::dom_type_expr(text)).await?;
+            let result = browser.eval_resilient(&dom::dom_type_expr(text)).await?;
             Ok(dom::result_from(result, action_name, step_index, 1))
         }
         "press" => {
             let key = step.target.as_deref().unwrap_or("Enter");
-            let result = browser.eval(&dom::dom_press_expr(key)).await?;
+            let result = browser.eval_resilient(&dom::dom_press_expr(key)).await?;
             // Press Enter might trigger navigation
             if key == "Enter" {
                 tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -236,28 +253,53 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
         "scroll" => {
             let direction = step.target.as_deref().unwrap_or("down");
             let amount = step.value.as_deref().and_then(|s| s.parse().ok()).unwrap_or(500);
-            let result = browser.eval(&dom::dom_scroll_expr(direction, amount)).await?;
+            let result = browser.eval_resilient(&dom::dom_scroll_expr(direction, amount)).await?;
             Ok(dom::result_from(result, action_name, step_index, 1))
         }
         "search" => {
-            let query = step.target.as_deref().unwrap_or("");
+            let query = step.target.as_deref().unwrap_or("").trim();
             if query.is_empty() {
                 return Ok(ActionResult::fail(action_name, step_index, 1, "search needs a query".into()));
             }
-            let url = format!("https://duckduckgo.com/?q={}", percent_encode(query));
+            // Search the site that is open, not DuckDuckGo. Leaving the site
+            // mid-plan is what made a search-results scrape find no products.
+            let here = browser.current_url().await.unwrap_or_default();
+            let Some(url) = site_search_url(&here, query) else {
+                return Ok(ActionResult::fail(
+                    action_name,
+                    step_index,
+                    1,
+                    format!(
+                        "cannot search: no usable site is open (page is '{here}'). \
+                         Use the site's own search box — click: search, type: {query}, press: Enter"
+                    ),
+                ));
+            };
             browser.navigate(&url).await?;
+            // Prove it arrived. A redirect to a login wall or a search engine
+            // is a different page, and reporting success would hand the next
+            // step a page nobody asked for.
+            let landed = browser.current_url().await.unwrap_or_default();
+            if !arrived_at(&url, &landed) {
+                return Ok(ActionResult::fail(
+                    action_name,
+                    step_index,
+                    1,
+                    format!("searched '{query}' but ended up on '{landed}', not '{url}'"),
+                ));
+            }
             Ok(ActionResult::ok(action_name, step_index, 1))
         }
         "fillform" => {
             let _instructions = step.target.as_deref().unwrap_or("use sensible sample values");
             // 1. Extract form schema
-            let schema = browser.eval(dom::dom_form_schema_expr()).await?;
+            let schema = browser.eval_resilient(dom::dom_form_schema_expr()).await?;
             let fields = schema.get("fields").cloned().unwrap_or(json!([]));
             // 2. Ask planner LLM for values
             let values = planner.form_values(goal, &fields).await?;
             // 3. Fill the form
             let fill_expr = dom::dom_form_fill_expr(&serde_json::to_string(&values)?);
-            let result = browser.eval(&fill_expr).await?;
+            let result = browser.eval_resilient(&fill_expr).await?;
             if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
                 let filled = result.get("filled").cloned().unwrap_or(json!([]));
                 let note = format!("filled {} field(s): {}", filled.as_array().map(|a| a.len()).unwrap_or(0),
@@ -268,13 +310,44 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
             }
         }
         "pick_best" => {
-            let result = browser.eval(dom::dom_pick_best_expr()).await?;
-            if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-                let clicked = result.get("clicked").cloned().unwrap_or(json!({}));
-                let note = format!("clicked best product: {}", serde_json::to_string(&clicked).unwrap_or_default());
-                Ok(ActionResult::ok_note(action_name, step_index, 1, note))
-            } else {
-                Ok(dom::result_from(result, action_name, step_index, 1))
+            // A results page is not there the instant navigation returns.
+            // Sampling once meant pick_best ran against a half-rendered page and
+            // reported "no product cards matched" for a page that was about to
+            // have forty of them. Poll, but only while the page has no cards at
+            // all: cards present but unscorable is a selector problem, and
+            // waiting cannot fix it.
+            let started = std::time::Instant::now();
+            loop {
+                let result = browser.eval_resilient(dom::dom_pick_best_expr()).await?;
+                if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                    let clicked = result.get("clicked").cloned().unwrap_or(json!({}));
+                    // This step clicked through to a product page, so the next
+                    // step starts against a document that does not exist yet.
+                    // Wait for the page rather than letting the next click fail
+                    // on a dead execution context.
+                    browser.wait_until_ready(Duration::from_millis(8000)).await?;
+                    let note = format!("clicked best product: {}", serde_json::to_string(&clicked).unwrap_or_default());
+                    return Ok(ActionResult::ok_note(action_name, step_index, 1, note));
+                }
+                let waited = started.elapsed();
+                if !pick_best_should_retry(&result) || waited >= PICK_BEST_WAIT {
+                    let mut v = result.clone();
+                    if waited >= PICK_BEST_WAIT {
+                        // Say the wait happened, so "no cards" is not read as
+                        // "the page has no products".
+                        let secs = waited.as_secs_f64();
+                        let err = v
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("page script failed")
+                            .to_string();
+                        v["error"] = Value::String(format!(
+                            "{err} (waited {secs:.1}s for the results to render)"
+                        ));
+                    }
+                    return Ok(dom::result_from(v, action_name, step_index, 1));
+                }
+                tokio::time::sleep(PICK_BEST_POLL).await;
             }
         }
         "wait" | "pause" => {
@@ -287,7 +360,7 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
         "extract" | "read" => {
             let target = step.target.as_deref().unwrap_or("body");
             let expr = dom::dom_extract_text_expr(target);
-            let result = browser.eval(&expr).await?;
+            let result = browser.eval_resilient(&expr).await?;
             if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
                 let text = result.get("text").and_then(Value::as_str).unwrap_or("");
                 let note = format!("extracted text: {}", text);
@@ -297,7 +370,7 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
             }
         }
         "back" => {
-            let result = browser.eval("(() => { window.history.back(); return { ok: true }; })()").await?;
+            let result = browser.eval_resilient("(() => { window.history.back(); return { ok: true }; })()").await?;
             tokio::time::sleep(Duration::from_millis(1000)).await;
             Ok(dom::result_from(result, action_name, step_index, 1))
         }
@@ -315,6 +388,85 @@ fn is_purchase_click(desc: &str) -> bool {
     ]
     .iter()
     .any(|k| lower.contains(k))
+}
+
+/// Build a search URL *for the site currently open*.
+///
+/// The `search` action used to be hardcoded to DuckDuckGo, which meant "search
+/// for best laptop" on an Amazon plan navigated off Amazon to a web search.
+/// Measured 2026-10-03: the plan was navigate-amazon, search, pick_best, and
+/// pick_best correctly found zero product cards on a DuckDuckGo results page.
+/// The failure looked like a scraping bug and was a navigation bug.
+///
+/// So `search` means "search where I already am". The search path is per-site,
+/// so the current host decides the URL, and an unknown site is reported rather
+/// than guessed at — guessing produces a 404 page that looks like a result page.
+///
+/// Pure, so it is testable: this is the decision that broke, and it must not be
+/// reachable only through a live browser.
+fn site_search_url(current: &str, query: &str) -> Option<String> {
+    // Check the raw query: percent_encode("  ") is "%20%20", which is not
+    // empty but is not a search either.
+    if query.trim().is_empty() {
+        return None;
+    }
+    let q = percent_encode(query.trim());
+    let host = host_of(current)?;
+    // Order matters: these are checked most-specific first, and the fallbacks
+    // are deliberately last.
+    let path: &str = if host.contains("amazon.") {
+        "/s?k="
+    } else if host.contains("ebay.") {
+        "/sch/i.html?_nkw="
+    } else if host.contains("flipkart.") {
+        "/search?q="
+    } else if host.contains("etsy.") {
+        "/search?q="
+    } else if host.contains("walmart.") {
+        "/search?q="
+    } else if host.contains("bestbuy.") {
+        "/site/searchpage.jsp?st="
+    } else if host.contains("target.") {
+        "/s?searchTerm="
+    } else if host.contains("newegg.") {
+        "/search?d="
+    } else if host.contains("bhphoto.") {
+        "/c/search?q="
+    } else {
+        // Generic guess: a site with a `?q=` search is more likely than one
+        // without, and the caller verifies the host afterwards.
+        "/?q="
+    };
+    Some(format!("https://{host}{path}{q}"))
+}
+
+/// The host of a URL, lowercased, without `www.`.
+fn host_of(url: &str) -> Option<String> {
+    let rest = url
+        .trim()
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or_else(|| url.trim());
+    let host = rest.split(['/', '?', '#']).next()?;
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    if host.is_empty() || !host.contains('.') {
+        return None;
+    }
+    Some(host.to_lowercase())
+}
+
+/// Did we arrive where we asked to go?
+///
+/// Compares hosts, not full URLs: a redirect from `amazon.com` to
+/// `www.amazon.com` or a locale subdomain is still arrival, while a login wall
+/// or a search engine is not.
+fn arrived_at(requested: &str, actual: &str) -> bool {
+    match (host_of(requested), host_of(actual)) {
+        (Some(want), Some(got)) => {
+            want == got || want.trim_start_matches("www.") == got.trim_start_matches("www.")
+        }
+        _ => false,
+    }
 }
 
 /// Generate JS to find an element by description and click it.
@@ -387,7 +539,6 @@ pub async fn execute_plan(
 ) -> Result<Vec<String>> {
     let mut history = Vec::new();
     let mut plan = LoopControl::new(steps);
-    let total_steps = plan_len(&plan);
 
     loop {
         let Some(step) = plan.current().cloned() else {
@@ -403,9 +554,17 @@ pub async fn execute_plan(
         let desc = describe_step(&step, &result);
         history.push(desc.clone());
 
+        // Read the plan length live. Capturing it once produced logs reading
+        // "Step 8/4" — re-plans splice steps in, so the denominator was stale
+        // from the first repair onwards and the numbering looked broken.
         if result.success {
             let from_plan = plan.record_success();
-            tracing::info!("Step {}/{}: {}", plan.cursor_index(), total_steps, desc);
+            tracing::info!(
+                "Step {}/{}: {}",
+                plan.cursor_index(),
+                plan.len(),
+                desc
+            );
             if !from_plan {
                 // Worth saying out loud, because it is the whole reason this
                 // loop used to be infinite: the repair running is not recovery.
@@ -418,7 +577,7 @@ pub async fn execute_plan(
         tracing::warn!(
             "Step {}/{} failed: {}",
             plan.cursor_index() + 1,
-            total_steps,
+            plan.len(),
             error
         );
 
@@ -462,9 +621,7 @@ pub async fn execute_plan(
     Ok(history)
 }
 
-fn plan_len(plan: &LoopControl) -> usize {
-    plan.len()
-}
+
 
 fn describe_step(step: &Step, result: &ActionResult) -> String {
     let base = match step.action.as_str() {
@@ -657,6 +814,90 @@ mod tests {
         assert_eq!(at_b.action, "click");
         assert!(plan.record_failure(), "b's first failure may re-plan");
         assert!(!plan.record_failure(), "b's second failure must skip");
+    }
+
+    /// The 2026-10-03 failure, as a URL mapping. The plan navigated to Amazon and
+    /// then ran `search: best laptop`, which went to DuckDuckGo; `pick_best` then
+    /// correctly found no product cards on a web search results page.
+    #[test]
+    fn search_stays_on_the_site_that_is_open() {
+        assert_eq!(
+            site_search_url("https://www.amazon.com/", "best laptop").as_deref(),
+            Some("https://amazon.com/s?k=best%20laptop")
+        );
+        assert_eq!(
+            site_search_url("https://www.amazon.co.uk/", "gaming laptop").as_deref(),
+            Some("https://amazon.co.uk/s?k=gaming%20laptop")
+        );
+        // Whatever site is open, the search stays on that site. Searching *on*
+        // google.com yields a google.com URL; the bug was that an amazon.com
+        // plan yielded a duckduckgo.com one.
+        for engine in [
+            "https://duckduckgo.com/",
+            "https://www.google.com/",
+            "https://www.bing.com/",
+        ] {
+            let url = site_search_url(engine, "best laptop").unwrap();
+            assert!(
+                arrived_at(engine, &url),
+                "a search on {engine} wandered off to {url}"
+            );
+        }
+    }
+
+    /// An unknown site still gets a search, because refusing outright would
+    /// break every site not in the table.
+    #[test]
+    fn an_unknown_site_falls_back_to_a_query_parameter() {
+        assert_eq!(
+            site_search_url("https://books.tomlewand.com/catalog", "rust").as_deref(),
+            Some("https://books.tomlewand.com/?q=rust")
+        );
+        assert_eq!(
+            site_search_url("https://www.newegg.com/p/N82E16819113877", "ssd").as_deref(),
+            Some("https://newegg.com/search?d=ssd")
+        );
+    }
+
+    /// No site open means there is nothing to search, and the model is told how
+    /// to search instead of being sent to a search engine.
+    #[test]
+    fn no_site_open_is_an_error_not_a_web_search() {
+        assert_eq!(site_search_url("about:blank", "best laptop"), None);
+        assert_eq!(site_search_url("", "best laptop"), None);
+        assert_eq!(site_search_url("https://www.amazon.com/", "  "), None);
+    }
+
+    /// Arrival is checked by host, so a redirect to a login wall or a different
+    /// search engine is a failure to report rather than a success to claim.
+    #[test]
+    fn arrival_is_verified_by_host() {
+        assert!(arrived_at("https://amazon.com/s?k=x", "https://www.amazon.com/s?k=x"));
+        assert!(arrived_at("https://amazon.com/s?k=x", "https://amazon.com/other/page"));
+        assert!(!arrived_at("https://amazon.com/s?k=x", "https://duckduckgo.com/?q=x"));
+        assert!(!arrived_at("https://amazon.com/s?k=x", "https://www.amazon.co.uk/s?k=x"));
+        assert!(!arrived_at("https://amazon.com/s?k=x", "about:blank"));
+    }
+
+    /// The wait/retry decision. Retrying on "cards present but unscorable" would
+    /// burn eight seconds re-reading a page that will never score.
+    #[test]
+    fn pick_best_retries_only_while_the_page_is_empty() {
+        let empty = serde_json::json!({"ok": false, "cards_seen": 0});
+        let present = serde_json::json!({"ok": false, "cards_seen": 12});
+        let ok = serde_json::json!({"ok": true, "clicked": {}});
+        assert!(pick_best_should_retry(&empty), "an empty page may still be rendering");
+        assert!(!pick_best_should_retry(&present), "cards are there; waiting cannot help");
+        assert!(!pick_best_should_retry(&ok));
+    }
+
+    /// A missing `cards_seen` must not read as "cards present" — an older or
+    /// errored expression has no count, and the safe assumption is that the page
+    /// might not have loaded. The deadline still bounds this.
+    #[test]
+    fn an_uncounted_failure_is_treated_as_maybe_still_loading() {
+        let legacy = serde_json::json!({"ok": false, "error": "no scorable product cards found"});
+        assert!(pick_best_should_retry(&legacy));
     }
 
     #[test]

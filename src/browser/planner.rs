@@ -410,9 +410,9 @@ SUPPORTED ACTION TAGS:
 - type: [Text to type] - into the currently focused input
 - press: [Key like Enter/Tab/Escape]
 - scroll: [down/up]
-- search: [query] - navigate to search engine + type + enter
+- search: [query] - search the site you are ALREADY on (Amazon, eBay, etc). It does NOT go to Google or DuckDuckGo. Only use it to find things on the current site; use navigate: to reach a different site.
 - fillform: [instructions] - auto-fill form fields after navigating to a form URL
-- pick_best: - on a search results page, score products by stars*ln(reviews+1)/price and click best Add to Cart
+- pick_best: - on a search RESULTS page of a shopping site, score products by stars*ln(reviews+1)/price and open the best one. It only picks the product; it does NOT add to cart.
 
 USER GOAL: "{goal}"
 

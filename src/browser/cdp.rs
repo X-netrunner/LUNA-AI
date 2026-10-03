@@ -298,6 +298,78 @@ impl CdpBrowser {
         Ok(())
     }
 
+    /// Evaluate JS, surviving a navigation that happened underneath us.
+    ///
+    /// A click that follows a link destroys the execution context, so the next
+    /// evaluate fails for a reason that has nothing to do with the expression.
+    /// Waiting for the new document and trying again turns a crash into the
+    /// answer, and only on that specific error — a genuine JS error is still
+    /// returned so it can be reported rather than retried into a timeout.
+    pub async fn eval_resilient(&self, expression: &str) -> Result<Value> {
+        match self.eval(expression).await {
+            Err(e) if Self::is_context_lost(&e) => {
+                self.wait_until_ready(Duration::from_millis(6000)).await?;
+                self.eval(expression).await
+            }
+            other => other,
+        }
+    }
+
+    /// Wait for a document to finish loading, bounded.
+    ///
+    /// `readyState` is the cheapest honest signal there is: it is the page's own
+    /// statement about whether it can be queried yet, rather than a sleep
+    /// guessed to be long enough.
+    pub async fn wait_until_ready(&self, budget: Duration) -> Result<()> {
+        let started = std::time::Instant::now();
+        loop {
+            let state = self
+                .eval("document.readyState")
+                .await
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
+            match state.as_deref() {
+                Some("interactive") | Some("complete") => return Ok(()),
+                _ if started.elapsed() >= budget => return Ok(()),
+                _ => tokio::time::sleep(Duration::from_millis(200)).await,
+            }
+        }
+    }
+    /// Did this error come from the page navigating out from under us?
+    ///
+    /// Clicking a product link tears down the JS execution context. The next
+    /// `Runtime.evaluate` then fails with "Cannot find context with specified id",
+    /// which is not a failure of the thing being asked — it is the previous step
+    /// having worked. Measured 2026-10-03: `pick_best` clicked through to a product
+    /// page and the following `click: Add to Cart` died on exactly this, so a
+    /// working step was reported as a crash.
+    pub fn is_context_lost(err: &anyhow::Error) -> bool {
+        let m = err.to_string();
+        [
+            "Cannot find context",
+            "Execution context was destroyed",
+            "No execution context",
+            "Cannot find context with specified id",
+            "Inspected target navigated or closed",
+        ]
+        .iter()
+        .any(|k| m.contains(k))
+    }
+
+/// The URL the page is actually on right now.
+    ///
+    /// Needed because a navigate can fail to arrive: a login wall, a redirect,
+    /// or a stale tab, and every one of those still leaves a page to report
+    /// success from. Anything that claims to have gone somewhere has to be able
+    /// to check where it went.
+    pub async fn current_url(&self) -> Result<String> {
+        let page = self.current_page().await?;
+        page.url()
+            .await
+            .context("read current url")?
+            .ok_or_else(|| anyhow!("page has no url"))
+    }
+
     /// Evaluate JavaScript in the page context
     pub async fn eval(&self, expression: &str) -> Result<Value> {
         let page = self.current_page().await?;
@@ -308,6 +380,10 @@ impl CdpBrowser {
         Ok(result.object().value.clone().unwrap_or(Value::Null))
     }
 
+    /// Evaluate JS, surviving a navigation that happened underneath us.
+    ///
+    /// A click that follows a link destroys the execution context, so the next
+    /// evaluate fails for a reason that has nothing to do with the expression.
     /// Detect a login wall that blocks a purchase — a sign-in page or a strong
     /// "you must log in to continue" prompt. Returns a short human reason.
     ///
@@ -469,6 +545,37 @@ pub async fn ensure_browser(config: &crate::config::BrowserConfig) -> Result<Cdp
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The error text from the 2026-10-03 run, which killed a working
+    /// `click: Add to Cart` immediately after `pick_best` had done its job.
+    #[test]
+    fn a_navigation_is_recognised_as_a_navigation_not_a_failure() {
+        let lost = anyhow::anyhow!(
+            "evaluate js: Error -32000: Cannot find context with specified id"
+        );
+        assert!(CdpBrowser::is_context_lost(&lost));
+        for text in [
+            "Execution context was destroyed",
+            "No execution context",
+            "Inspected target navigated or closed",
+        ] {
+            assert!(CdpBrowser::is_context_lost(&anyhow::anyhow!(text)), "{text}");
+        }
+    }
+
+    /// The retry must be narrow. Retrying a genuine JS error would turn a real
+    /// failure into a timeout and hide it.
+    #[test]
+    fn a_real_javascript_error_is_not_retried() {
+        for text in [
+            "evaluate js: Error -32000: Cannot read properties of null",
+            "SyntaxError: Unexpected token",
+            "navigate: net::ERR_NAME_NOT_RESOLVED",
+        ] {
+            assert!(!CdpBrowser::is_context_lost(&anyhow::anyhow!(text)), "{text}");
+        }
+    }
     use super::*;
     // Tests require a running Chromium — skipped by default
 }
