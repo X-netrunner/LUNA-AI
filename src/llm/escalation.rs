@@ -655,6 +655,45 @@ fn classify_general(input: &str) -> QueryComplexity {
         return QueryComplexity::Complex;
     }
 
+    // A transaction the user wants DONE, as opposed to a topic that merely
+    // sounds like shopping. Checked after `tool_signals` (which already catches
+    // "add to cart" and "on amazon") and before the short-question fallback,
+    // because the fallback is what was eating these.
+    //
+    // Found by measurement, on 2026-10-03, while verifying the other half of the
+    // transaction/research split. "please buy this mechanical keyboard for me" is
+    // seven words with no `tool_signals` hit, so it fell to `words.len() <= 8` and
+    // was served by `fast_model` — which per config.rs:541 "never sees the tool
+    // schema". A purchase request reached a model with no tools at all, so the
+    // browser was unreachable for precisely the job it is kept for. Same for
+    // "take me through checkout for that order" and a bare "fill out this form".
+    //
+    // Word boundaries, not `contains`, unlike the lists above. "buy" inside
+    // "buying"/"buyer"/"buyout" and "order" inside "in order to" are not
+    // transactions, and the bare verbs are exactly the ones that need the
+    // boundary. Reuses `select::signal_present` rather than adding a third
+    // matcher.
+    //
+    // This routes the TIER; `select::triggers("browser_do")` independently decides
+    // whether the browser is among the offered tools. They are complementary on
+    // purpose. "buy milk" reaches a model that has tools but is not offered the
+    // browser, because "buy milk" is not a web task — whereas the old code sent
+    // it to a model with no tools at all.
+    const TRANSACTION: &[&str] = &[
+        "buy", "purchase",
+        "checkout", "check out", "place an order", "place the order", "order it", "order this",
+        "to cart", "to basket", "my cart", "my basket", "add to cart",
+        "sign in", "log in", "login", "sign up",
+        "fill in this form", "fill out this form", "submit this form",
+        "enter my credit card", "add my card", "add my address",
+    ];
+    if TRANSACTION
+        .iter()
+        .any(|s| crate::tools::select::signal_present(&lower, s))
+    {
+        return QueryComplexity::Complex;
+    }
+
     // Short questions without tool signals → simple
     if words.len() <= 8 {
         return QueryComplexity::Simple;
@@ -922,6 +961,66 @@ mod tests {
         ] {
             assert!(is_full(q), "{q:?} must not go to the fast model");
         }
+    }
+
+    /// A request to actually DO a transaction must not be served by the model
+    /// that has no tools. Measured 2026-10-03: "please buy this mechanical
+    /// keyboard for me" reached `fast_model`, which never sees the tool schema,
+    /// so the browser was unreachable for the one job it is kept for.
+    #[test]
+    fn a_transaction_reaches_a_model_that_has_tools() {
+        for q in [
+            "please buy this mechanical keyboard for me",
+            "buy the blue one",
+            "purchase it for me",
+            "take me through checkout for that order",
+            "place the order",
+            "sign in to my email account please",
+            "log in to my bank account",
+            "fill out this form https://forms.gle/cg4NR8jjtTL5Ao5c9 now",
+            "add my card and submit this form",
+            "put it in my basket",
+            "place an order for pizza",
+        ] {
+            assert!(is_full(q), "transaction sent to the toolless model: {q:?}");
+        }
+    }
+
+    /// The point of matching whole words. A bare `contains("buy")` would drag
+    /// these onto the tool-capable model, and `contains("order")` would catch
+    /// "in order to" — which is how a long chatty sentence about fixing a bug
+    /// ends up routed to a model three times its size.
+    ///
+    /// These stay on the fast model, which is the whole claim.
+    #[test]
+    fn lookalike_words_are_not_transactions() {
+        for q in [
+            "what is a buyout period",
+            "i am buying a house next year",
+            "tell me about the buyer's market here",
+            "in order to relax i read a book",
+            "in order to be fair we asked",
+            "what is a payday",
+        ] {
+            assert!(
+                matches!(classify(q), QueryComplexity::Simple),
+                "{q:?} was treated as a transaction and left the fast model"
+            );
+        }
+    }
+
+    /// A bare noun is deliberately still a signal. "checkout" with no verb is
+    /// genuinely ambiguous — a supermarket, a git branch — and both readings want
+    /// a model that can act rather than one that can only talk. Cheap direction.
+    #[test]
+    fn a_bare_transaction_noun_still_counts() {
+        assert!(is_full("the checkout is slow today"));
+        assert!(is_full("checkout"));
+        // "place an order for pizza" is the contrast case: the lookalike test
+        // above pins that "in order to" is not a transaction, and this pins that
+        // "place an order" is. The two phrases differ by four characters and
+        // must not land the same way.
+        assert!(is_full("my cart"));
     }
 
     #[test]

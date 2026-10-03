@@ -134,7 +134,53 @@ fn triggers(name: &str) -> &'static [&'static str] {
         ],
 
         // ── Gated, but only offered when actually asked for ─────────────
-        "browser_do" => &["browser", "browse", "web page", "website", "navigate to", "amazon", "click on"],
+        // Chromium is for TRANSACTIONS. Research goes through `web_search` and
+        // `fetch_page`, which are ungated core tools above and verified live.
+        //
+        // This list used to be topic words — "browser", "browse", "web page",
+        // "website", "navigate to", "amazon" — which is the exact inverse of the
+        // split, and it is why research kept landing in Chromium: any request
+        // naming a site unlocked the browser, and then the one-tab planner
+        // (rule 9) had to hold every site in a single page. Rule 9 was never the
+        // bug. Routing multi-site research into a browser was.
+        //
+        // So every word below names something to DO on a site rather than a site
+        // to look at. A topic word cannot separate "tell me about X" from "buy
+        // X on amazon" — they are the same words in a different order.
+        //
+        // The asymmetry is deliberate, and it is why the list errs toward
+        // offering. Withholding Chromium from a real purchase means she cannot
+        // buy anything, the one job the user wants it for. Offering it to a
+        // research request costs a detour, not a wrong action — the call still
+        // passes `allow_external_actions` and `browser_do`'s own planner.
+        "browser_do" => &[
+            // Explicit browser intent, whatever the reason for it.
+            "in the browser", "in chromium", "in chrome", "use the browser",
+            "use chromium", "open chromium", "open the browser", "open a browser",
+            "browse to",
+            // Cart and checkout.
+            //
+            // Keyed on the DESTINATION noun, not on a fixed phrase. The corpus
+            // says "add ps5 controller to cart", "add the first result to cart"
+            // and "add ps5 controller to my cart" — three ways to say it, none
+            // containing "add to cart". Keying on the noun is what survives a
+            // user naming the product between the verb and the destination.
+            "to cart", "to basket", "my cart", "the cart", "my basket", "the basket",
+            "checkout",
+            "buy it", "buy this", "buy that", "order it", "order this",
+            "place the order", "proceed to checkout", "complete the checkout",
+            // Session and forms. Nothing but a real browser can do these, which
+            // is the other half of why it exists. "this form" is in the corpus,
+            // not "the form".
+            "sign in to", "log in to", "login to", "sign up for", "sign up on",
+            "fill in this form", "fill out this form", "fill this form",
+            "submit this form", "fill in the form", "fill the form",
+            "fill out the form", "submit the form",
+            "enter my details", "enter my address", "enter my credit card",
+            "add my address", "add my card",
+            // A named click, where the page is the thing being acted on.
+            "click on", "click the", "press the button",
+        ],
         "desktop_do" => &["desktop", "open the app", "my screen", "screenshot"],
         "sysmode" => &["sysmode", "stealth", "lockdown", "honeypot", "harden", "security mode", "firewall"],
         "whatsapp_send" => &["whatsapp", "send a message", "text them", "message my"],
@@ -175,7 +221,7 @@ fn triggers(name: &str) -> &'static [&'static str] {
 /// became `yourownsource` and could never match text containing spaces. Hence
 /// the rule: spell a signal the way a person would type it, and list both
 /// spellings when two exist ("self-patch" AND "selfpatch").
-fn signal_present(haystack: &str, signal: &str) -> bool {
+pub(crate) fn signal_present(haystack: &str, signal: &str) -> bool {
     let hay: Vec<char> = haystack.to_lowercase().chars().collect();
     let needle: Vec<char> = signal.to_lowercase().chars().collect();
     if needle.is_empty() || needle.len() > hay.len() {
@@ -364,6 +410,112 @@ mod tests {
                 "{q:?} wrongly unlocked nmap_scan"
             );
         }
+    }
+
+    /// The transaction/research split, pinned with the real prompts that
+    /// produced it.
+    ///
+    /// Every string here is a verbatim user message from
+    /// `~/.local/share/luna/conversations.jsonl`, not a phrasing I invented to
+    /// suit the matcher. That is the whole reason this test exists: the first
+    /// draft of the trigger list keyed on "add to cart", and the corpus purchase
+    /// prompts say "add ps5 controller to cart" and "add the first result to
+    /// cart" — neither contains that phrase. A list written from intuition would
+    /// have shipped and silently broken the one job the browser is kept for.
+    #[test]
+    fn chromium_is_for_transactions_and_research_stays_on_the_cli() {
+        // Real purchase prompts. Each one names a site AND a cart action, and
+        // none of them contains the words "add to cart" — the destination noun
+        // is what they share.
+        for q in [
+            "Add the first PS5 result to cart on amazon.com",
+            "add ps5 controller to cart on amazon.com",
+            "search for ps5 controller on amazon.com and add the first result to cart",
+            "Luna: \"add ps5 controller to cart on amazon\"",
+        ] {
+            assert!(has(q, "browser_do"), "browser withheld from a real purchase: {q:?}");
+        }
+        // Real research prompts: a site is named, no cart action. These must not
+        // reach Chromium — the CLI answers them, and Chromium is what made
+        // multi-site research impossible under the one-tab planner.
+        for q in [
+            "go to amazon.com and search for a mechanical keyboard",
+            "open amazon.com homepage and report the page title",
+            "look up the current price of the samsung 990 pro 2tb nvme ssd on amazon.com and report it",
+            "find the third result for wireless earbuds on amazon.com and report its name",
+            "open wikipedia.org and tell me what the featured article is",
+            "search for wired earbuds on amazon.com and report the name of the second result",
+            "open amazon.com and report the text of the first item in the nav bar",
+        ] {
+            assert!(
+                !has(q, "browser_do"),
+                "research reached Chromium, which it must not: {q:?}"
+            );
+        }
+    }
+
+    /// Withholding the browser is only acceptable if the CLI can still do the
+    /// job. Pinning the negative alone would let "withhold everything" pass.
+    #[test]
+    fn research_prompts_still_offer_the_cli_research_tools() {
+        for q in [
+            "go to amazon.com and search for a mechanical keyboard",
+            "open wikipedia.org and tell me what the featured article is",
+            "look up the current price of the samsung 990 pro 2tb nvme ssd on amazon.com and report it",
+            "compare the best mechanical keyboard under 4000",
+        ] {
+            assert!(has(q, "web_search"), "no web_search for {q:?}");
+            assert!(has(q, "fetch_page"), "no fetch_page for {q:?}");
+        }
+    }
+
+    /// Sessions and forms are the other half of why the browser exists: no CLI
+    /// tool holds a cookie jar, so these must survive the narrowing. The corpus
+    /// says "this form", not "the form", which the first draft got wrong.
+    #[test]
+    fn forms_and_sessions_still_reach_the_browser() {
+        for q in [
+            "open the browser and fill out this form https://forms.gle/cg4NR8jjtTL5Ao5c9",
+            "fill out this form https://forms.gle/cg4NR8jjtTL5Ao5c9",
+            "sign in to my email",
+            "log in to my bank account",
+            "submit this form",
+        ] {
+            assert!(has(q, "browser_do"), "browser withheld from a real session: {q:?}");
+        }
+    }
+
+    /// The two gates are independent. A research prompt about a scanner must not
+    /// pick up the browser just because it is about security tooling.
+    ///
+    /// Found by measurement, not by reading: in the 12-cell live run, this prompt
+    /// was the only one offered a 24th tool instead of 23, and the only
+    /// candidate was `nmap_scan`. Pinning it stops "24 tools" from later being
+    /// read as a browser leak — and stops a real browser leak from going
+    /// unnoticed because 24 happened to be the expected number.
+    #[test]
+    fn a_research_prompt_about_a_scanner_gets_the_scanner_not_the_browser() {
+        let q = "look up the current stable version of nmap and what changed in it";
+        assert!(has(q, "nmap_scan"), "scanner should be offered for {q:?}");
+        assert!(!has(q, "browser_do"), "browser must not appear for {q:?}");
+        assert_eq!(
+            names(q).len(),
+            CORE_TOOLS.len() + 1,
+            "exactly one tool beyond the core set, and it is nmap_scan"
+        );
+    }
+
+    /// A checker that shares the matcher's code cannot catch the matcher's
+    /// bugs, so this pins `signal_present` against the thing it exists to
+    /// prevent: a substring match. "report" contains "port" and "support"
+    /// contains it too, and both reach the selector every turn.
+    #[test]
+    fn the_signal_matcher_respects_word_boundaries() {
+        assert!(signal_present("add to cart now", "to cart"));
+        assert!(!signal_present("a bug report for my team", "port"));
+        assert!(!signal_present("this is important", "port"));
+        assert!(!signal_present("clear it", "cart"), "substring match leaked");
+        assert!(!signal_present("add to cartoon now", "to cart"));
     }
 
     /// Gated tools must not be sitting in every prompt. They appear on request
