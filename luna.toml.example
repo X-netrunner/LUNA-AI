@@ -25,10 +25,38 @@ base_url = "http://localhost:11434"
 model = "qwen2.5:7b-instruct-q4_K_M"
 temperature = 0.7
 max_tokens = 2048
-enable_thinking = true
+enable_thinking = false   # Keep this false. It sends top-level `think: false`, which is
+                          # what Luna's dispatch loop wants: a model that narrates its
+                          # reasoning burns the iteration budget before it calls a tool.
+                          # qwen2.5 rejects `think: true` outright anyway (Luna detects
+                          # that and omits the field), so this only changes behaviour
+                          # for thinking-capable models like the deep tier below.
 fast_model = "qwen2.5:3b"   # Non-reasoning small model — instant replies, no hidden thinking block
-deep_model = "qwen2.5:7b-instruct-q4_K_M"   # Large model for code, reasoning, analysis (fits fully in 6GB VRAM)
-                                 # Remove or comment out to disable the two-model split
+deep_model = "qwen3.5:9b"   # Code, reasoning, analysis. Needs `ollama pull qwen3.5:9b`.
+                             # Remove or comment out to disable the two-model split.
+                             #
+                             # Measured 2026-10-04 on a 6 GB card (RTX 4050 Laptop), by
+                             # executing each generated script against a test input
+                             # rather than reading it, and N=12 live write cells through
+                             # the real dispatch path:
+                             #
+                             #   deep_model          code correct   median cell   tok/s
+                             #   qwen3.5:9b                 5/8          40.5s      12.8
+                             #   qwen2.5-coder:14b           4/8         158.0s       6.0
+                             #   llama3.1:8b                 0/8          19.5s      16.2
+                             #
+                             # llama3.1:8b is faster and ties on tool discipline but
+                             # writes scripts that prompt for input instead of reading
+                             # argv, and scored 0/8. Discipline alone was a tie, so it
+                             # was never a real candidate. glm4:9b was disqualified
+                             # outright: it declares `tools` and then refuses, answering
+                             # "I'm sorry, but as an AI, I don't have direct access to
+                             # your computer". A VRAM table will not tell you that.
+                             #
+                             # Weight size decides more than benchmark score here. Model
+                             # choice is mostly a question of what fits in VRAM without
+                             # spilling: weights that do not fit cross the PCIe bus on
+                             # every token, and that is what made the 14b slow.
 # security_model = "whiterabbitneo-coder-tools"   # Offensive-security tier: PoCs, exploits,
 #                                 # scanners, CTF on your own lab. Checked BEFORE deep, so
 #                                 # "write a python exploit" is not claimed by the coder.
@@ -184,20 +212,7 @@ notify_hours = 1
 # Baileys bridge. Pair it once:  luna --whatsapp-link  (scans a QR with your
 # phone), which also starts the always-on luna-whapp.service. The bridge
 # listens only on 127.0.0.1 (token in ~/.local/share/whapp/config.json).
-[whatsapp]
-enabled = true
-# base_url = "http://127.0.0.1:7373"
 
-# ── sysmode hardening-profile switcher ───────────────────────────────────────
-# Lets Luna switch system security profiles (secure / cyber / stealth /
-# lockdown), pull honeypot/IDS attack logs, and run a self-test of the whole
-# setup ("is the honeypot working?", "test if everything works"). Points at the
-# sysmode CLI — usually already on PATH or at /usr/local/bin/sysmode.
-[sysmode]
-enabled = true
-# bin = "sysmode"
-
-[daemon]
 # Disk hygiene: pacman cache, ~/.cache, trash, journals.
 # cleanup_mode:
 #   notify = only report reclaimable space (default, safe)
@@ -223,6 +238,19 @@ orphan_cleanup_days = 7
 # decides what to click, Luna executes it and sends screenshots back. No
 # Chrome extension needed. Chromium keeps its own profile (see profile_dir)
 # so you only log into sites once, and it stays open after each task.
+[whatsapp]
+enabled = true
+# base_url = "http://127.0.0.1:7373"
+
+# ── sysmode hardening-profile switcher ───────────────────────────────────────
+# Lets Luna switch system security profiles (secure / cyber / stealth /
+# lockdown), pull honeypot/IDS attack logs, and run a self-test of the whole
+# setup ("is the honeypot working?", "test if everything works"). Points at the
+# sysmode CLI — usually already on PATH or at /usr/local/bin/sysmode.
+[sysmode]
+enabled = true
+# bin = "sysmode"
+
 [browser]
 enabled = true
 # WebSocket the Project-Vision server exposes (its main.py serves it)

