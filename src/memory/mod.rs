@@ -51,16 +51,15 @@ impl Memory {
     /// Build context for LLM — filters out tool call artifacts that
     /// confuse the model into echoing them on the next turn.
     pub fn build_context(&self, system_prompt: &str) -> Vec<Message> {
-        let mut context = vec![Message::system(system_prompt)];
+        // Pre-allocate to avoid reallocations during filter.
+        let mut context = Vec::with_capacity(self.messages.len() + 1);
+        context.push(Message::system(system_prompt));
 
-        let clean: Vec<Message> = self
-            .messages
-            .iter()
-            .filter(|m| {
-                let c = m.content.trim();
-                // Drop assistant messages that are just tool call echoes
-                !(m.role == "assistant"
-                    && (c.starts_with("[tool_call:") ||
+        for m in &self.messages {
+            let c = m.content.trim();
+            // Drop assistant messages that are just tool call echoes
+            if m.role == "assistant"
+                && (c.starts_with("[tool_call:") ||
                     c.starts_with("Called tool:") ||
                     c.starts_with("<tool_use>") ||
                     c.starts_with("<|tool_call|>") ||
@@ -68,12 +67,12 @@ impl Memory {
                     c.starts_with("(run_shell") ||
                     c.starts_with("Opening `") ||
                     // Single-word or punctuation-only responses are artifacts
-                    (c.len() < 3 && !c.chars().any(|ch| ch.is_alphabetic()))))
-            })
-            .cloned()
-            .collect();
-
-        context.extend(clean);
+                    (c.len() < 3 && !c.chars().any(|ch| ch.is_alphabetic())))
+            {
+                continue;
+            }
+            context.push(m.clone());
+        }
         context
     }
 

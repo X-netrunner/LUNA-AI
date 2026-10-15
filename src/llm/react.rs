@@ -288,7 +288,7 @@ impl<'a> ReactLoop<'a> {
             }
 
             let mut context = memory.build_context(system_prompt);
-            context.extend(turn_messages.clone());
+            context.extend_from_slice(&turn_messages);
 
             tracing::debug!("ReAct iteration {}, context: {}", iteration, context.len());
             // Announced before the `await`, because this is the long silent part:
