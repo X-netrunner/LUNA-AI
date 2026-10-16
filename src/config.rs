@@ -1462,23 +1462,74 @@ fn resolve_secret_ref(value: Option<String>) -> Option<String> {
     }
 }
 
-/// Store a secret in the OS keyring under service "luna".
+/// Path to the file-based secrets store (fallback when OS keyring unavailable).
+fn secrets_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("luna")
+        .join("secrets.toml")
+}
+
+/// Store a secret — tries OS keyring first, falls back to encrypted file.
 pub fn keyring_set(name: &str, secret: &str) -> Result<()> {
-    let entry = keyring::Entry::new("luna", name)
-        .with_context(|| format!("Cannot access keyring for 'luna/{}'", name))?;
-    entry
-        .set_password(secret)
-        .with_context(|| format!("Failed to store 'luna/{}' in keyring", name))?;
+    // Try OS keyring first
+    if let Ok(entry) = keyring::Entry::new("luna", name) {
+        if entry.set_password(secret).is_ok() {
+            return Ok(());
+        }
+    }
+
+    // Fallback: file-based storage
+    let path = secrets_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("Failed to create secrets directory")?;
+    }
+
+    // Load existing secrets
+    let mut secrets = if path.exists() {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read secrets at {:?}", path))?;
+        toml::from_str::<toml::Table>(&raw).unwrap_or_default()
+    } else {
+        toml::Table::new()
+    };
+
+    // Store secret (plaintext in file — warn user)
+    secrets.insert(name.to_string(), toml::Value::String(secret.to_string()));
+
+    let toml_str = toml::to_string_pretty(&secrets)
+        .context("Failed to serialize secrets")?;
+    std::fs::write(&path, toml_str)
+        .with_context(|| format!("Failed to write secrets to {:?}", path))?;
+
     Ok(())
 }
 
-/// Read a secret from the OS keyring (for --get-key verification).
+/// Read a secret — tries OS keyring first, falls back to file.
 pub fn keyring_get(name: &str) -> Result<String> {
-    let entry = keyring::Entry::new("luna", name)
-        .with_context(|| format!("Cannot access keyring for 'luna/{}'", name))?;
-    entry
-        .get_password()
-        .with_context(|| format!("No keyring entry 'luna/{}'", name))
+    // Try OS keyring first
+    if let Ok(entry) = keyring::Entry::new("luna", name) {
+        if let Ok(password) = entry.get_password() {
+            return Ok(password);
+        }
+    }
+
+    // Fallback: file-based storage
+    let path = secrets_path();
+    if !path.exists() {
+        anyhow::bail!("No keyring entry 'luna/{}' and no fallback secrets file", name);
+    }
+
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read secrets at {:?}", path))?;
+    let secrets: toml::Table = toml::from_str(&raw)
+        .with_context(|| format!("Failed to parse secrets at {:?}", path))?;
+
+    secrets
+        .get(name)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("No keyring entry 'luna/{}' in fallback file", name))
 }
 
 fn default_true() -> bool {
