@@ -1833,11 +1833,18 @@ fn requests_code_file(input: &str) -> bool {
     }
     const MAKE: &[&str] = &[
         "write", "create", "make", "generate", "save", "build", "produce", "draft",
+        // Follow-up edit verbs: after "write a file", user says "optimize it",
+        // "refactor it", "fix it", "improve it" — these target an existing file
+        // and should trigger the write/edit guard even without a fresh artifact noun.
+        "optimize", "refactor", "fix", "improve", "rewrite", "clean up",
+        "add error handling", "add tests", "add types", "add typing",
     ];
     const ARTIFACT: &[&str] = &[
         "script", "code", "program", "exploit", "payload", "keylogger", "tool",
         "utility", "automation", "module", "snippet", "file",
     ];
+    // Also match if the input targets the *same file* explicitly.
+    const SAME_FILE: &[&str] = &["same file", "in the same file", "keep it in the same file"];
     MAKE.iter()
         .any(|m| crate::tools::select::signal_present(input, m))
         && ARTIFACT.iter().any(|a| {
@@ -1851,6 +1858,7 @@ fn requests_code_file(input: &str) -> bool {
                 || crate::tools::select::signal_present(input, &format!("{a}s"))
                 || crate::tools::select::signal_present(input, &format!("{a}es"))
         })
+        || SAME_FILE.iter().any(|s| crate::tools::select::signal_present(input, s))
 }
 
 /// The reply carries code, so the artifact exists and is un-written.
@@ -2164,12 +2172,12 @@ fn push_write_correction(
             "the reply claimed a write that never ran",
             "no write_file or edit_file call appears this turn, so the change you \
              described is not on disk",
-            "Do not report the change as done. Act now with a tool: if the file already \
-             exists, call read_file on it first (its current content is not in front of \
-             you), then edit_file for a targeted change or write_file to replace the \
-             whole file. If it does not exist yet, call write_file with an explicit \
-             `path` and the full `content`. Then report the path the tool actually \
-             returned."
+            "Do not report the change as done. You MUST call a tool in THIS response — \
+             no acknowledgment, no explanation. If the file already exists, call \
+             read_file on it first (its current content is not in front of you), then \
+             edit_file for a targeted change or write_file to replace the whole file. \
+             If it does not exist yet, call write_file with an explicit `path` and the \
+             full `content`. Then report the path the tool actually returned."
                 .to_string(),
         )
     } else if wrote_via_shell {
@@ -4230,6 +4238,13 @@ pub(crate) fn is_escalation_response(text: &str) -> bool {
     let contained_in_short_reply =
         text.trim().chars().count() < 200 && phrases.iter().any(|p| t.contains(p));
     begins || contained_in_short_reply
+}
+
+/// Public wrapper for the internal refusal detector, so other crates can check
+/// if a response looks like a model refusal without depending on private
+/// `looks_like_refusal`. Used by the deep-tier fallback in `agent/mod.rs`.
+pub fn is_refusal_response(text: &str) -> bool {
+    looks_like_refusal(text)
 }
 
 /// Try to read `tool_name {json}` out of the middle of a response.

@@ -100,6 +100,24 @@ fn build_deep_client(config: &LunaConfig) -> Option<OllamaClient> {
     )
 }
 
+/// Optional uncensored deep/coder model used as automatic fallback if the
+/// normal deep model refuses. Does not affect the security tier.
+fn build_deep_unrestricted_client(config: &LunaConfig) -> Option<OllamaClient> {
+    let model = config.llm.deep_model_unrestricted.as_deref()?;
+    Some(
+        OllamaClient::new(
+            &config.llm.base_url,
+            model,
+            config.llm.temperature,
+            config.llm.max_tokens,
+        )
+        .enable_thinking(config.llm.enable_thinking)
+        .num_ctx(config.llm.num_ctx)
+        .debug(config.logging.level == "debug")
+        .term_output(!tui_quiet(config)),
+    )
+}
+
 /// Client for offensive-security requests.
 ///
 /// Thinking is forced OFF regardless of `enable_thinking`. The reasoning traces
@@ -1145,6 +1163,20 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         )
         .with_recall_k(10)
     });
+    let deep_unrestricted_client = build_deep_unrestricted_client(config);
+    let deep_unrestricted_react = deep_unrestricted_client.as_ref().map(|c| {
+        ReactLoop::new(
+            c,
+            config.agent.max_react_iterations,
+            if config.agent.native_tools {
+                crate::tools::tool_definitions()
+            } else {
+                Vec::new()
+            },
+            config,
+        )
+        .with_recall_k(10)
+    });
     let system_prompt = build_system_prompt(config);
 
     println!("  Luna — text mode");
@@ -1244,6 +1276,9 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
 
         // Up to two attempts: a fast-model reply of "ESCALATE" rolls back
         // the exchange and retries once on the full model with tools.
+        // Additionally: if the deep tier refuses and an unrestricted deep
+        // model is configured, fall back to it once.
+        let mut deep_fell_back = false;
         for attempt in 1..=2 {
             let mem_snapshot = memory.len();
             let tag = if debug {
@@ -1274,6 +1309,23 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                         tier = Tier::Full;
                         effective_prompt = system_prompt.to_string();
                         effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
+                        continue;
+                    }
+                    // Deep-tier automatic fallback: if normal deep refuses,
+                    // retry once with uncensored deep. Does not touch Security.
+                    if tier == Tier::Deep
+                        && !deep_fell_back
+                        && deep_unrestricted_react.is_some()
+                        && crate::llm::react::is_refusal_response(&response)
+                        && attempt < 2
+                    {
+                        tracing::info!("Deep model refused — falling back to uncensored deep model");
+                        memory.truncate_to(mem_snapshot);
+                        if let Some(dr2) = deep_unrestricted_react.as_ref() {
+                            active_react = dr2;
+                        }
+                        deep_fell_back = true;
+                        // Reuse same effective prompt (DEEP_PROMPT)
                         continue;
                     }
                     if !streamed {

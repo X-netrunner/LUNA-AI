@@ -362,6 +362,10 @@ pub struct LlmConfig {
     /// Optional large model for complex reasoning / code (e.g. qwen3:8b).
     /// Queries needing deep thought are routed here instead of `model`.
     pub deep_model: Option<String>,
+    /// Optional uncensored deep/coder model used as automatic fallback if
+    /// the normal deep model refuses. Does not affect the security tier.
+    #[serde(default)]
+    pub deep_model_unrestricted: Option<String>,
     /// Model for offensive-security work on the user's own systems — exploit and
     /// PoC authoring, reverse shells, wireless testing, lab attack tooling.
     ///
@@ -623,6 +627,7 @@ impl Default for LlmConfig {
             enable_thinking: true,
             fast_model: None,
             deep_model: None,
+            deep_model_unrestricted: None,
             security_model: None,
             security_model_abliterated: None,
             security_retry_on_refusal: true,

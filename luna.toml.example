@@ -33,6 +33,7 @@ enable_thinking = false   # Keep this false. It sends top-level `think: false`, 
                           # for thinking-capable models like the deep tier below.
 fast_model = "qwen2.5:3b"   # Non-reasoning small model — instant replies, no hidden thinking block
 deep_model = "qwen3.5:9b"   # Code, reasoning, analysis. Needs `ollama pull qwen3.5:9b`.
+deep_model_unrestricted = "qwen2.5-coder:14b-abliterated"  # Uncensored coder fallback. `ollama pull qwen2.5-coder:14b-abliterated`
                              # Remove or comment out to disable the two-model split.
                              #
                              # Measured 2026-10-04 on a 6 GB card (RTX 4050 Laptop), by

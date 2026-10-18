@@ -1005,9 +1005,15 @@ impl OllamaClient {
                 let chunk: StreamChunk = serde_json::from_str(&line)
                     .with_context(|| format!("Failed to parse chunk: {}", line))?;
 
-                // Collect thinking tokens — saved and logged when done
+                // Collect thinking tokens — print live in CLI so reasoning
+                // streams line-by-line like the answer content.
                 if let Some(ref think) = chunk.message.thinking {
                     thinking_buf.push_str(think);
+                    if self.term_output {
+                        print!("{}", think);
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
+                    }
                 }
 
                 if let Some(token) = chunk.message.content {
@@ -1023,9 +1029,11 @@ impl OllamaClient {
                 }
 
                 if chunk.done {
-                    // Log the accumulated thinking block — tracing in TUI mode
-                    // routes it to the debug panel instead of raw stderr.
-                    if !thinking_buf.is_empty() {
+                    // Thinking was already streamed live to stdout in CLI
+                    // mode; avoid printing a second collapsed summary after
+                    // the answer. In non-CLI (TUI/log) mode, keep the debug
+                    // trace for observability.
+                    if !self.term_output && !thinking_buf.is_empty() {
                         let think = crate::util::truncate_marked(&thinking_buf, 160);
                         let think_one_line = think
                             .chars()
@@ -1034,11 +1042,7 @@ impl OllamaClient {
                                 c => c,
                             })
                             .collect::<String>();
-                        if self.term_output {
-                            eprintln!("\n[think] {}", think_one_line);
-                        } else {
-                            tracing::debug!("[think] {}", think_one_line);
-                        }
+                        tracing::debug!("[think] {}", think_one_line);
                     }
                     if self.term_output {
                         println!();
