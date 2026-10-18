@@ -589,7 +589,7 @@ const WRITE_CLAIM_PHRASES: &[&str] = &[
 /// confidently wrong correction naming a path that was never mentioned. A `.`
 /// only ends a sentence when whitespace or the end of the text follows it,
 /// which keeps `example.com`, `file.py` and `3.14` intact.
-fn split_sentences(text: &str) -> Vec<&str> {
+pub(crate) fn split_sentences(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -2482,6 +2482,116 @@ fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
             "the tier claimed writes it did not perform:\n{}",
             fabricated.join("\n")
         );
+    }
+
+    /// The user's actual failing sequence, through the real routed path.
+    ///
+    /// Turn 1 is the ambiguous "attack my laptop", which the model reasonably
+    /// answers with a port survey. Turn 2 names the open port and asks for
+    /// access. The turn must END with an exploit on disk — not with a second
+    /// survey asking the user to pick a port they already picked.
+    ///
+    /// A *real* listener is bound first, on purpose. The first draft of this
+    /// test named port 80 and failed — but for the right reason: nothing was
+    /// listening on 80 in the test environment, the harness's own scan found
+    /// only ephemeral ports, and the model said so honestly ("port 80 is not in
+    /// my scan"). That is not the bug; asking the user to choose a port the
+    /// harness *did* find is. So the target has to exist, or the test measures
+    /// the model's honesty instead of the flow.
+    ///
+    /// Drives `run_routed_turn` — the same function the TUI calls, recon
+    /// injection and all — so a fix cannot pass by only working in text mode.
+    ///
+    /// The property is what the *harness* does with the turn: it ends with a
+    /// file written, not with a second port survey that asks the user to choose
+    /// a port they already chose. It deliberately does not assert that the file
+    /// is a `.py` exploit — measured 2026-10-18, the model wrote `8080.html` and
+    /// then tried to serve it. That is a model-quality question, not a harness
+    /// one, and pinning the artifact kind would make a live test fail for
+    /// reasons the harness cannot fix.
+    #[tokio::test]
+    #[ignore = "needs a live ollama + the security model; runs nmap and the security model"]
+    async fn a_named_open_port_produces_a_file_not_a_second_survey() {
+        // A live loopback service that answers every request, so the port the
+        // user names is genuinely open and genuinely reachable.
+        //
+        // The port is chosen from nmap's own services table on purpose. An
+        // ephemeral port shows up as `unknown`, and the security model — quite
+        // reasonably — asks for a hint rather than guessing at an unidentified
+        // service (measured: "Port 42765 shows as 'unknown' … I need a hint").
+        // That is a different behaviour from the one under test here. The user's
+        // real case was port 80/`http`, so the fixture has to be a port the scan
+        // can name.
+        let (listener, port) = {
+            let mut bound = None;
+            for candidate in [8080u16, 8000, 3000, 0] {
+                if let Ok(l) = tokio::net::TcpListener::bind(("127.0.0.1", candidate)).await {
+                    let p = l.local_addr().expect("local_addr").port();
+                    bound = Some((l, p));
+                    break;
+                }
+            }
+            bound.expect("no loopback port available for the fixture")
+        };
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            loop {
+                match listener.accept().await {
+                    Ok((mut sock, _)) => {
+                        let _ = sock
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+                            .await;
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut config = crate::config::LunaConfig::load().expect("live config");
+        // Keep the model's own output directory out of the way, and give the
+        // test a dedicated one so "a file was written" is unambiguous.
+        let dir = std::env::temp_dir().join(format!("luna_named_port_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        config.llm.security_scripts_dir = dir.to_string_lossy().into_owned();
+
+        let mut memory = crate::memory::Memory::new(
+            config.memory.context_window,
+            &dir.join("history.json"),
+        )
+        .expect("memory");
+
+        let first = super::run_routed_turn("try to attack my laptop", &mut memory, &config)
+            .await
+            .expect("turn 1");
+        let second = super::run_routed_turn(
+            &format!("lets go with port {port} and gain access using an exploit"),
+            &mut memory,
+            &config,
+        )
+        .await
+        .expect("turn 2");
+
+        let mut files: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "history.json")
+            .collect();
+        files.sort();
+
+        println!("target port: {port}");
+        println!("turn 1 reply:\n{}\n", first.text.trim());
+        println!("turn 2 model: {}\nturn 2 reply:\n{}", second.model, second.text.trim());
+        println!("files written: {files:?}");
+
+        assert!(
+            !files.is_empty(),
+            "the user named open port {port} on turn 2 and the turn produced NO \
+             file — reply was:\n{}",
+            second.text.trim()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The flag must change ONLY the scope clause.

@@ -254,6 +254,10 @@ impl<'a> ReactLoop<'a> {
         // the reply handed the code over in a fence instead. Capped at 2 for the
         // same reason — a model that will not be taught still gets an answer.
         let mut write_retries = 0;
+        // Guards the "answered the wrong turn" failure: the model returns its
+        // previous answer verbatim to a *new* instruction instead of reading it.
+        // One resample with a correction, then the answer stands.
+        let mut repeat_retried = false;
         // What this turn actually called and got back, so the final answer can be
         // checked against it rather than against the shape of its prose.
         let mut receipt: Vec<Receipt> = Vec::new();
@@ -513,9 +517,9 @@ impl<'a> ReactLoop<'a> {
                             }
                         };
 
-                        turn_messages.push(Message::assistant(format!(
-                            "<|tool_call|>{}<|/tool_call|>",
-                            tool_name
+                        turn_messages.push(Message::assistant(echo_tool_call(
+                            &tool_name,
+                            &tool_call.function.arguments,
                         )));
                         turn_messages.push(Message::tool(tool_result.clone()));
 
@@ -627,6 +631,46 @@ impl<'a> ReactLoop<'a> {
                     ) {
                         continue;
                     }
+                    // ── Verbatim-repeat guard ───────────────────────────────
+                    // The model answered this turn by copying its own previous
+                    // answer word-for-word. That is not a reply to what the user
+                    // just said — it is the model echoing its context.
+                    //
+                    // Measured 2026-10-18: "try to attack my laptop" produced a
+                    // port survey; the next two turns ("lets go with port 80 and
+                    // gain access using an exploit", "give me a realistic exploit
+                    // script for port 80") returned that exact survey again,
+                    // byte-for-byte, through three different instructions, and no
+                    // file was ever written. A prompt that says "act, do not ask"
+                    // does not bind on this model; noticing the copy and forcing
+                    // one resample does.
+                    //
+                    // Scoped tightly so it cannot misfire on ordinary chat: only
+                    // when the user asked for an outcome, only when no tool ran
+                    // this turn, and only on an exact match after whitespace and
+                    // case are normalised. A legitimate "I can't do that" will not
+                    // be byte-identical to the previous turn's wording by chance,
+                    // and if the resample repeats again the answer is allowed
+                    // through rather than looping to the iteration cap.
+                    if !repeat_retried
+                        && requests_execution(user_input)
+                        && !turn_messages.iter().any(|m| m.role == "tool")
+                        && repeats_previous_answer(memory, &text)
+                    {
+                        repeat_retried = true;
+                        tracing::warn!(
+                            "Answer is a verbatim repeat of the previous turn — resampling once"
+                        );
+                        turn_messages.push(Message::assistant(truncate_control(&text)));
+                        turn_messages.push(Message::tool(
+                            "That is a word-for-word repeat of your previous answer. The user \
+                             has moved on and told you what they want; do not repeat it. Do \
+                             the thing they asked for now — call the tool that produces the \
+                             artifact — or say in one line exactly what is blocking you.",
+                        ));
+                        continue;
+                    }
+
                     // ── Shell-execution integrity guard ─────────────────────
                     // The same shape as the WhatsApp guard above, and for the same
                     // reason: the model can answer *as though* it acted when the
@@ -896,9 +940,9 @@ impl<'a> ReactLoop<'a> {
                             &crate::util::truncate(&tool_result, 160)
                         );
 
-                        turn_messages.push(Message::assistant(format!(
-                            "<|tool_call|>{}<|/tool_call|>",
-                            tool_name
+                        turn_messages.push(Message::assistant(echo_tool_call(
+                            &tool_name,
+                            &tool_call.function.arguments,
                         )));
                         turn_messages.push(Message::tool(tool_result.clone()));
 
@@ -926,6 +970,23 @@ impl<'a> ReactLoop<'a> {
             }
         }
     }
+}
+
+/// Render an assistant tool call back into the running conversation.
+///
+/// The arguments MUST be carried. Echoing a bare
+/// `<|tool_call|>name<|/tool_call|>` teaches the model that a call with no
+/// arguments is a valid shape, so the next round it emits exactly that: the
+/// parser turns it into `arguments: {}`, the tool fails with "called with no
+/// command", and the second identical repeat trips the loop guard and ends the
+/// turn with no work done.
+///
+/// Measured 2026-10-16 (session log): a security turn ran six `run_shell`
+/// probes, then the model emitted a bare `run_shell` tag, that failed, the
+/// identical bare tag repeated, and the guard broke the loop — the turn died
+/// mid-attack with the exploit never written.
+fn echo_tool_call(name: &str, arguments: &serde_json::Value) -> String {
+    format!("<|tool_call|>{name} {arguments}<|/tool_call|>")
 }
 
 /// Print the URLs a research tool referenced, so the user can click through.
@@ -1325,6 +1386,14 @@ fn strip_tool_call_decoration(text: &str) -> &str {
             ("<tool_response>", "</tool_response>"),
             ("<|tool_response|>", "<|/tool_response|>"),
             ("<tool_calls>", "</tool_calls>"),
+            // The shape the harness itself writes back into the conversation
+            // when the model makes a call (`echo_tool_call` in this file), and
+            // which the model then imitates with real arguments:
+            //   <|tool_call|>run_shell {"command": "ls"}<|/tool_call|>
+            // Without this entry the tag glued to the name makes
+            // `parse_json_tool_call` read `<|tool_call|>run_shell` as the tool
+            // name, fail the known-name check, and drop a perfectly good call.
+            ("<|tool_call|>", "<|/tool_call|>"),
             // Observed 2026-10-01 from
             // `dagbs/qwen2.5-coder-7b-instruct-abliterated`, the gated security
             // model: it wraps a single call in a bare `<tools>` tag with no
@@ -1509,6 +1578,30 @@ pub(crate) fn requests_execution(input: &str) -> bool {
     crate::recon::task_active()
 }
 
+/// Are two answers the same once case and whitespace are ignored?
+///
+/// A strict, normalised equality rather than a similarity ratio: this is a
+/// correction trigger, and a fuzzy match would fire on answers that merely share
+/// boilerplate. Exact-after-normalisation is the property the measured failure
+/// had — three replies, byte-identical, to three different instructions.
+fn same_answer(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    !a.trim().is_empty() && norm(a) == norm(b)
+}
+
+/// Did the model answer this turn by copying its previous answer verbatim?
+fn repeats_previous_answer(memory: &crate::memory::Memory, text: &str) -> bool {
+    memory
+        .last_assistant()
+        .map(|prev| same_answer(prev, text))
+        .unwrap_or(false)
+}
+
 /// Why widening this is safe, since it reads as the risky direction.
 ///
 /// The strong correction says "call run_shell now". It grants nothing:
@@ -1631,6 +1724,21 @@ pub(crate) fn narrates_shell_execution(text: &str) -> bool {
         "these commands", "this will scan", "this will run",
         "will be executed", "we'll execute", "we will execute",
         "i'll perform", "let me perform", "i will install",
+        // Future-intent narration. The list above caught "I'll run X" /
+        // "let me run X" but not the softer verb the security tier actually
+        // reaches for, and the softer verb is the same failure: a fence of
+        // commands plus a first-person statement that the text *precedes* the
+        // action, with no tool call behind it.
+        //
+        // Measured 2026-10-18 through `run_routed_turn` with a live listener:
+        // the user named an open port, and the reply was "I'll try to
+        // fingerprint it first with a quick service detection scan." followed
+        // by ```bash nmap -sV -sC -p <port> 127.0.0.1``` — zero tool calls, turn
+        // over, no exploit. None of "I'll run"/"I'll perform" was present, so a
+        // guard built for exactly this shape stayed silent.
+        "i'll try to", "i will try to", "i'll attempt", "i will attempt",
+        "i'll start by", "i'll begin by", "i'll go ahead",
+        "now i'll", "first, i'll", "first i'll", "let me first",
         // ── delegation: the reader is doing the work ────────────────────
         "save this script", "save the script", "save this file",
         "run it with", "run the following", "run the script", "run this script",
@@ -1754,10 +1862,88 @@ pub(crate) fn write_needs_correction(
     text: &str,
     retries: u32,
 ) -> bool {
-    requests_code_file(user_input)
-        && !wrote_file
-        && (code_fence_present(text) || wrote_via_shell)
-        && retries < 2
+    if wrote_file || retries >= 2 {
+        return false;
+    }
+    // Strongest signal first, and the one the other clauses cannot see: the
+    // reply itself committed to writing a *named* file and no write call
+    // followed.
+    //
+    // Measured 2026-10-18 through `run_routed_turn` with a live listener on
+    // 8080: the user named the port, and the security model answered "Port 8080
+    // is http-proxy. I'll write this to `/tmp/…/http_proxy_exploit.py` … Save it
+    // now." — zero tool calls, no fence, no `run_shell`, and `requests_code_file`
+    // false because "gain access using an exploit" contains no write verb. Every
+    // clause missed and the file the model promised was never written. The
+    // promise names the path, which is better evidence than any inference about
+    // what the user meant.
+    if promised_write_path(text).is_some() || has_unterminated_tool_call(text) {
+        return true;
+    }
+    requests_code_file(user_input) && (code_fence_present(text) || wrote_via_shell)
+}
+
+/// A tool call the model started and never closed, because the stream ran into
+/// the output-token limit mid-payload.
+///
+/// The parser needs a balanced `{…}`. A stream cut off inside a JSON string
+/// cannot be repaired — the missing bytes are gone — so the call is rendered to
+/// the user as prose and the file never exists. Detecting it here is the only
+/// recovery there is: ask for a *complete* call.
+///
+/// Measured 2026-10-18 through `run_routed_turn`, `max_tokens` at its 2048
+/// default: the security model spent the budget first on a paragraph of preamble
+/// ("I didn't write the file yet — my prior reply was just a plan…") and then on
+/// a ~150-line script, and the stream ended at
+/// `req = b'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n` with the `content` string
+/// still open. `parse_json_tool_call` found the name, could not close the brace,
+/// and dropped the call.
+fn has_unterminated_tool_call(text: &str) -> bool {
+    for def in crate::tools::tool_definitions() {
+        let needle = format!("{} ", def.function.name);
+        let Some(i) = text.rfind(&needle) else {
+            continue;
+        };
+        let after = &text[i + needle.len()..];
+        let Some(brace) = after.find('{') else {
+            continue;
+        };
+        if extract_balanced_object(&after[brace..]).is_none() {
+            return true;
+        }
+    }
+    false
+}
+
+/// A first-person promise to write a file that names the path.
+///
+/// Catches "I'll write this to /tmp/x.py", "I'll create the file at ~/y.sh",
+/// "let me save this to /tmp/z.sh" — the future-tense sibling of
+/// `agent::unverified_write_claim`'s past-tense list, which is why that list did
+/// not already cover it. Requires a first-person commitment, a write verb, and
+/// an absolute path, all in one sentence, so "you can save it to ~/x.py" (advice)
+/// does not match.
+fn promised_write_path(text: &str) -> Option<String> {
+    const COMMIT: &[&str] = &["i'll", "i will", "i'm going to", "i am going to", "let me"];
+    const VERB: &[&str] = &["write", "create", "save", "build"];
+    for sentence in crate::agent::split_sentences(text) {
+        let lower = sentence.to_lowercase();
+        if !COMMIT.iter().any(|c| lower.contains(c)) {
+            continue;
+        }
+        if !VERB.iter().any(|v| lower.contains(v)) {
+            continue;
+        }
+        for raw in sentence.split_whitespace() {
+            let cand = raw
+                .trim_matches(|c: char| "`'\"()[]{}<>,;:*".contains(c))
+                .trim_end_matches('.');
+            if cand.starts_with('/') && cand.len() > 1 {
+                return Some(cand.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// The write guard as a step the ReAct loop can call, returning whether it fired.
@@ -1802,23 +1988,41 @@ fn push_write_correction(
     if !write_needs_correction(user_input, wrote_file, wrote_via_shell, text, *retries) {
         return false;
     }
+    let promised = promised_write_path(text);
+    let truncated = has_unterminated_tool_call(text);
     *retries += 1;
     tracing::warn!(
-        "User asked for a file and none was written{} — pushing for write_file (attempt {retries})",
-        if wrote_via_shell { ", only run_shell ran" } else { ", got a code fence instead" }
+        "A file was requested or promised and none was written{} — pushing for \
+         write_file (attempt {retries})",
+        match (&promised, truncated, wrote_via_shell) {
+            (_, true, _) => ", the call was cut off before the JSON closed",
+            (Some(_), _, _) => ", the reply promised a path but never wrote it",
+            (None, _, true) => ", only run_shell ran",
+            (None, _, false) => ", got a code fence instead",
+        }
     );
     turn_messages.push(Message::assistant(truncate_control(text)));
     turn_messages.push(Message::tool(format!(
-        "Correction: the user asked you to write a file and no write_file or edit_file \
-         call appears this turn, so NOTHING is on disk — that file does not exist \
-         yet.{} Call write_file now with an explicit `path` and the full `content`, \
-         then report the path the tool actually returned. Do not tell the user you \
-         saved it until that call has succeeded.",
-        if wrote_via_shell {
-            " You ran run_shell instead, which is not how a file gets created here — \
-             the shell command did not produce one."
-        } else {
-            " You replied with a code fence, which is text, not a file."
+        "Correction: no write_file or edit_file call appears this turn, so NOTHING is \
+         on disk — that file does not exist yet.{} Call write_file now with an explicit \
+         `path` and the full `content`, then report the path the tool actually returned. \
+         Do not tell the user you saved it until that call has succeeded.",
+        match (&promised, truncated, wrote_via_shell) {
+            (_, true, _) => " Your previous `write_file` call was cut off before its JSON \
+                 closed — the output limit hit mid-file — so nothing was written. Call \
+                 write_file again with a COMPLETE, self-contained `content`, and put the \
+                 call FIRST: no preamble, no explanation before it. If the file is large, \
+                 write a minimal working version now and extend it afterwards with edit_file."
+                .to_string(),
+            (Some(p), _, _) => format!(
+                " Your own reply says you will write `{p}` — write it now, in this turn, \
+                 with no preamble before the call."
+            ),
+            (None, _, true) => " You ran run_shell instead, which is not how a file gets created here — \
+                 the shell command did not produce one."
+                .to_string(),
+            (None, _, false) => " You replied with a code fence, which is text, not a file."
+                .to_string(),
         }
     )));
     true
@@ -3075,6 +3279,29 @@ pub(crate) fn receipt_footer(receipt: &[Receipt]) -> String {
         }
     }
 
+    /// The 2026-10-18 live failure, verbatim.
+    ///
+    /// A real listener was up on the port the user then named, so this is not a
+    /// missing-target case: the reply narrated the *next* step (a version scan)
+    /// in a fence and stopped. The phrase it used — "I'll try to" — was absent
+    /// from every list, so the narration guard stayed silent and the turn ended
+    /// with no scan and no exploit.
+    #[test]
+    fn future_intent_narration_is_caught() {
+        let text = "I need to figure out what's actually listening on \
+                    127.0.0.1:37551 before I can craft an exploit. The nmap scan only \
+                    told me it's open and that the service is unknown. I'll try to \
+                    fingerprint it first with a quick service detection scan.\n\n\
+                    ```bash\nnmap -sV -sC -p 37551 127.0.0.1\n```";
+        assert!(
+            narrates_shell_execution(text),
+            "the measured 2026-10-18 reply was not caught"
+        );
+        assert!(narration_needs_correction(false, text, 0));
+        // Once a shell actually ran, the same wording is a legitimate recap.
+        assert!(!narration_needs_correction(true, text, 0));
+    }
+
     /// The additions must not fire on ordinary past-tense prose.
     ///
     /// This is the reason the new entries are qualified rather than broad. "i
@@ -3300,6 +3527,69 @@ pub(crate) fn receipt_footer(receipt: &[Receipt]) -> String {
         let prompt2 = "create a python file at /tmp/opencode/agentlab/portcheck.py that takes a \
                        host and prints open ports from 1-1000";
         assert!(write_needs_correction(prompt2, false, false, reply2, 0));
+    }
+
+    /// The 2026-10-18 live failure, verbatim: the reply promised a named file
+    /// and wrote nothing, and none of the older clauses could see it — no fence,
+    /// no `run_shell`, and the user's phrasing ("gain access using an exploit")
+    /// carries no write verb, so `requests_code_file` was false too.
+    #[test]
+    fn the_write_guard_fires_on_a_promise_to_write_a_named_file() {
+        let prompt = "lets go with port 8080 and gain access using an exploit";
+        let reply = "Port 8080 is http-proxy. I'll build a tiny HTTP scanner that probes \
+                     the usual proxy endpoints for common weaknesses, and then I'll write \
+                     this to /tmp/luna_named_port_128669/http_proxy_exploit.py so it's \
+                     clearly separated from other scripts. Save it now.";
+        assert_eq!(
+            promised_write_path(reply).as_deref(),
+            Some("/tmp/luna_named_port_128669/http_proxy_exploit.py"),
+            "the named path must survive sentence splitting"
+        );
+        assert!(
+            write_needs_correction(prompt, false, false, reply, 0),
+            "a promise to write a named file must arm the write guard"
+        );
+        // And the promise is satisfied once the file is actually on disk.
+        assert!(!write_needs_correction(prompt, true, false, reply, 0));
+    }
+
+    /// The output limit can cut a `write_file` call off mid-payload. The parser
+    /// then cannot close the brace and drops the call, so the file never
+    /// exists; the guard has to recognise the fragment and ask for a complete
+    /// one.
+    #[test]
+    fn the_write_guard_fires_on_a_truncated_tool_call() {
+        let prompt = "lets go with port 8080 and gain access using an exploit";
+        // Ends inside the `content` string: no closing quote, no closing brace.
+        let reply = "I'll do it now:\n\nwrite_file {\"path\": \"/tmp/probe_8080.py\", \
+                     \"content\": \"import socket\\ns = socket.socket()\\nresp = \
+                     s.recv(4096)\\n";
+        assert!(
+            has_unterminated_tool_call(reply),
+            "a cut-off write_file call must be recognised"
+        );
+        assert!(write_needs_correction(prompt, false, false, reply, 0));
+
+        // A complete call is the opposite case: the parser would have executed
+        // it, so the fragment detector must stay silent.
+        let complete = "write_file {\"path\": \"/tmp/x.py\", \"content\": \"print(1)\"}";
+        assert!(!has_unterminated_tool_call(complete));
+    }
+
+    /// Advice is not a promise. Second-person "you can save it to …" stays
+    /// silent, exactly like the past-tense list it sits beside.
+    #[test]
+    fn second_person_save_advice_is_not_a_write_promise() {
+        for text in [
+            "You can save it to /tmp/example.py and run it whenever you like.",
+            "Save this script to /tmp/example.py, then run it.",
+            "That writes the output to /var/log/report.log on completion.",
+        ] {
+            assert!(
+                promised_write_path(text).is_none(),
+                "advice was read as a promise: {text}"
+            );
+        }
     }
 
     /// The whole point: a file that was actually written silences this. A guard
@@ -3636,6 +3926,10 @@ pub(crate) fn is_escalation_response(text: &str) -> bool {
 
 /// Try to read `tool_name {json}` out of the middle of a response.
 fn parse_json_tool_call(text: &str) -> Option<crate::llm::ollama::ToolCall> {
+    // Strip tool-call decoration first — most importantly the harness's own
+    // `<|tool_call|>name {json}<|/tool_call|>` echo, whose opening tag would
+    // otherwise glue onto the name and fail the known-name check below.
+    let text = strip_tool_call_decoration(text);
     let open = text.find('{')?;
     let head = text[..open].trim();
     let defs = crate::tools::tool_definitions();
@@ -4083,6 +4377,65 @@ mod tests {
         assert_eq!(call.function.name, "run_shell");
         let call = parse_freeform_tool_call("<|tool_call|>run_shell<|/tool_call|>").unwrap();
         assert_eq!(call.function.name, "run_shell");
+    }
+
+    /// The echo must round-trip: what we write into the conversation as the
+    /// assistant's call has to parse back into the SAME call, arguments and all.
+    ///
+    /// The old echo dropped the arguments, so a `run_shell` call went back to
+    /// the model as a bare `<|tool_call|>run_shell<|/tool_call|>`. The model
+    /// imitated it, the parser produced `{}`, the tool failed, and the repeat
+    /// guard ended the turn. This test fails if the arguments are ever dropped
+    /// from the echo again.
+    #[test]
+    fn the_echoed_tool_call_keeps_its_arguments() {
+        let args = serde_json::json!({"command": "nc -w 2 127.0.0.1 80"});
+        let echoed = echo_tool_call("run_shell", &args);
+        let parsed = parse_freeform_tool_call(&echoed)
+            .unwrap_or_else(|| panic!("echo did not parse back: {echoed}"));
+        assert_eq!(parsed.function.name, "run_shell");
+        assert_eq!(parsed.function.arguments["command"], "nc -w 2 127.0.0.1 80");
+        assert_ne!(
+            parsed.function.arguments,
+            serde_json::json!({}),
+            "echo lost its arguments"
+        );
+    }
+
+    /// The repeat guard's predicate: a verbatim copy is caught, a reworded or
+    /// empty answer is not.
+    #[test]
+    fn a_verbatim_repeat_is_not_a_new_answer() {
+        assert!(same_answer(
+            "Pick any of the listed ports and tell me which one.",
+            "pick any of the   listed ports\nand tell me which one."
+        ));
+        assert!(!same_answer(
+            "Pick any of the listed ports.",
+            "Port 80 is open — here is the exploit."
+        ));
+        assert!(!same_answer("", ""));
+    }
+
+    /// The guard reads the previous assistant turn out of memory, not the tool
+    /// bookkeeping: the failure it exists for (a plain text survey repeated)
+    /// never touches a tool.
+    #[test]
+    fn the_repeat_guard_reads_the_previous_assistant_turn() {
+        let dir = std::env::temp_dir().join(format!("luna_repeat_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut mem = crate::memory::Memory::new(6, &dir.join("history.json")).unwrap();
+        mem.push(Message::user("try to attack my laptop"));
+        mem.push(Message::assistant("Pick any of the listed ports."));
+        assert!(repeats_previous_answer(
+            &mem,
+            "pick any of the listed ports."
+        ));
+        assert!(!repeats_previous_answer(
+            &mem,
+            "Here is the exploit for port 80."
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Regression: the 7B sometimes dumps a raw CLI command inside

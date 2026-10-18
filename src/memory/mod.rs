@@ -48,6 +48,19 @@ impl Memory {
         }
     }
 
+    /// The most recent assistant message, if any.
+    ///
+    /// Used by the repeat guard: a model that answers a *new* instruction with
+    /// the previous answer word-for-word has echoed its own context rather than
+    /// read the turn, and the harness has to notice.
+    pub fn last_assistant(&self) -> Option<&str> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .map(|m| m.content.as_str())
+    }
+
     /// Build context for LLM — filters out tool call artifacts that
     /// confuse the model into echoing them on the next turn.
     pub fn build_context(&self, system_prompt: &str) -> Vec<Message> {
