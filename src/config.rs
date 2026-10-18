@@ -1441,22 +1441,21 @@ fn resolve_secret_ref(value: Option<String>) -> Option<String> {
     let Some(name) = value.strip_prefix("keyring:") else {
         return Some(value);
     };
-    match keyring::Entry::new("luna", name) {
-        Ok(entry) => match entry.get_password() {
-            Ok(secret) => Some(secret),
-            Err(e) => {
-                tracing::warn!(
-                    "Keyring entry 'luna/{}' unavailable ({}). \
-                     Store it with: luna --set-key {}",
-                    name,
-                    e,
-                    name
-                );
-                None
-            }
-        },
+    // Read through `keyring_get`, not the bare keyring crate. `--set-key` writes
+    // to `secrets.toml` when no Secret Service daemon is present, and a raw
+    // `Entry::get_password()` never looks there — so on a headless box the key
+    // was written and then silently ignored. Measured 2026-10-18: `secrets.toml`
+    // held the value while this function still resolved to `None`, which quietly
+    // disabled every key-backed feature (Gemini search, Todoist, Spotify).
+    match keyring_get(name) {
+        Ok(secret) => Some(secret),
         Err(e) => {
-            tracing::warn!("Keyring unavailable for 'luna/{}': {}", name, e);
+            tracing::warn!(
+                "Keyring entry 'luna/{}' unavailable ({}). Store it with: luna --set-key {}",
+                name,
+                e,
+                name
+            );
             None
         }
     }
@@ -1515,12 +1514,19 @@ pub fn keyring_get(name: &str) -> Result<String> {
     }
 
     // Fallback: file-based storage
-    let path = secrets_path();
+    secret_from_file(&secrets_path(), name)
+}
+
+/// Read one secret out of a `secrets.toml` table.
+///
+/// Split out from [`keyring_get`] so the fallback's parsing is testable without
+/// a real keyring or the user's real config directory.
+fn secret_from_file(path: &std::path::Path, name: &str) -> Result<String> {
     if !path.exists() {
         anyhow::bail!("No keyring entry 'luna/{}' and no fallback secrets file", name);
     }
 
-    let raw = std::fs::read_to_string(&path)
+    let raw = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read secrets at {:?}", path))?;
     let secrets: toml::Table = toml::from_str(&raw)
         .with_context(|| format!("Failed to parse secrets at {:?}", path))?;
@@ -1598,6 +1604,26 @@ num_ctx = 16384
         let cfg: LlmConfig = toml::from_str(src).unwrap();
         assert_eq!(cfg.security_model.as_deref(), Some("whiterabbitneo-coder-tools"));
         assert_eq!(cfg.security_num_ctx, 8192);
+    }
+
+    /// The file fallback is what makes `keyring:tavily` work on a headless box,
+    /// and it is read during config resolution, so its parsing is tested
+    /// directly rather than through the user's real config directory.
+    #[test]
+    fn the_file_fallback_returns_a_stored_secret() {
+        let dir = std::env::temp_dir().join(format!("luna_secrets_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.toml");
+        std::fs::write(&path, "tavily = \"tvly-real\"\n").unwrap();
+
+        assert_eq!(secret_from_file(&path, "tavily").unwrap(), "tvly-real");
+        // A name absent from the file is a clear error, not an empty string.
+        assert!(secret_from_file(&path, "gemini").is_err());
+        // A missing file is handled too.
+        assert!(secret_from_file(&dir.join("absent.toml"), "tavily").is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Regression guard for a bug that failed *silently*.
