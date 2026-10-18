@@ -539,6 +539,20 @@ fn classify_general(input: &str) -> QueryComplexity {
         "implement ", "implement a ", "implement the ", "implement this",
         "refactor ", "refactor this", "refactor the ", "optimize this",
         "optimize the code", "debug this", "debug the code", "fix this bug",
+        // Pronoun follow-ups. A coder session is conversational: after "write a
+        // file that does X", the next turns are "optimize it", "make it faster",
+        // "add tests" — none of which carries a fresh "write a …" phrase, so the
+        // whole session fell off the coder tier on turn two.
+        //
+        // Measured 2026-10-18, real two-turn session: "write a python file at
+        // /tmp/…/coder_check.py with a function that returns the nth fibonacci
+        // number…" routed to `qwen2.5-coder:14b` (deep); "optimize it to use
+        // memoization, and keep it in the same file" routed to the *full* model,
+        // which then edited the file with a hallucinated snippet and failed.
+        "optimize it", "refactor it", "improve it", "rewrite it", "clean it up",
+        "make it faster", "make it more efficient", "make it cleaner",
+        "keep it in the same file", "in the same file", "same file",
+        "add error handling", "add type hints", "add typing",
         "fix the bug", "fix the error", "explain the code", "explain this code",
         "explain how", "explain why", "how does this work", "how does it work",
         "architecture", "design pattern", "system design",
@@ -923,6 +937,29 @@ mod tests {
             "self patch: rename that function",
         ] {
             assert!(is_deep(q), "should route to deep model: {q:?}");
+        }
+    }
+
+    /// A coder session is conversational, and the tier has to survive the
+    /// follow-ups that carry no fresh "write a …" phrase. Measured 2026-10-18:
+    /// "optimize it to use memoization, and keep it in the same file" — the
+    /// second turn of a real two-turn session — fell to the full model, which
+    /// then edited the file with a hallucinated snippet and failed.
+    #[test]
+    fn code_follow_ups_stay_on_the_deep_model() {
+        for q in [
+            "optimize it to use memoization, and keep it in the same file",
+            "optimize it",
+            "refactor it",
+            "improve it",
+            "rewrite it",
+            "clean it up",
+            "make it faster",
+            "make it more efficient",
+            "add error handling",
+            "add type hints",
+        ] {
+            assert!(is_deep(q), "code follow-up must stay on the coder tier: {q:?}");
         }
     }
 

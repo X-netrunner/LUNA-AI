@@ -258,6 +258,10 @@ impl<'a> ReactLoop<'a> {
         // previous answer verbatim to a *new* instruction instead of reading it.
         // One resample with a correction, then the answer stands.
         let mut repeat_retried = false;
+        // Guards the stale-snippet edit: `edit_file` with an `old_str` that does
+        // not appear in the file, followed by the identical retry. One nudge to
+        // re-read, then the loop guard owns it.
+        let mut edit_retried = false;
         // What this turn actually called and got back, so the final answer can be
         // checked against it rather than against the shape of its prose.
         let mut receipt: Vec<Receipt> = Vec::new();
@@ -522,6 +526,18 @@ impl<'a> ReactLoop<'a> {
                             &tool_call.function.arguments,
                         )));
                         turn_messages.push(Message::tool(tool_result.clone()));
+
+                        // A stale-edit failure gets its remedy before the
+                        // had_success early-exit, so a write-then-edit turn can
+                        // still recover the edit instead of ending on the error.
+                        if push_edit_not_found_correction(
+                            &tool_name,
+                            &tool_result,
+                            &mut edit_retried,
+                            &mut turn_messages,
+                        ) {
+                            continue;
+                        }
 
                         // The turn has already accomplished something and the
                         // model is now making calls that fail. Answer from the
@@ -945,6 +961,19 @@ impl<'a> ReactLoop<'a> {
                             &tool_call.function.arguments,
                         )));
                         turn_messages.push(Message::tool(tool_result.clone()));
+
+                        // Same stale-edit remedy as the freeform path, and in the
+                        // same place — before the early return, so a failed edit
+                        // after a successful write is corrected rather than ending
+                        // the turn.
+                        if push_edit_not_found_correction(
+                            &tool_name,
+                            &tool_result,
+                            &mut edit_retried,
+                            &mut turn_messages,
+                        ) {
+                            continue 'react;
+                        }
 
                         // Same guard as the freeform path: work has already
                         // landed this turn and the model is now failing, so
@@ -1877,7 +1906,15 @@ pub(crate) fn write_needs_correction(
     // clause missed and the file the model promised was never written. The
     // promise names the path, which is better evidence than any inference about
     // what the user meant.
-    if promised_write_path(text).is_some() || has_unterminated_tool_call(text) {
+    //
+    // `claims_file_write` is the past-tense twin, added after the coder tier was
+    // measured claiming an edit it never made: "…and updated in `/tmp/x.py`"
+    // with the file unchanged. `wrote_file` is what makes it safe — a genuine
+    // write leaves no claim to catch.
+    if promised_write_path(text).is_some()
+        || has_unterminated_tool_call(text)
+        || claims_file_write(text)
+    {
         return true;
     }
     requests_code_file(user_input) && (code_fence_present(text) || wrote_via_shell)
@@ -1909,6 +1946,106 @@ fn has_unterminated_tool_call(text: &str) -> bool {
             continue;
         };
         if extract_balanced_object(&after[brace..]).is_none() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Past-tense assertions that a file was written, created or changed.
+///
+/// Deliberately distinct from `agent::unverified_write_claim`'s list, which is
+/// checked against the disk. That guard is silent when the file *exists* but its
+/// contents are stale — precisely the update case — so it cannot see "…and
+/// updated in `/tmp/x.py`" while `/tmp/x.py` still holds the old text. These
+/// phrases only answer "did the model claim a write?"; the caller supplies the
+/// other half, "and no write tool ran this turn".
+const FILE_WRITE_CLAIM_PHRASES: &[&str] = &[
+    // First person — unambiguously Luna's own action.
+    "i wrote",
+    "i've written",
+    "i have written",
+    "i saved",
+    "i've saved",
+    "i have saved",
+    "i updated",
+    "i've updated",
+    "i have updated",
+    "i modified",
+    "i've modified",
+    "i edited",
+    "i've edited",
+    "i changed",
+    "i've changed",
+    "i rewrote",
+    "i've rewritten",
+    "i overwrote",
+    // Artefact-directed — the write verb points at the file itself.
+    "written to",
+    "wrote it to",
+    "successfully wrote",
+    "saved to",
+    "saved in",
+    "created the file",
+    "file created",
+    "file was created",
+    "updated in",
+    "updated the file",
+    "modified the file",
+    "edited the file",
+    "changed the file",
+    "rewrote the file",
+    "overwrote the file",
+    // Perfect passive — "has been X" describing a just-finished action. Bare
+    // "was X" is deliberately absent: "the file was modified by the package
+    // manager" is a report about someone else, not a claim of Luna's.
+    "has been saved",
+    "is saved",
+    "has been created",
+    "has been updated",
+    "has been modified",
+    "has been edited",
+    "has been changed",
+    "has been rewritten",
+];
+
+/// Does the reply claim, in the past tense, that it wrote or changed a file?
+///
+/// Needs a claim phrase plus a concrete target in the *same sentence*: either a
+/// path (`/tmp/x.py`) or a file noun (`file`, `script`, `program`, `module`).
+/// The noun is not redundant — measured 2026-10-18, the deep-tier coder answered
+/// turn 1 of a "write a python file at /tmp/…/coder_check.py" session with "The
+/// file has been created successfully." and no tool call at all. There was no
+/// path in the claim, so a path-only rule missed it entirely. The noun is what
+/// keeps "I've updated my answer" and "the plan has been changed" out.
+///
+/// On its own this is not a bug — the caller pairs it with `wrote_file == false`.
+///
+/// Measured 2026-10-18, deep-tier coder turn "optimize it to use memoization,
+/// and keep it in the same file": the model answered "The Fibonacci function has
+/// been optimized using memoization and updated in `/tmp/opencode/coder_check.py`"
+/// with zero tool calls. Every existing clause missed — no fence, no
+/// `run_shell`, `requests_code_file` false for the follow-up, no first-person
+/// promise, no truncated call — and `unverified_write_claim` was silent because
+/// the file existed. The user was told the file had been optimized; it was
+/// byte-identical to before.
+fn claims_file_write(text: &str) -> bool {
+    for sentence in crate::agent::split_sentences(text) {
+        let lower = sentence.to_lowercase();
+        if !FILE_WRITE_CLAIM_PHRASES.iter().any(|p| lower.contains(p)) {
+            continue;
+        }
+        let has_target = sentence.split_whitespace().any(|raw| {
+            let w = raw.trim_matches(|c: char| "`'\"()[]{}<>,;:*".contains(c));
+            if w.len() > 1 && (w.starts_with('/') || w.starts_with("~/")) {
+                return true;
+            }
+            matches!(
+                w.to_lowercase().as_str(),
+                "file" | "files" | "script" | "scripts" | "program" | "module" | "snippet"
+            )
+        });
+        if has_target {
             return true;
         }
     }
@@ -1990,41 +2127,119 @@ fn push_write_correction(
     }
     let promised = promised_write_path(text);
     let truncated = has_unterminated_tool_call(text);
+    let claimed = claims_file_write(text);
     *retries += 1;
+
+    // One (reason, intro, remedy) per failure shape, so the log line and the
+    // correction can never disagree about which clause actually fired. The intro
+    // differs for `claimed` on purpose: a create-case promise names a file that
+    // is not on disk yet, while a claimed *edit* names one that is — and saying
+    // "does not exist yet" about a file the user already has is its own bug.
+    let (why, intro, remedy) = if truncated {
+        (
+            "the call was cut off before the JSON closed",
+            "no write_file or edit_file call appears this turn, so NOTHING is on disk — \
+             that file does not exist yet",
+            "Your previous `write_file` call was cut off before its JSON closed — the \
+             output limit hit mid-file — so nothing was written. Call write_file again \
+             with a COMPLETE, self-contained `content`, and put the call FIRST: no \
+             preamble, no explanation before it. If the file is large, write a minimal \
+             working version now and extend it afterwards with edit_file. Then report \
+             the path the tool actually returned."
+                .to_string(),
+        )
+    } else if let Some(p) = promised.as_deref() {
+        (
+            "the reply promised a path but never wrote it",
+            "no write_file or edit_file call appears this turn, so NOTHING is on disk — \
+             that file does not exist yet",
+            format!(
+                "Your own reply says you will write `{p}` — write it now, in this turn, \
+                 with no preamble before the call, then report the path the tool \
+                 actually returned."
+            ),
+        )
+    } else if claimed {
+        (
+            "the reply claimed a write that never ran",
+            "no write_file or edit_file call appears this turn, so the change you \
+             described is not on disk",
+            "Do not report the change as done. Act now with a tool: if the file already \
+             exists, call read_file on it first (its current content is not in front of \
+             you), then edit_file for a targeted change or write_file to replace the \
+             whole file. If it does not exist yet, call write_file with an explicit \
+             `path` and the full `content`. Then report the path the tool actually \
+             returned."
+                .to_string(),
+        )
+    } else if wrote_via_shell {
+        (
+            "only run_shell ran",
+            "no write_file or edit_file call appears this turn, so NOTHING is on disk — \
+             that file does not exist yet",
+            "You ran run_shell instead, which is not how a file gets created here — the \
+             shell command did not produce one. Call write_file with an explicit `path` \
+             and the full `content`, then report the path the tool actually returned."
+                .to_string(),
+        )
+    } else {
+        (
+            "got a code fence instead",
+            "no write_file or edit_file call appears this turn, so NOTHING is on disk — \
+             that file does not exist yet",
+            "You replied with a code fence, which is text, not a file. Call write_file \
+             with an explicit `path` and the full `content`, then report the path the \
+             tool actually returned."
+                .to_string(),
+        )
+    };
+
     tracing::warn!(
-        "A file was requested or promised and none was written{} — pushing for \
-         write_file (attempt {retries})",
-        match (&promised, truncated, wrote_via_shell) {
-            (_, true, _) => ", the call was cut off before the JSON closed",
-            (Some(_), _, _) => ", the reply promised a path but never wrote it",
-            (None, _, true) => ", only run_shell ran",
-            (None, _, false) => ", got a code fence instead",
-        }
+        "A file was requested or promised and none was written ({why}) — pushing for \
+         write_file (attempt {retries})"
     );
     turn_messages.push(Message::assistant(truncate_control(text)));
     turn_messages.push(Message::tool(format!(
-        "Correction: no write_file or edit_file call appears this turn, so NOTHING is \
-         on disk — that file does not exist yet.{} Call write_file now with an explicit \
-         `path` and the full `content`, then report the path the tool actually returned. \
-         Do not tell the user you saved it until that call has succeeded.",
-        match (&promised, truncated, wrote_via_shell) {
-            (_, true, _) => " Your previous `write_file` call was cut off before its JSON \
-                 closed — the output limit hit mid-file — so nothing was written. Call \
-                 write_file again with a COMPLETE, self-contained `content`, and put the \
-                 call FIRST: no preamble, no explanation before it. If the file is large, \
-                 write a minimal working version now and extend it afterwards with edit_file."
-                .to_string(),
-            (Some(p), _, _) => format!(
-                " Your own reply says you will write `{p}` — write it now, in this turn, \
-                 with no preamble before the call."
-            ),
-            (None, _, true) => " You ran run_shell instead, which is not how a file gets created here — \
-                 the shell command did not produce one."
-                .to_string(),
-            (None, _, false) => " You replied with a code fence, which is text, not a file."
-                .to_string(),
-        }
+        "Correction: {intro}. {remedy} Do not tell the user the change is done until \
+         the tool call has succeeded."
     )));
+    true
+}
+
+/// Nudge the model to re-read before editing when its `old_str` did not match.
+///
+/// A failed `edit_file` is almost always a stale snippet: the model edits from
+/// what it believes the file holds rather than re-reading it. The tool's error
+/// ("Target text to replace was not found") is accurate but, on its own, reads
+/// as "try again" — and the model re-sends the byte-identical call until the
+/// repeat guard kills the turn. The remedy is to read the file, and it has to be
+/// handed over at the moment of failure.
+///
+/// Measured 2026-10-18 through `run_routed_turn`, second turn of a coder
+/// session ("optimize it to use memoization, and keep it in the same file"):
+/// `edit_file` carried `if n <= 1: return n`, which that file never contained,
+/// the identical call was repeated, the loop broke, and the file was unchanged.
+///
+/// One correction per turn; after that the repeat guard owns the loop.
+fn push_edit_not_found_correction(
+    tool_name: &str,
+    tool_result: &str,
+    retried: &mut bool,
+    turn_messages: &mut Vec<Message>,
+) -> bool {
+    if *retried || tool_name != "edit_file" {
+        return false;
+    }
+    if !tool_result.contains("Target text to replace was not found") {
+        return false;
+    }
+    *retried = true;
+    turn_messages.push(Message::tool(
+        "That edit changed nothing: `old_str` does not appear in the file, so the \
+         file's current text is not what you assumed it was. Call read_file on the \
+         path first, then call edit_file with the exact text it returns — copied \
+         character for character. Do not re-send the same edit.",
+    ));
     true
 }
 
@@ -3574,6 +3789,99 @@ pub(crate) fn receipt_footer(receipt: &[Receipt]) -> String {
         // it, so the fragment detector must stay silent.
         let complete = "write_file {\"path\": \"/tmp/x.py\", \"content\": \"print(1)\"}";
         assert!(!has_unterminated_tool_call(complete));
+    }
+
+    /// The coder tier's failure: a past-tense claim of an edit it never made,
+    /// with the file present but unchanged. The disk-based
+    /// `unverified_write_claim` cannot see this (the file exists), and no other
+    /// clause of `write_needs_correction` matches.
+    #[test]
+    fn a_claimed_edit_with_no_write_tool_arms_the_guard() {
+        let prompt = "optimize it to use memoization, and keep it in the same file";
+        let reply = "The Fibonacci function has been optimized using memoization and \
+                     updated in `/tmp/opencode/coder_check.py`. This should improve \
+                     performance for larger values of n.";
+        assert!(claims_file_write(reply), "the claim must be recognised");
+        assert!(
+            write_needs_correction(prompt, false, false, reply, 0),
+            "a claimed write with no write tool must arm the guard"
+        );
+        // A genuine write leaves the guard out of it.
+        assert!(!write_needs_correction(prompt, true, false, reply, 0));
+    }
+
+    /// The claim detector must not fire on prose that mentions a change or a
+    /// path without asserting Luna made the change.
+    #[test]
+    fn a_claim_needs_a_write_verb_and_a_concrete_target() {
+        for text in [
+            "I've updated my answer to be clearer.",
+            "The plan was updated after the review.",
+            "The /etc/hosts file was modified by the package manager.",
+            "That code has been edited by someone else before.",
+            "Read /tmp/x.py to see the previous version.",
+            "The build has been changed to use the new toolchain.",
+        ] {
+            assert!(
+                !claims_file_write(text),
+                "must not read as Luna's own write: {text:?}"
+            );
+        }
+        // …and the two positive shapes, both from real transcripts. The first
+        // names a path; the second names no path at all and was the turn-1 miss.
+        assert!(claims_file_write(
+            "It has been updated in `/tmp/opencode/coder_check.py`."
+        ));
+        assert!(claims_file_write(
+            "The file has been created successfully. You can now use the \
+             `fibonacci` function from the script."
+        ));
+    }
+
+    /// A stale `old_str` reads to the model as "try again", so it re-sends the
+    /// same doomed edit until the repeat guard ends the turn. The correction has
+    /// to hand over the actual remedy — re-read first — at the moment of failure.
+    #[test]
+    fn a_stale_edit_gets_a_read_first_correction() {
+        let mut retried = false;
+        let mut msgs: Vec<Message> = Vec::new();
+        let err = "Error: Target text to replace was not found in '/tmp/x.py'";
+
+        assert!(push_edit_not_found_correction(
+            "edit_file",
+            err,
+            &mut retried,
+            &mut msgs
+        ));
+        assert_eq!(msgs.len(), 1, "exactly one corrective message");
+        assert!(
+            msgs[0].content.contains("read_file"),
+            "the correction must name the remedy"
+        );
+
+        // Once per turn: the repeat guard owns anything after this.
+        assert!(!push_edit_not_found_correction(
+            "edit_file",
+            err,
+            &mut retried,
+            &mut msgs
+        ));
+
+        // A different edit failure is not a stale snippet.
+        let mut fresh = false;
+        assert!(!push_edit_not_found_correction(
+            "edit_file",
+            "Error: permission denied",
+            &mut fresh,
+            &mut msgs
+        ));
+        // And no other tool gets this correction.
+        assert!(!push_edit_not_found_correction(
+            "write_file",
+            err,
+            &mut fresh,
+            &mut msgs
+        ));
     }
 
     /// Advice is not a promise. Second-person "you can save it to …" stays
