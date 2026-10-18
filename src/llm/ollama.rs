@@ -887,6 +887,27 @@ impl OllamaClient {
         self
     }
 
+    /// How long Ollama keeps the model resident after this request.
+    ///
+    /// Pass minutes (e.g., `10m` → 10 minutes). `0` means unload immediately.
+    /// Defaults to 30 minutes (`DEFAULT_KEEP_ALIVE_MINS`).
+    pub fn keep_alive(mut self, mins: u32) -> Self {
+        self.keep_alive_mins = mins;
+        self
+    }
+
+    /// Override keep_alive with a raw Ollama duration string (e.g. "10m", "30m", "-1").
+    ///
+    /// Useful when you need the exact format Ollama expects.
+    pub fn keep_alive_str(mut self, s: &str) -> Self {
+        if let Ok(mins) = s.trim_end_matches('m').parse::<u32>() {
+            self.keep_alive_mins = mins;
+        } else if s == "-1" {
+            self.keep_alive_mins = u32::MAX;
+        }
+        self
+    }
+
     /// The `keep_alive` value as Ollama wants it: a duration string like
     /// `"30m"`, or `-1` to hold the model indefinitely until shutdown.
     fn keep_alive_value(&self) -> String {

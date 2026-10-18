@@ -366,6 +366,11 @@ pub struct LlmConfig {
     /// the normal deep model refuses. Does not affect the security tier.
     #[serde(default)]
     pub deep_model_unrestricted: Option<String>,
+    /// Context window for the deep/coder tier. Defaults to `num_ctx` (16384).
+    /// Kept separate so you can give the coder more room for multi-file edits
+    /// without changing the normal/fast tier defaults.
+    #[serde(default = "default_deep_num_ctx")]
+    pub deep_num_ctx: u32,
     /// Model for offensive-security work on the user's own systems — exploit and
     /// PoC authoring, reverse shells, wireless testing, lab attack tooling.
     ///
@@ -578,6 +583,10 @@ fn default_num_ctx() -> u32 {
     16384
 }
 
+fn default_deep_num_ctx() -> u32 {
+    16384
+}
+
 fn default_security_num_ctx() -> u32 {
     8192
 }
@@ -645,6 +654,7 @@ impl Default for LlmConfig {
             auto_execute_max_blocks: default_exec_max_blocks(),
             embedding_model: "nomic-embed-text".into(),
             num_ctx: default_num_ctx(),
+            deep_num_ctx: default_deep_num_ctx(),
         }
     }
 }

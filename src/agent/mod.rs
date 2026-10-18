@@ -78,6 +78,7 @@ fn build_fast_client(config: &LunaConfig) -> Option<OllamaClient> {
         // The fast tier never sees the tool schema, so it does not need the
         // big window — a small one keeps its KV cache cheap.
         .num_ctx(4096)
+        .keep_alive(10)
         .debug(config.logging.level == "debug")
         .term_output(!tui_quiet(config)),
     )
@@ -94,7 +95,8 @@ fn build_deep_client(config: &LunaConfig) -> Option<OllamaClient> {
             config.llm.max_tokens,
         )
         .enable_thinking(config.llm.enable_thinking)
-        .num_ctx(config.llm.num_ctx)
+        .num_ctx(config.llm.deep_num_ctx)
+        .keep_alive(10)
         .debug(config.logging.level == "debug")
         .term_output(!tui_quiet(config)),
     )
@@ -112,7 +114,8 @@ fn build_deep_unrestricted_client(config: &LunaConfig) -> Option<OllamaClient> {
             config.llm.max_tokens,
         )
         .enable_thinking(config.llm.enable_thinking)
-        .num_ctx(config.llm.num_ctx)
+        .num_ctx(config.llm.deep_num_ctx)
+        .keep_alive(10)
         .debug(config.logging.level == "debug")
         .term_output(!tui_quiet(config)),
     )
@@ -167,6 +170,7 @@ fn build_security_client(config: &LunaConfig) -> Option<OllamaClient> {
         )
         .enable_thinking(false)
         .num_ctx(config.llm.security_num_ctx)
+        .keep_alive(10)
         .debug(config.logging.level == "debug")
         .term_output(!tui_quiet(config)),
     )
@@ -189,6 +193,7 @@ fn build_client(config: &LunaConfig) -> OllamaClient {
     )
     .enable_thinking(config.llm.enable_thinking)
     .num_ctx(config.llm.num_ctx)
+    .keep_alive(10)
     .debug(config.logging.level == "debug")
     .term_output(!tui_quiet(config))
 }
@@ -413,11 +418,11 @@ const FAST_PROMPT: &str = "You are Luna, a natural, friendly AI assistant. \
 const DEEP_PROMPT: &str = "You are Luna. Your one and only creator is Netrunner \
     (Srijan Satya Bandaru) — no company, group, or person besides Netrunner made \
     you, and you have no other creator. You run locally \
-    on Arch Linux. You are Luna's deep reasoning and coding engine powered by qwen2.5-coder:14b. \
+    on Arch Linux. You are Luna's deep reasoning and coding engine. \
     When tasked with writing code, scripts, security/exploit PoCs, or editing existing files: \
     1. To write a new file or full script, call write_file with path and exact content. \
     2. To edit existing code in a file, call edit_file with path, old_str (exact text to replace), and new_str (replacement text). \
-    3. Always inspect files first with read_file or run_shell before editing. \
+    3. ALWAYS inspect files first with read_file before editing — the file's current content is NOT in your context. Never guess old_str. \
     4. Write clean, complete, functional code. Never leave placeholders or TODOs. \
     Be comprehensive, accurate, and direct. Never guess — if uncertain, inspect the target first.";
 

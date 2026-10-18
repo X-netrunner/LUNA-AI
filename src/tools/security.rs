@@ -24,6 +24,7 @@ pub async fn nmap_scan(
         "quick" => "-T4 -F",
         "full" => "-T4 -sV -sC",
         "ports" => "-T4 -p-",
+        "full-ports" => "-T4 -p- -sV -sC",
         "os" => "-T4 -O",
         "udp" => "-T4 -sU --top-ports 20",
         _ => "-T4 -F",
