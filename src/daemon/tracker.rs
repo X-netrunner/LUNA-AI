@@ -334,7 +334,7 @@ mod tests {
         let s = &data.processes["spotify"];
         assert_eq!(s.observed_cycles, 0);
         assert_eq!(s.active_cycles, 0);
-        assert_eq!(s.keep, false);
+        assert!(!s.keep);
     }
 
     #[test]

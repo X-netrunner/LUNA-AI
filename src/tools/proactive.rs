@@ -105,12 +105,6 @@ async fn run(cmd: &str) -> anyhow::Result<String> {
 }
 
 async fn notify(title: &str, body: &str) {
-    let safe_title = title.replace('\'', "'\\''");
-    let safe_body = body.replace('\'', "'\\''");
-    let cmd = format!("notify-send '{}' '{}'", safe_title, safe_body);
-    let _ = tokio::process::Command::new("bash")
-        .arg("-c")
-        .arg(&cmd)
-        .output()
-        .await;
+    // One fire-and-forget notifier for the whole crate (direct exec, `-a Luna`).
+    crate::daemon::notify(title, body).await;
 }

@@ -448,7 +448,7 @@ pub fn generate_keypair() -> (String, String) {
     let mut bytes = [0u8; SEED_LEN];
     // Cannot fail for SystemRandom; an unwrap here would mean the OS CSPRNG is
     // broken, in which case generating a key is pointless anyway.
-    ring::rand::SecureRandom::fill(&mut ring::rand::SystemRandom::new(), &mut bytes)
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
         .expect("the OS CSPRNG failed");
     let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&bytes)
         .expect("a 32-byte seed is always a valid Ed25519 seed");
@@ -488,7 +488,7 @@ mod tests {
     /// these. `cargo test` runs tests on parallel threads, and the override is
     /// process-global — a private lock here would let a TUI test delete this
     /// test's receipt mid-run.
-    struct Scratch(TestReceipt);
+    struct Scratch(#[allow(dead_code)] TestReceipt);
 
     impl Scratch {
         fn new(name: &str) -> Self {
@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn the_config_flag_alone_does_nothing() {
         let _s = Scratch::new("flag_alone");
-        let (pk, sk) = generate_keypair();
+        let (pk, _sk) = generate_keypair();
 
         // Asked for, not unlocked.
         assert_eq!(gate_state(true, &pk), GateState::Locked);
@@ -565,7 +565,7 @@ mod tests {
         // Requested but locked: both say Locked. A config edit alone does nothing,
         // because a boolean a config edit can flip is not authorisation.
         assert_eq!(gate_state(true, &pk), GateState::Locked);
-        assert_eq!(capabilities_active(true, &pk), false);
+        assert!(!capabilities_active(true, &pk));
         assert!(!unrestricted_active(true, &pk));
         assert!(!capabilities_active(true, &pk));
 
@@ -584,7 +584,7 @@ mod tests {
             "a receipt must not activate a capability that was not requested"
         );
         assert!(!unrestricted_active(false, &pk));
-        assert_eq!(capabilities_active(false, &pk) && unrestricted_active(false, &pk), false);
+        assert!(!(capabilities_active(false, &pk) && unrestricted_active(false, &pk)));
 
         // Revoking takes effect for every switch at once, since they share it.
         lock().unwrap();

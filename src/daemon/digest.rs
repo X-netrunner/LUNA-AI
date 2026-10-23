@@ -80,7 +80,7 @@ pub(crate) async fn build(config: &LunaConfig, by_name: &HashMap<String, NameSta
         })
         .map(|(name, s)| (name.as_str(), s.max_rss_mb))
         .collect();
-    hogs.sort_by(|a, b| b.1.cmp(&a.1));
+    hogs.sort_by_key(|h| std::cmp::Reverse(h.1));
     hogs.truncate(3);
     if !hogs.is_empty() {
         lines.push(format!(

@@ -1038,7 +1038,6 @@ mod tool_availability_tests {
                 let path = line.trim();
                 let path = path
                     .trim_start_matches("WORDLISTS PRESENT")
-                    .trim()
                     .split_whitespace()
                     .next()
                     .unwrap_or("");

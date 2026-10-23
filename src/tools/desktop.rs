@@ -9,7 +9,7 @@ use std::time::Duration;
 pub async fn notify(title: &str, body: &str, sudo_pass: Option<&str>) -> Result<()> {
     run_command(
         &format!(
-            "notify-send '{}' '{}'",
+            "notify-send -a Luna '{}' '{}'",
             title.replace('\'', "'\\''"),
             body.replace('\'', "'\\''")
         ),

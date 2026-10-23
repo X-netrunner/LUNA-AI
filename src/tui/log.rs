@@ -302,7 +302,7 @@ mod tests {
         for _ in 0..n {
             let mut buf = body.to_string();
             buf.push('\n');
-            f.write(buf.as_bytes()).unwrap();
+            f.write_all(buf.as_bytes()).unwrap();
         }
     }
 
@@ -368,9 +368,9 @@ mod tests {
         let mut f = FileLog::with_limits(&p, 10_000, 10);
         for tag in ["RUN1", "RUN2", "RUN3"] {
             for _ in 0..40 {
-                f.write(format!("{}\n", tag.repeat(100)).as_bytes()).unwrap();
+                f.write_all(format!("{}\n", tag.repeat(100)).as_bytes()).unwrap();
             }
-            f.write(format!("{tag}-END\n").as_bytes()).unwrap();
+            f.write_all(format!("{tag}-END\n").as_bytes()).unwrap();
         }
         let g1 = std::fs::read_to_string(gen_path(&p, 1)).unwrap();
         let g2 = std::fs::read_to_string(gen_path(&p, 2)).unwrap();
@@ -395,7 +395,7 @@ mod tests {
             // crossed many times over. With only 2 generations kept, the first
             // epoch cannot possibly survive.
             for _ in 0..40 {
-                f.write(format!("EPOCH{i}-{}\n", "x".repeat(380)).as_bytes()).unwrap();
+                f.write_all(format!("EPOCH{i}-{}\n", "x".repeat(380)).as_bytes()).unwrap();
             }
         }
         let all: String = (1..=2)

@@ -301,12 +301,25 @@ pub async fn run(config: LunaConfig) -> Result<()> {
     }
 }
 
-/// Keep the desktop notification corner bounded. Reads the running shell's
-/// stored notification list (caelestia/Quickshell) and, when it exceeds the
-/// configured cap, tells the shell to clear it. no-op when cap == 0.
+/// Keep the desktop notification corner bounded.
+///
+/// Halcyon's island caps its own notification history (`maxHistory` in
+/// Notifs.qml) and keeps that list in memory, exposing no count file — so when
+/// Halcyon is the running shell there is nothing for Luna to police, and this
+/// returns early (the island already drops the oldest when a new one arrives).
+/// On caelestia/Quickshell, which persists an unbounded list to
+/// `state/caelestia/notifs.json`, Luna clears it once it grows past `cap`.
+/// no-op when cap == 0.
 async fn enforce_notif_cap(cap: u32) {
     if cap == 0 {
         return;
+    }
+    // Halcyon self-bounds its history; defer to the island rather than assume
+    // caelestia's layout. (`clearnotifs` over its IPC is the manual lever.)
+    if let Some(home) = dirs::home_dir() {
+        if home.join(".config/Halcyon/quickshell/island").exists() {
+            return;
+        }
     }
     let state = dirs::state_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -448,7 +461,7 @@ async fn handle_idle(
     }
 
     // "in order of time" — longest idle first
-    targets.sort_by(|a, b| b.idle_mins.cmp(&a.idle_mins));
+    targets.sort_by_key(|t| std::cmp::Reverse(t.idle_mins));
 
     let period = if auto_stop > 0 && auto_stop % 60 == 0 {
         format!("{}h", auto_stop / 60)
@@ -548,9 +561,11 @@ pub(crate) async fn sh(cmd: &str) -> Result<String> {
 }
 
 pub(crate) async fn notify(title: &str, body: &str) {
-    // Direct exec — no shell, so no quoting/escaping concerns
+    // Direct exec — no shell, so no quoting/escaping concerns. `-a Luna` tags
+    // the sender so Halcyon's notification centre labels and groups these as
+    // Luna's own, instead of the generic "notify-send" app.
     let _ = tokio::process::Command::new("notify-send")
-        .args(["-u", "normal", title, body])
+        .args(["-a", "Luna", "-u", "normal", title, body])
         .output()
         .await;
 }

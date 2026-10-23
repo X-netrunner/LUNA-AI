@@ -95,13 +95,3 @@ pub async fn current_page_png(config: &LunaConfig) -> Result<Vec<u8>> {
 // Re-export for tests and internal use
 pub use planner::Step;
 
-#[cfg(test)]
-pub use cdp::*;
-#[cfg(test)]
-pub use dom::*;
-#[cfg(test)]
-pub use executor::*;
-#[cfg(test)]
-pub use planner::*;
-#[cfg(test)]
-pub use types::*;

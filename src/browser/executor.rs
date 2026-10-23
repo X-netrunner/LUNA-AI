@@ -720,10 +720,7 @@ pub async fn execute_plan(
     let mut history = Vec::new();
     let mut plan = LoopControl::new(steps);
 
-    loop {
-        let Some(step) = plan.current().cloned() else {
-            break;
-        };
+    while let Some(step) = plan.current().cloned() {
         let index = plan.cursor_index();
 
         // Execute with timeout

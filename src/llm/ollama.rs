@@ -896,18 +896,6 @@ impl OllamaClient {
         self
     }
 
-    /// Override keep_alive with a raw Ollama duration string (e.g. "10m", "30m", "-1").
-    ///
-    /// Useful when you need the exact format Ollama expects.
-    pub fn keep_alive_str(mut self, s: &str) -> Self {
-        if let Ok(mins) = s.trim_end_matches('m').parse::<u32>() {
-            self.keep_alive_mins = mins;
-        } else if s == "-1" {
-            self.keep_alive_mins = u32::MAX;
-        }
-        self
-    }
-
     /// The `keep_alive` value as Ollama wants it: a duration string like
     /// `"30m"`, or `-1` to hold the model indefinitely until shutdown.
     fn keep_alive_value(&self) -> String {
@@ -1458,10 +1446,6 @@ mod tests {
         assert_eq!(client_with_keep_alive(0).keep_alive_value(), "0");
     }
 
-    /// `keep_alive` is a top-level field on /api/chat, NOT a member of
-    /// `options`. Nesting it under options is silently accepted by Ollama and
-    /// ignored — the model still reloads and nothing looks wrong.
-    #[test]
     /// `think` is a top-level field on /api/chat, NOT a member of `options`.
     ///
     /// Same bug shape as `keep_alive` above, and the sibling test is the reason

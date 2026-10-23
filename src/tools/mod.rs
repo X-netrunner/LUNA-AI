@@ -1262,7 +1262,7 @@ pub fn normalise_tool_args<'a>(args: &'a serde_json::Value) -> Cow<'a, serde_jso
     let names_a_tool = ENVELOPE_NAME_KEYS.iter().any(|k| {
         obj.get(*k)
             .and_then(|v| v.as_str())
-            .map(|n| is_registered_tool(n))
+            .map(is_registered_tool)
             .unwrap_or(false)
     });
     if !names_a_tool {
@@ -1687,11 +1687,9 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
                     );
                     (
                         fixed,
-                        Some(format!(
-                            "\nNote: the file was written with escaped newlines (`\\n` as text) \
+                        Some("\nNote: the file was written with escaped newlines (`\\n` as text) \
                              and did not parse. Newlines were repaired and the result verified. \
-                             If the content looks wrong, ask for it again."
-                        )),
+                             If the content looks wrong, ask for it again.".to_string()),
                     )
                 }
                 verify::PreWrite::StillBroken(orig) => {

@@ -533,7 +533,7 @@ Output ONLY a JSON object:
             return Ok(Step::press(rest.trim()));
         }
         if let Some(rest) = step.strip_prefix("scroll:").or_else(|| step.strip_prefix("scroll ")) {
-            let parts: Vec<&str> = rest.trim().split_whitespace().collect();
+            let parts: Vec<&str> = rest.split_whitespace().collect();
             let dir = parts.first().copied().unwrap_or("down");
             let amt = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(500);
             return Ok(Step::scroll(dir, amt));

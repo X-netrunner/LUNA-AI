@@ -220,10 +220,7 @@ pub async fn health_check(cfg: &SysmodeConfig) -> Result<String> {
     out.push(format!("  SSH (sshd): {ssh_state}"));
 
     // 3. Decoy listening ports
-    let ss_out = match run("ss -tlnH 2>/dev/null | awk '{print $4}' | sed -E 's/.*://;s/\\[.*\\]//' | sort -nu", None).await {
-        Ok(s) => s,
-        Err(_) => String::new(),
-    };
+    let ss_out = run("ss -tlnH 2>/dev/null | awk '{print $4}' | sed -E 's/.*://;s/\\[.*\\]//' | sort -nu", None).await.unwrap_or_default();
     let listening: Vec<u16> = ss_out
         .lines()
         .filter_map(|l| l.trim().parse().ok())

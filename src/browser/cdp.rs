@@ -36,7 +36,7 @@ fn profile_path(config: &crate::config::BrowserConfig) -> PathBuf {
 
 /// True when some live process was launched with `--user-data-dir=<profile>`
 /// (i.e. one of our automation Chromiums is still running).
-fn process_uses_profile(profile: &PathBuf) -> bool {
+fn process_uses_profile(profile: &std::path::Path) -> bool {
     let needle = format!("--user-data-dir={}", profile.display());
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return false;
@@ -648,6 +648,6 @@ mod tests {
             assert!(!CdpBrowser::is_context_lost(&anyhow::anyhow!(text)), "{text}");
         }
     }
-    use super::*;
+    
     // Tests require a running Chromium — skipped by default
 }

@@ -3253,12 +3253,9 @@ pub(crate) fn strip_unsupported(text: &str, receipt: &[Receipt]) -> String {
     // Every unsupported version, not just the first: a reply that invented two
     // versions has still invented one too many if only one is removed.
     let mut dropped: Vec<String> = Vec::new();
-    loop {
-        let Some(Unsupported::VersionNotReported { service, version }) =
-            version_not_reported(&stripped, receipt)
-        else {
-            break;
-        };
+    while let Some(Unsupported::VersionNotReported { service, version }) =
+        version_not_reported(&stripped, receipt)
+    {
         let next = strip_version_claim(&stripped, &service, &version);
         if next == stripped {
             break;
@@ -4454,7 +4451,7 @@ mod tests {
         let raw = "<tools>\n{\"name\": \"write_file\", \"arguments\": {\"path\": \
                    \"/home/netrunner/Documents/luna-scripts/x.py\", \"content\": \
                    \"import socket\\nprint(1)\\n\"}}";
-        let call = super::parse_json_tool_call(&super::strip_tool_call_decoration(raw))
+        let call = super::parse_json_tool_call(super::strip_tool_call_decoration(raw))
             .expect("the gated model's encoding must parse");
         assert_eq!(call.function.name, "write_file");
         // The `arguments` envelope must be unwrapped, not passed through as

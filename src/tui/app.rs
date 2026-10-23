@@ -116,6 +116,12 @@ impl PendingSwitch {
 }
 
 /// State for the interactive luna.toml editor modal.
+impl std::fmt::Display for ConfigState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.lines.join("\n"))
+    }
+}
+
 pub struct ConfigState {
     pub path: std::path::PathBuf,
     pub lines: Vec<String>,
@@ -144,10 +150,6 @@ impl ConfigState {
             status: String::from("[Ctrl+S] Save · [Ctrl+E] External Editor · [Esc] Exit"),
             modified: false,
         }
-    }
-
-    pub fn to_string(&self) -> String {
-        self.lines.join("\n")
     }
 
     pub fn save(&mut self, config: &mut crate::config::LunaConfig) -> bool {
@@ -1555,11 +1557,10 @@ impl TuiApp {
                 // An explicit, discoverable route to the same place. The security
                 // item is a Value, not a Toggle, so Space is ambiguous — and a
                 // user who wants this should not have to guess which key opens it.
-                (_, KeyCode::Char('u')) | (_, KeyCode::Char('U')) => {
-                    if sm.is_on_security_item() {
+                (_, KeyCode::Char('u')) | (_, KeyCode::Char('U'))
+                    if sm.is_on_security_item() => {
                         self.press_security_item();
                     }
-                }
                 _ => {}
             }
             return;
@@ -2812,7 +2813,7 @@ mod security_gate_tests {
         );
 
         // Honest before anything is requested: NOT "ON" off the back of the key.
-        let mut item = sm
+        let item = sm
             .categories
             .iter()
             .flat_map(|c| c.items.iter())

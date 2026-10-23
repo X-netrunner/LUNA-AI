@@ -182,8 +182,6 @@ fn build_security_client(config: &LunaConfig) -> Option<OllamaClient> {
 /// checkpoint at runtime, and so the only one where a partial refusal is an
 /// expected outcome rather than a bug. Other tiers are served by models that do
 /// not refuse this kind of work at all.
-
-
 fn build_client(config: &LunaConfig) -> OllamaClient {
     OllamaClient::new(
         &config.llm.base_url,
@@ -2391,9 +2389,7 @@ fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
     match out {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => Err(String::from_utf8_lossy(&o.stderr)
-            .lines()
-            .filter(|l| !l.contains("py_compile"))
-            .next_back()
+            .lines().rfind(|l| !l.contains("py_compile"))
             .unwrap_or("syntax error")
             .trim()
             .to_string()),
@@ -2592,15 +2588,10 @@ fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
         };
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
-            loop {
-                match listener.accept().await {
-                    Ok((mut sock, _)) => {
-                        let _ = sock
-                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
-                            .await;
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+                    .await;
             }
         });
 
