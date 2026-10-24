@@ -92,7 +92,9 @@ fn build_deep_client(config: &LunaConfig) -> Option<OllamaClient> {
             &config.llm.base_url,
             model,
             config.llm.temperature,
-            config.llm.max_tokens,
+            // Coder tier gets its own, larger output budget — a full program
+            // runs past the chat cap and would otherwise be written truncated.
+            config.llm.deep_max_tokens,
         )
         .enable_thinking(config.llm.enable_thinking)
         .num_ctx(config.llm.deep_num_ctx)
@@ -111,7 +113,7 @@ fn build_deep_unrestricted_client(config: &LunaConfig) -> Option<OllamaClient> {
             &config.llm.base_url,
             model,
             config.llm.temperature,
-            config.llm.max_tokens,
+            config.llm.deep_max_tokens,
         )
         .enable_thinking(config.llm.enable_thinking)
         .num_ctx(config.llm.deep_num_ctx)
@@ -422,6 +424,15 @@ const DEEP_PROMPT: &str = "You are Luna. Your one and only creator is Netrunner 
     2. To edit existing code in a file, call edit_file with path, old_str (exact text to replace), and new_str (replacement text). \
     3. ALWAYS inspect files first with read_file before editing — the file's current content is NOT in your context. Never guess old_str. \
     4. Write clean, complete, functional code. Never leave placeholders or TODOs. \
+    5. Write the WHOLE program so it actually runs and does what was asked. Implement every \
+    piece of core logic — for a game that means the main loop, moving every moving object \
+    each frame, collision and screen-bounds handling, scoring and win/lose, and player input. \
+    A window that opens and renders static shapes, or a ball that never moves, is a failure, \
+    not a start. \
+    6. When a task needs a library (a GUI, a game framework, networking), pick ONE real, \
+    installable library and use its real, current API. Never invent a module, type, or \
+    function; if unsure of the exact API, say so rather than guessing a name. Prefer a single \
+    self-contained file that runs, and state the exact command to install deps and run it. \
     Be comprehensive, accurate, and direct. Never guess — if uncertain, inspect the target first.";
 
 /// Tool discipline for the offensive-security tier. Not a safety clause — a

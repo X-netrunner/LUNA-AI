@@ -1718,9 +1718,16 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
                 }
             };
             filesystem::write_file(&expanded, &content).await?;
+            // Syntax-check what was just written (non-executing). Catching a
+            // file that does not even parse here, and handing the model the
+            // error, stops Luna reporting a broken program as done — and lets
+            // the ReAct loop fix it in the same turn.
+            let syntax = verify::syntax_warning(&expanded, &content)
+                .map(|e| format!("\n⚠ This file does not parse — fix it:\n{e}"))
+                .unwrap_or_default();
             Ok(match repair_note {
-                Some(note) => format!("Written to {expanded}{note}"),
-                None => format!("Written to {expanded}"),
+                Some(note) => format!("Written to {expanded}{note}{syntax}"),
+                None => format!("Written to {expanded}{syntax}"),
             })
         }
 

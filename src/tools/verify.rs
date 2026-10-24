@@ -98,6 +98,65 @@ fn verify_content(path: &Path, content: &str, checker: &str) -> Verdict {
 
 static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// A non-executing syntax check for a freshly written source file.
+///
+/// Separate from the escape-repair `checker_for` above, which is deliberately
+/// conservative. This exists for the `write_file` path: a small local model
+/// often emits code that does not even parse and then reports the file as done.
+/// Each checker here is syntax-only and runs NOTHING from the file — `py_compile`
+/// compiles without running, `node --check` and `ruby -c` parse without
+/// executing, `luac -p` and `php -l` only lint — so it is safe to run on any
+/// content, including security-tier scripts.
+///
+/// Returns the checker's complaint when the content does not parse, or `None`
+/// when it parses, has no checker, or the checker is not installed (absence of a
+/// tool must never read as "broken").
+pub fn syntax_warning(path: &str, content: &str) -> Option<String> {
+    let p = Path::new(path);
+    let (program, args): (&str, &[&str]) = match p.extension().and_then(|e| e.to_str()) {
+        Some("py") => ("python3", &["-m", "py_compile"]),
+        Some("js" | "mjs" | "cjs") => ("node", &["--check"]),
+        Some("lua") => ("luac", &["-p"]),
+        Some("rb") => ("ruby", &["-c"]),
+        Some("php") => ("php", &["-l"]),
+        _ => return None,
+    };
+    let scratch = std::env::temp_dir().join(format!(
+        "luna_syntax_{}_{}{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default()
+    ));
+    if std::fs::write(&scratch, content).is_err() {
+        return None;
+    }
+    let out = std::process::Command::new(program)
+        .args(args)
+        .arg(&scratch)
+        .output();
+    std::fs::remove_file(&scratch).ok();
+    match out {
+        Ok(o) if o.status.success() => None,
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let raw = if stderr.trim().is_empty() {
+                String::from_utf8_lossy(&o.stdout).into_owned()
+            } else {
+                stderr.into_owned()
+            };
+            // Replace the scratch path with the real filename so the message
+            // reads about the file the model wrote, not a temp path.
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+            let cleaned = raw.replace(scratch.to_string_lossy().as_ref(), name);
+            Some(crate::util::truncate(cleaned.trim(), 400).to_string())
+        }
+        Err(_) => None,
+    }
+}
+
 /// Turn the two-character sequence `\n` into real line breaks.
 fn unescape_newlines(s: &str) -> String {
     s.replace("\\n", "\n").replace("\\t", "\t")
@@ -151,6 +210,18 @@ pub fn check_before_write(path: &str, content: &str) -> PreWrite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn syntax_warning_flags_broken_python_and_passes_good_python() {
+        // Valid Python: no warning.
+        assert_eq!(syntax_warning("/tmp/x.py", "def main():\n    print('ok')\n"), None);
+        // Broken Python: a warning that names the defect.
+        let w = syntax_warning("/tmp/x.py", "def main(:\n    print('ok')\n");
+        assert!(w.is_some(), "a syntax error must be reported");
+        // Unknown/unsupported extension: never claims anything.
+        assert_eq!(syntax_warning("/tmp/x.rs", "fn main() { let ; }"), None);
+        assert_eq!(syntax_warning("/tmp/notes.txt", "this is not code"), None);
+    }
 
     const GOOD_PY: &str = "import socket\n\ndef main():\n    print('x')\n";
     const ESCAPED_PY: &str =

@@ -371,6 +371,13 @@ pub struct LlmConfig {
     /// without changing the normal/fast tier defaults.
     #[serde(default = "default_deep_num_ctx")]
     pub deep_num_ctx: u32,
+    /// Max tokens the coder/deep tier may generate in one response. Kept
+    /// separate from (and higher than) the chat `max_tokens`: a whole program
+    /// — a game, a multi-function module — runs well past the 2048 that is fine
+    /// for chat, and when it hits the cap the file is written truncated (a
+    /// half-written `main`, a missing game loop). Fits inside `deep_num_ctx`.
+    #[serde(default = "default_deep_max_tokens")]
+    pub deep_max_tokens: u32,
     /// Model for offensive-security work on the user's own systems — exploit and
     /// PoC authoring, reverse shells, wireless testing, lab attack tooling.
     ///
@@ -587,6 +594,10 @@ fn default_deep_num_ctx() -> u32 {
     16384
 }
 
+fn default_deep_max_tokens() -> u32 {
+    8192
+}
+
 fn default_security_num_ctx() -> u32 {
     8192
 }
@@ -655,6 +666,7 @@ impl Default for LlmConfig {
             embedding_model: "nomic-embed-text".into(),
             num_ctx: default_num_ctx(),
             deep_num_ctx: default_deep_num_ctx(),
+            deep_max_tokens: default_deep_max_tokens(),
         }
     }
 }
