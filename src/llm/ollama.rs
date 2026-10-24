@@ -577,11 +577,15 @@ fn reset_think_rejections() {
     }
 }
 
-// Streaming chunk (no tools)
+// Streaming chunk. Used by both the plain-chat stream and the tool stream;
+// `tool_calls` and `eval_count` arrive only in the final chunk (see module
+// note), so both default and are empty on the content/thinking chunks.
 #[derive(Debug, Deserialize)]
 struct StreamChunk {
     message: StreamMessage,
     done: bool,
+    #[serde(default)]
+    eval_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -589,6 +593,8 @@ struct StreamMessage {
     content: Option<String>,
     #[serde(default)]
     thinking: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ToolCall>,
 }
 
 // Full response (with tools, non-streaming)
@@ -1022,6 +1028,13 @@ impl OllamaClient {
                         print!("{}", think);
                         use std::io::Write;
                         std::io::stdout().flush().ok();
+                    } else {
+                        // TUI mode: the screen is owned by ratatui, so stream the
+                        // reasoning out over the activity channel instead of stdout.
+                        // The TUI shows it live rather than after the final answer.
+                        crate::activity::publish(crate::activity::Event::Thinking {
+                            delta: think.clone(),
+                        });
                     }
                 }
 
@@ -1084,7 +1097,72 @@ impl OllamaClient {
         })
     }
 
-    // ── Non-streaming chat with tools ─────────────────────────────────────────
+    /// Drain a *tool-mode* stream back into the one `FullResponse` the
+    /// non-streaming parser expects, so every downstream path (tool-call
+    /// priority, envelope fallback, empty-answer rescue) is unchanged.
+    ///
+    /// The only reason to stream a tool request is live reasoning: the thinking
+    /// block is published chunk-by-chunk (TUI mode) as it arrives, instead of
+    /// landing all at once with the answer. Ollama sends `tool_calls` and
+    /// `eval_count` only in the final chunk, so they are simply taken as seen.
+    async fn consume_tool_stream(&self, response: reqwest::Response) -> Result<FullResponse> {
+        let mut stream = response.bytes_stream();
+        let mut content = String::new();
+        let mut thinking_buf = String::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut eval_count: Option<u32> = None;
+        let mut buffer = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.context("Stream error")?;
+            buffer.push_str(std::str::from_utf8(&bytes).context("Non-UTF8 from Ollama")?);
+
+            while let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].trim().to_string();
+                buffer = buffer[pos + 1..].to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                let chunk: StreamChunk = serde_json::from_str(&line)
+                    .with_context(|| format!("Failed to parse chunk: {}", line))?;
+
+                if let Some(ref think) = chunk.message.thinking {
+                    thinking_buf.push_str(think);
+                    // TUI only: stream reasoning over the activity channel. The
+                    // CLI keeps its prior tool-mode behaviour (thinking stays in
+                    // the debug trace below), so default CLI output is unchanged.
+                    if !self.term_output {
+                        crate::activity::publish(crate::activity::Event::Thinking {
+                            delta: think.clone(),
+                        });
+                    }
+                }
+                if let Some(token) = chunk.message.content {
+                    content.push_str(&token);
+                }
+                if !chunk.message.tool_calls.is_empty() {
+                    tool_calls.extend(chunk.message.tool_calls);
+                }
+                if chunk.eval_count.is_some() {
+                    eval_count = chunk.eval_count;
+                }
+                if chunk.done {
+                    break;
+                }
+            }
+        }
+
+        Ok(FullResponse {
+            message: FullMessage {
+                content: if content.is_empty() { None } else { Some(content) },
+                thinking: if thinking_buf.is_empty() { None } else { Some(thinking_buf) },
+                tool_calls,
+            },
+            eval_count,
+        })
+    }
+
+    // ── Chat with tools (streamed, reassembled to one response) ────────────────
     async fn chat_with_tools(
         &self,
         messages: &[Message],
@@ -1098,7 +1176,10 @@ impl OllamaClient {
             let request = ChatRequest {
                 model: &self.model,
                 messages,
-                stream: false, // ← key difference: get one complete response
+                // Streamed so the reasoning block can be shown live; the chunks
+                // are reassembled into one response below, so the parsing that
+                // follows is identical to the old non-streaming path.
+                stream: true,
                 options: ChatOptions {
                     temperature: if greedy { 0.0 } else { self.temperature },
                     num_predict: self.max_tokens,
@@ -1154,17 +1235,9 @@ impl OllamaClient {
                 anyhow::bail!("Ollama returned {}: {}", status, body);
             }
 
-            let body = response
-                .text()
-                .await
-                .context("Failed to read response body")?;
-
-            let parsed: FullResponse = serde_json::from_str(&body).with_context(|| {
-                format!(
-                    "Failed to parse Ollama response: {}",
-                    crate::util::truncate(&body, 300)
-                )
-            })?;
+            // Success: drain the stream back into the single response the rest
+            // of this function parses, publishing thinking live along the way.
+            let parsed = self.consume_tool_stream(response).await?;
 
             // Tool call takes priority — if present, return it immediately
             if !parsed.message.tool_calls.is_empty() {

@@ -1108,6 +1108,9 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                 elapsed.elapsed().as_secs_f64()
             );
         }
+        // CLI streams reasoning straight to stdout from the client (term_output
+        // is on), so these are never published here — nothing to do.
+        crate::activity::Event::Thinking { .. } => {}
     });
 
     let client = build_client(config);

@@ -86,11 +86,20 @@ pub struct ChatHistory<'a> {
     /// How many *lines* up from the bottom we're scrolled. 0 = follow newest.
     scroll_from_bottom: usize,
     focused: bool,
+    /// Reasoning streaming in for the turn in flight, shown live under the
+    /// conversation until the answer arrives. Empty/None when nothing is
+    /// streaming.
+    live_thinking: Option<&'a str>,
 }
 
 impl<'a> ChatHistory<'a> {
-    pub fn new(messages: &'a [Msg], scroll_from_bottom: usize, focused: bool) -> Self {
-        Self { messages, scroll_from_bottom, focused }
+    pub fn new(
+        messages: &'a [Msg],
+        scroll_from_bottom: usize,
+        focused: bool,
+        live_thinking: Option<&'a str>,
+    ) -> Self {
+        Self { messages, scroll_from_bottom, focused, live_thinking }
     }
 
     fn build_lines(&self, width: usize) -> Vec<Line<'static>> {
@@ -130,6 +139,26 @@ impl<'a> ChatHistory<'a> {
                             .add_modifier(Modifier::ITALIC),
                     )));
                 }
+            }
+            lines.push(Line::from(""));
+        }
+        // Reasoning for the turn in flight, streamed live. Rendered with the
+        // same `[think]` styling as a finished message's thinking, under a
+        // "luna is thinking…" header so it reads as happening now.
+        if let Some(live) = self.live_thinking.filter(|s| !s.is_empty()) {
+            lines.push(Line::from(Span::styled(
+                "luna › thinking…".to_string(),
+                Style::default()
+                    .fg(Color::Rgb(180, 140, 255))
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for chunk in wrap_text(live, width.saturating_sub(16)) {
+                lines.push(Line::from(Span::styled(
+                    format!("  │ [think] {}", chunk),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )));
             }
             lines.push(Line::from(""));
         }

@@ -254,13 +254,21 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             r#type: "function".into(),
             function: ToolFunction {
                 name: "read_file".into(),
-                description: "Read and return the full contents of a file.".into(),
+                description: "Read a file's contents. Reads the whole file by default; for a large file pass offset/limit to read a specific 1-based line range (and to page through the rest). Read before editing so old_str matches exactly.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Path to the file"
+                            "description": "Path to the file (~ is expanded automatically)"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "1-based line number to start reading from (optional)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "How many lines to read from offset (optional)"
                         }
                     },
                     "required": ["path"]
@@ -1650,7 +1658,9 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
                 )));
             };
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
-            filesystem::read_file(&expanded).await
+            let offset = args["offset"].as_u64().map(|n| n as usize);
+            let limit = args["limit"].as_u64().map(|n| n as usize);
+            filesystem::read_file(&expanded, offset, limit).await
         }
 
         "write_file" => {

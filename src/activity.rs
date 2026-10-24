@@ -54,6 +54,11 @@ pub enum Event {
     /// A tool finished. `ok` distinguishes success from a refusal or error, which
     /// matters because a refusal is the user seeing the gate do its job.
     ToolEnd { name: String, ok: bool, elapsed: Instant },
+    /// A chunk of the model's reasoning, as it streams. Published only when the
+    /// client is not printing to the terminal itself (TUI mode): the CLI already
+    /// streams thinking straight to stdout. Subscribers accumulate the deltas to
+    /// show reasoning live, instead of as a block after the answer lands.
+    Thinking { delta: String },
 }
 
 type Sink = Box<dyn Fn(&Event) + Send + Sync>;

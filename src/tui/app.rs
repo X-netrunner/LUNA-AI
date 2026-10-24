@@ -43,6 +43,9 @@ enum AppEvent {
     /// `activity::Event` itself, so the status-bar formatting lives with the
     /// other UI code instead of in the event plumbing.
     Activity(String),
+    /// A chunk of the model's reasoning, streamed live during the turn. Appended
+    /// to `live_thinking` and shown under the chat until the reply lands.
+    Thinking(String),
 }
 
 #[derive(Debug, Clone)]
@@ -885,6 +888,10 @@ pub struct TuiApp {
     /// task ends, but an event can already be queued behind the `Response` that
     /// ends the turn, and it would then stomp "Ready".
     pending_turn: bool,
+    /// Reasoning streamed in during the turn in flight, shown live under the
+    /// chat. Cleared when the turn starts and when its reply lands (the final
+    /// message carries its own thinking for the transcript).
+    live_thinking: String,
 }
 
 impl TuiApp {
@@ -911,6 +918,7 @@ impl TuiApp {
             focus: Focus::Chat,
             status: String::from("Ready"),
             pending_turn: false,
+            live_thinking: String::new(),
             model_name,
             metrics: Arc::new(Metrics::default()),
             last_latency: Duration::ZERO,
@@ -1280,6 +1288,9 @@ impl TuiApp {
                 self.chat_scroll = 0;
                 self.status = String::from("Ready");
                 self.pending_turn = false;
+                // The reply (with its own thinking block) is now in the
+                // transcript, so drop the live stream.
+                self.live_thinking.clear();
                 // Reply delivered (and spoken) — clear the thinking pulse.
                 crate::overlay::signal("idle");
                 // After a voice reply, keep the wake-word window open so the
@@ -1295,6 +1306,14 @@ impl TuiApp {
             AppEvent::Activity(line) => {
                 if self.pending_turn {
                     self.status = line;
+                }
+            }
+            // Reasoning streaming in mid-turn: accumulate and keep the view
+            // following the newest text so the user watches it think.
+            AppEvent::Thinking(delta) => {
+                if self.pending_turn {
+                    self.live_thinking.push_str(&delta);
+                    self.chat_scroll = 0;
                 }
             }
             AppEvent::Voice(text) => {
@@ -2327,6 +2346,7 @@ impl TuiApp {
         }
         self.status = String::from("Thinking...");
         self.pending_turn = true;
+        self.live_thinking.clear();
         let config = self.config.clone();
         let mut memory = self.memory.clone();
         let response_tx = self.tx.clone();
@@ -2348,6 +2368,12 @@ impl TuiApp {
             // the closure must own what it sends on.
             let activity_tx = response_tx.clone();
             let _activity = crate::activity::subscribe(move |ev| {
+                // Reasoning deltas go on their own event so they stream into the
+                // chat body rather than flicker through the one-line status bar.
+                if let crate::activity::Event::Thinking { delta } = ev {
+                    let _ = activity_tx.send(AppEvent::Thinking(delta.clone()));
+                    return;
+                }
                 let line = match ev {
                     crate::activity::Event::Iteration { n } => {
                         format!("Thinking… (step {n})")
@@ -2364,6 +2390,7 @@ impl TuiApp {
                         if *ok { "✓" } else { "✗" },
                         elapsed.elapsed().as_secs_f64()
                     ),
+                    crate::activity::Event::Thinking { .. } => unreachable!("handled above"),
                 };
                 let _ = activity_tx.send(AppEvent::Activity(line));
             });
@@ -2473,7 +2500,12 @@ impl TuiApp {
         f.render_widget(status, outer[0]);
 
         // Chat history
-        let chat = ChatHistory::new(&self.messages, self.chat_scroll, self.focus == Focus::Chat);
+        let live = if self.pending_turn && !self.live_thinking.is_empty() {
+            Some(self.live_thinking.as_str())
+        } else {
+            None
+        };
+        let chat = ChatHistory::new(&self.messages, self.chat_scroll, self.focus == Focus::Chat, live);
         f.render_widget(chat, mid[0]);
 
         // Debug panel (right side)
