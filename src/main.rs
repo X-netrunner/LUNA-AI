@@ -18,6 +18,7 @@ mod llm;
 mod memory;
 mod overlay;
 mod recon;
+mod stdio;
 mod stt;
 mod tools;
 mod tts;
@@ -50,6 +51,15 @@ struct Args {
     /// Use the Ratatui TUI interface
     #[arg(long)]
     tui: bool,
+
+    /// Talk JSON lines on stdin/stdout instead of a terminal (for another program driving Luna; see src/stdio.rs)
+    #[arg(long)]
+    stdio: bool,
+
+    /// With --stdio: keep the rolling conversation in this file instead of the default history.json, so a caller can keep
+    /// one file per conversation and resume any of them
+    #[arg(long, value_name = "FILE", requires = "stdio")]
+    history: Option<std::path::PathBuf>,
 
     /// Increase log verbosity (use multiple times: -v, -vv, -vvv)
     #[arg(short, action = clap::ArgAction::Count)]
@@ -454,6 +464,17 @@ async fn main() -> Result<()> {
     if args.wake_daemon {
         wake::run(config).await?;
         tracing::info!("Luna wake daemon stopped.");
+        return Ok(());
+    }
+
+    // ── Driven by another program (JSON lines) ───────────────────────────────
+    // Quiet client output (like the TUI) so stdout carries only the protocol; no sudo prompt, the tty is not there.
+    if args.stdio {
+        config.audio.input_mode = crate::config::InputMode::Tui;
+        if let Some(h) = args.history {
+            config.memory.history_path = h;
+        }
+        stdio::run(&config).await?;
         return Ok(());
     }
 
