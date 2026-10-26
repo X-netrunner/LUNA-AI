@@ -664,6 +664,9 @@ fn classify_general(input: &str) -> QueryComplexity {
         "make sure everything", "test everything", "test if everything",
         "check if everything", "check everything", "health check",
         "is the system", "is everything", "is the alarm",
+        // Halcyon, the desktop she lives in (halcyon_info / halcyon_do / halcyon_security: only the full model has them)
+        "halcyon", "my desktop", "the island", "firewall", "antivirus", "anti-virus", "clamav",
+        "my notes", "my calendar", "gaming mode", "do not disturb", "lock screen", "wallpaper",
     ];
     if tool_signals.iter().any(|s| lower.contains(s)) {
         return QueryComplexity::Complex;
@@ -715,6 +718,24 @@ fn classify_general(input: &str) -> QueryComplexity {
 
     // Longer open-ended questions default to complex (full model handles better)
     QueryComplexity::Complex
+}
+
+#[cfg(test)]
+mod halcyon_routing_tests {
+    use super::*;
+
+    #[test]
+    fn halcyon_questions_reach_the_model_that_has_the_halcyon_tools() {
+        for q in [
+            "give me an overview of my Halcyon desktop",
+            "is my firewall running?",
+            "what is in my notes",
+            "turn on gaming mode",
+            "any antivirus alerts?",
+        ] {
+            assert_ne!(classify(q), QueryComplexity::Simple, "{q:?} went to the fast model, which has no Halcyon tools");
+        }
+    }
 }
 
 #[cfg(test)]

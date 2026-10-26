@@ -183,6 +183,23 @@ fn triggers(name: &str) -> &'static [&'static str] {
         ],
         "desktop_do" => &["desktop", "open the app", "my screen", "screenshot"],
         "sysmode" => &["sysmode", "stealth", "lockdown", "honeypot", "harden", "security mode", "firewall"],
+        // ── Halcyon, the desktop she lives in ─────────────────────────────
+        // Three small schemas. They are offered when the request is about Halcyon or one of its parts; without a trigger the model
+        // reads about them in its instructions and then describes the call instead of making it (measured 2026-10-26, qwen3:8b).
+        "halcyon_info" => &[
+            "halcyon", "island", "my desktop", "the desktop", "firewall", "antivirus", "anti-virus", "clamav", "ai-firewall",
+            "ai-antivirus", "wallpaper", "lock screen", "settings", "setting", "gaming mode", "do not disturb", "dnd", "my notes",
+            "calendar", "launcher", "the bar", "status of my", "overview", "what is running", "is my",
+        ],
+        "halcyon_do" => &[
+            "halcyon", "island", "my desktop", "the desktop", "wallpaper", "lock screen", "settings", "setting", "gaming mode",
+            "do not disturb", "dnd", "add a note", "new note", "my notes", "calendar", "launcher", "theme", "profile", "the bar",
+            "open the", "turn on", "turn off", "switch to", "ui style",
+        ],
+        "halcyon_security" => &[
+            "firewall", "antivirus", "anti-virus", "clamav", "ai-firewall", "ai-antivirus", "ban", "unban", "block ip",
+            "open port", "close port", "exception", "false positive", "quarantine", "scan my", "scan this", "scan the folder",
+        ],
         "whatsapp_send" => &["whatsapp", "send a message", "text them", "message my"],
         "spotify" => &["spotify", "music", "song", "playlist", "play some"],
         "todoist_list" => &["todoist", "todo", "my tasks", "task list"],
@@ -541,6 +558,21 @@ mod tests {
     /// The size is the mechanism, so pin it. If the core set grows, this fails
     /// and the re-measurement is forced rather than silently shipping a
     /// regression that brings back silent no-op turns.
+    #[test]
+    fn halcyon_tools_are_offered_when_the_request_is_about_halcyon() {
+        for q in ["is my firewall running?", "give me an overview of my Halcyon desktop", "what is in my notes", "turn on gaming mode"] {
+            assert!(has(q, "halcyon_info"), "halcyon_info missing for {q:?}");
+        }
+        assert!(has("turn on gaming mode", "halcyon_do"));
+        assert!(has("ban 203.0.113.9 in the firewall", "halcyon_security"));
+        assert!(has("add an exception for this false positive", "halcyon_security"));
+        for q in ["hello there", "what is 2+2", "write me a haiku"] {
+            for t in ["halcyon_info", "halcyon_do", "halcyon_security"] {
+                assert!(!has(q, t), "{t} leaked into {q:?}");
+            }
+        }
+    }
+
     #[test]
     fn the_payload_stays_small() {
         let worst = names("please do absolutely everything at once");
