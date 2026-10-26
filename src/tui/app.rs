@@ -360,6 +360,18 @@ impl SettingsMenuState {
                         setting_type: SettingType::Toggle(config.llm.enable_thinking),
                     },
                     SettingItem {
+                        key: "llm.auto_route",
+                        label: "Auto Model Routing",
+                        description: "Luna picks fast, main, deep or security per question; off sends everything to the primary model",
+                        setting_type: SettingType::Toggle(config.llm.auto_route),
+                    },
+                    SettingItem {
+                        key: "llm.security_retry_on_refusal",
+                        label: "Retry When Refused",
+                        description: "If the security model refuses, ask again with the refusal removed from the context",
+                        setting_type: SettingType::Toggle(config.llm.security_retry_on_refusal),
+                    },
+                    SettingItem {
                         key: "agent.native_tools",
                         label: "Native Tools",
                         description: "Use native Ollama tool schema dispatch",
@@ -556,6 +568,8 @@ impl SettingsMenuState {
                         let val = *b;
                         match item.key {
                             "llm.enable_thinking" => self.config.llm.enable_thinking = val,
+                            "llm.auto_route" => self.config.llm.auto_route = val,
+                            "llm.security_retry_on_refusal" => self.config.llm.security_retry_on_refusal = val,
                             "agent.native_tools" => self.config.agent.native_tools = val,
                             "wake.enabled" => self.config.wake.enabled = val,
                             "wake.overlay_enabled" => self.config.wake.overlay_enabled = val,

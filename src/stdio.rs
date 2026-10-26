@@ -41,7 +41,8 @@ const KEYS: &[(&str, &str, &str, &str)] = &[
     ("spotify_id", "spotify.client_id", "Spotify client id", "developer.spotify.com: create an app, copy its client id, then run `luna --spotify-auth` once."),
 ];
 
-const ROLES: &[(&str, &str)] = &[("model", "llm.model"), ("fast", "llm.fast_model"), ("deep", "llm.deep_model"), ("security", "llm.security_model")];
+const ROLES: &[(&str, &str)] = &[("model", "llm.model"), ("fast", "llm.fast_model"), ("deep", "llm.deep_model"), ("security", "llm.security_model"),
+    ("deep_fallback", "llm.deep_model_unrestricted"), ("security_nr", "llm.security_model_abliterated")];
 
 fn emit(v: Value) {
     let mut out = std::io::stdout().lock();
@@ -146,7 +147,9 @@ pub fn settings_json(config: &LunaConfig) -> Value {
         .map(|(name, _, label, help)| json!({"name": name, "label": label, "help": help, "set": key_in_store(name)}))
         .collect();
     json!({"type": "settings", "categories": cats, "keys": keys,
-           "models": {"model": config.llm.model, "fast": config.llm.fast_model, "deep": config.llm.deep_model, "security": config.llm.security_model}})
+           "models": {"model": config.llm.model, "fast": config.llm.fast_model, "deep": config.llm.deep_model, "security": config.llm.security_model,
+                      "deep_fallback": config.llm.deep_model_unrestricted, "security_nr": config.llm.security_model_abliterated},
+           "auto": config.llm.auto_route})
 }
 
 /// Set one TUI setting by its key. Toggles are set to the wanted value (not flipped); the two signed gates are refused with the
@@ -212,11 +215,13 @@ async fn models_json(config: &LunaConfig) -> Value {
     let inst = installed_models(config).await;
     json!({"type": "models", "reachable": inst.is_some(),
            "installed": inst.unwrap_or_default().into_iter().map(|(n, b)| json!({"name": n, "gb": (b as f64 / 1e8).round() / 10.0})).collect::<Vec<_>>(),
-           "roles": {"model": config.llm.model, "fast": config.llm.fast_model, "deep": config.llm.deep_model, "security": config.llm.security_model}})
+           "roles": {"model": config.llm.model, "fast": config.llm.fast_model, "deep": config.llm.deep_model, "security": config.llm.security_model,
+                      "deep_fallback": config.llm.deep_model_unrestricted, "security_nr": config.llm.security_model_abliterated},
+           "auto": config.llm.auto_route})
 }
 
 async fn set_model(config: &mut LunaConfig, name: &str, role: &str) -> anyhow::Result<()> {
-    let leaf = ROLES.iter().find(|(r, _)| *r == role).map(|(_, l)| *l).ok_or_else(|| anyhow::anyhow!("role is model, fast, deep or security"))?;
+    let leaf = ROLES.iter().find(|(r, _)| *r == role).map(|(_, l)| *l).ok_or_else(|| anyhow::anyhow!("role is model, fast, deep, security, deep_fallback or security_nr"))?;
     match installed_models(config).await {
         None => anyhow::bail!("Ollama is not answering at {}, so the model name cannot be checked. Start it first.", config.llm.base_url),
         Some(list) if !list.iter().any(|(n, _)| n == name || n.strip_suffix(":latest") == Some(name)) => {
@@ -229,6 +234,8 @@ async fn set_model(config: &mut LunaConfig, name: &str, role: &str) -> anyhow::R
         "model" => config.llm.model = name.to_string(),
         "fast" => config.llm.fast_model = Some(name.to_string()),
         "deep" => config.llm.deep_model = Some(name.to_string()),
+        "deep_fallback" => config.llm.deep_model_unrestricted = Some(name.to_string()),
+        "security_nr" => config.llm.security_model_abliterated = Some(name.to_string()),
         _ => config.llm.security_model = Some(name.to_string()),
     }
     crate::config::LunaConfig::set_leaf(leaf, toml_edit::Value::from(name))

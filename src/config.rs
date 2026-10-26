@@ -385,6 +385,10 @@ pub struct LlmConfig {
     pub temperature: f32,
     pub max_tokens: u32,
     pub enable_thinking: bool,
+    /// true = Luna picks the model per question (fast / main / deep / security, whichever of them are set).
+    /// false = every question goes to `model`; the other tiers stay configured but unused.
+    #[serde(default = "default_true")]
+    pub auto_route: bool,
     pub fast_model: Option<String>,
     /// Optional large model for complex reasoning / code (e.g. qwen3:8b).
     /// Queries needing deep thought are routed here instead of `model`.
@@ -672,6 +676,7 @@ impl Default for LlmConfig {
             temperature: 0.7,
             max_tokens: 2048,
             enable_thinking: true,
+            auto_route: true,
             fast_model: None,
             deep_model: None,
             deep_model_unrestricted: None,

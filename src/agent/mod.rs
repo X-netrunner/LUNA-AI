@@ -714,6 +714,19 @@ pub async fn run_routed_turn(
     memory: &mut Memory,
     config: &LunaConfig,
 ) -> Result<TurnOutcome> {
+    // Auto routing off: the primary model answers everything (the other tiers stay in the file, unused).
+    let pinned;
+    let config = if config.llm.auto_route {
+        config
+    } else {
+        let mut c = config.clone();
+        c.llm.fast_model = None;
+        c.llm.deep_model = None;
+        c.llm.security_model = None;
+        c.llm.security_model_abliterated = None;
+        pinned = c;
+        &pinned
+    };
     let client = build_client(config);
     let fast_client = build_fast_client(config);
     let deep_client = build_deep_client(config);
