@@ -445,7 +445,8 @@ async fn main() -> Result<()> {
     // sessions HAVE to speak (voice in, voice out, no terminal). Pure-CLI runs
     // (`--text-only`, piped input, the default fallback) exist for testing and
     // must stay silent.
-    if !args.tui && !args.wake_daemon {
+    // `--stdio` (the Halcyon window) keeps the configured mode: it only speaks when the window asks for it with a `speak` request.
+    if !args.tui && !args.wake_daemon && !args.stdio {
         config.voice.mode = VoiceMode::Off;
         tracing::info!("Voice force-disabled in non-TUI (CLI) mode");
     }

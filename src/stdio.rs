@@ -76,6 +76,8 @@ enum Request {
     Models,
     SetModel(String, String),
     SetKey(String, String),
+    Speak(String),
+    VoiceStatus,
     Ignore,
 }
 
@@ -104,8 +106,44 @@ fn parse_request(line: &str) -> Request {
             (Some(n), Some(val)) => Request::SetKey(n.to_string(), val.to_string()),
             _ => Request::Ignore,
         },
+        Some("speak") => match v.get("text").and_then(Value::as_str).map(str::trim) {
+            Some(t) if !t.is_empty() => Request::Speak(t.chars().take(4000).collect()),
+            _ => Request::Ignore,
+        },
+        Some("voice_status") => Request::VoiceStatus,
         _ => Request::Ignore,
     }
+}
+
+/// What the configured voice still needs on this machine (empty = it can speak). Looked at, never downloaded.
+pub fn voice_missing(config: &LunaConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    if config.voice.mode == crate::config::VoiceMode::Off {
+        return out;
+    }
+    let model = config.voice.piper_model.to_string_lossy().into_owned();
+    if !config.voice.piper_model.exists() {
+        out.push("the Kokoro voice model (kokoro-v1.0.onnx)".to_string());
+    }
+    let voices = std::path::PathBuf::from(model.replace("kokoro-v1.0.onnx", "voices-v1.0.bin"));
+    if voices == config.voice.piper_model || !voices.exists() {
+        out.push("the voice file (voices-v1.0.bin)".to_string());
+    }
+    let home = dirs::home_dir().unwrap_or_default();
+    let have_env = home.join(".local/share/luna/tts_env/bin/python3").exists() || home.join(".local/share/luna/rvc_env/bin/python3").exists();
+    if !have_env {
+        let ok = std::process::Command::new("python3")
+            .args(["-c", "import kokoro_onnx, soundfile"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            out.push("the Python packages kokoro-onnx and soundfile".to_string());
+        }
+    }
+    out
 }
 
 
@@ -287,6 +325,23 @@ pub async fn run(config: &LunaConfig) -> Result<()> {
                 Ok(w) => emit(json!({"type": "key_saved", "name": name, "where": w})),
                 Err(e) => emit(json!({"type": "error", "error": e.to_string()})),
             },
+            Request::VoiceStatus => {
+                let missing = voice_missing(config);
+                emit(json!({"type": "voice", "mode": format!("{:?}", config.voice.mode).to_lowercase(), "missing": missing, "ok": config.voice.mode != crate::config::VoiceMode::Off && missing.is_empty()}));
+            }
+            Request::Speak(text) => {
+                let missing = voice_missing(config);
+                if config.voice.mode == crate::config::VoiceMode::Off {
+                    emit(json!({"type": "error", "error": "Voice is off. Turn it on under Voice & Audio in Luna's settings."}));
+                } else if !missing.is_empty() {
+                    emit(json!({"type": "error", "error": format!("Luna cannot speak yet: she needs {}. Run scripts/luna-voice-setup.sh in the Halcyon folder.", missing.join(", "))}));
+                } else {
+                    match crate::tts::speak(&text, &config.voice.mode, config).await {
+                        Ok(()) => emit(json!({"type": "spoke"})),
+                        Err(e) => emit(json!({"type": "error", "error": format!("Speaking failed: {e}")})),
+                    }
+                }
+            }
             Request::Turn(text) => {
                 let started = Instant::now();
                 match crate::agent::run_routed_turn(&text, &mut memory, &*config).await {
