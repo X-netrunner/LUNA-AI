@@ -307,11 +307,12 @@ pub fn build_system_prompt(config: &LunaConfig) -> String {
     );
 
     format!(
-        "{}{}{}\n\n{}",
+        "{}{}{}\n\n{}{}",
         config.agent.system_prompt,
         time_context,
         history_block,
-        load_constitution(config).trim()
+        load_constitution(config).trim(),
+        crate::tools::halcyon::awareness()
     )
 }
 
@@ -791,7 +792,7 @@ pub async fn run_routed_turn(
             }
             QueryComplexity::Deep => {
                 if let Some(dr) = deep_react.as_ref() {
-                    (dr, finalize_prompt(config, DEEP_PROMPT.to_string()), Tier::Deep)
+                    (dr, finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness())), Tier::Deep)
                 } else {
                     (&react, system_prompt.clone(), Tier::Full)
                 }
@@ -800,10 +801,10 @@ pub async fn run_routed_turn(
                 if let Some(sr) = security_react.as_ref() {
                     (
                         sr,
-                        finalize_prompt(config, build_security_prompt(
+                        finalize_prompt(config, format!("{}{}", build_security_prompt(
                             config.llm.security_unrestricted_active(),
                             &config.llm.security_scripts_dir,
-                        )),
+                        ), crate::tools::halcyon::awareness())),
                         Tier::Security,
                     )
                 } else {
@@ -1264,7 +1265,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                 }
                 QueryComplexity::Deep => {
                     if let Some(dr) = deep_react.as_ref() {
-                        (dr, finalize_prompt(config, DEEP_PROMPT.to_string()), Tier::Deep)
+                        (dr, finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness())), Tier::Deep)
                     } else {
                         (&react, system_prompt.to_string(), Tier::Full)
                     }
@@ -1273,10 +1274,10 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                     if let Some(sr) = security_react.as_ref() {
                         (
                             sr,
-                            finalize_prompt(config, build_security_prompt(
+                            finalize_prompt(config, format!("{}{}", build_security_prompt(
                             config.llm.security_unrestricted_active(),
                             &config.llm.security_scripts_dir,
-                        )),
+                        ), crate::tools::halcyon::awareness())),
                             Tier::Security,
                         )
                     } else {
@@ -1500,7 +1501,7 @@ async fn answer_input(
             }
             QueryComplexity::Deep => {
                 if let Some(dr) = deep_react {
-                    (dr, finalize_prompt(config, DEEP_PROMPT.to_string()), Tier::Deep)
+                    (dr, finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness())), Tier::Deep)
                 } else {
                     (react, system_prompt.to_string(), Tier::Full)
                 }
@@ -1509,10 +1510,10 @@ async fn answer_input(
                 if let Some(sr) = security_react {
                     (
                         sr,
-                        finalize_prompt(config, build_security_prompt(
+                        finalize_prompt(config, format!("{}{}", build_security_prompt(
                             config.llm.security_unrestricted_active(),
                             &config.llm.security_scripts_dir,
-                        )),
+                        ), crate::tools::halcyon::awareness())),
                         Tier::Security,
                     )
                 } else {

@@ -7,6 +7,7 @@ pub mod backup;
 pub mod desktop;
 pub mod eyes;
 pub mod filesystem;
+pub mod halcyon;
 pub mod learn;
 pub mod pkgupdate;
 pub mod proactive;
@@ -49,6 +50,61 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                         }
                     },
                     "required": ["command"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "halcyon_info".into(),
+                description: "Look something up in Halcyon, the desktop you live in (read only). Actions: overview (state of everything), \
+                              docs <words> (answers from Halcyon's docs, with setting keys), settings <words>, catalog (every window and \
+                              command id), notes, calendar, firewall <status|history|feeds|posture>, antivirus <status|alerts|actions|exceptions|rules>, \
+                              clamav <test|exceptions>, sysmode, updates, luna. Use this BEFORE guessing how Halcyon works.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "description": "One of: overview, docs, settings, catalog, notes, calendar, firewall, antivirus, clamav, sysmode, updates, luna"},
+                        "args": {"type": "array", "items": {"type": "string"}, "description": "Words for the action, e.g. [\"how\",\"do\",\"I\",\"hide\",\"the\",\"bar\"] for docs, [\"status\"] for firewall"}
+                    },
+                    "required": ["action"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "halcyon_do".into(),
+                description: "Change Halcyon itself (needs the user's switch 'Control Halcyon' in the Luna window). Actions: open <command id> \
+                              (any window or launcher command; ids from halcyon_info catalog), set <opt:KEY|st:KEY> <value> (a Settings row; \
+                              find the key with halcyon_info settings), gaming <on|off>, dnd <on|off>, profile <work|gaming|battery|night|custom>, \
+                              note <add TEXT|del N|done N|pin N|due N WHEN|search WORDS>, calendar <sync|remind 10,0>, connect-calendar <https url>, luna-window. \
+                              Do only what the user asked and say what you changed.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "description": "One of: open, set, gaming, dnd, profile, note, calendar, connect-calendar, luna-window"},
+                        "args": {"type": "array", "items": {"type": "string"}, "description": "Words for the action, e.g. [\"opt:uiStyle\",\"legacy\"] for set, [\"add\",\"buy milk\"] for note"}
+                    },
+                    "required": ["action"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "halcyon_security".into(),
+                description: "Change firewall, antivirus or ClamAV state in Halcyon (admin rights; needs the developer-signed capability gate). \
+                              Actions: fw-ban <ip>, fw-unban <ip>, fw-open <tcp|udp> <port>, fw-close <tcp|udp> <port>, av-scan <path>, av-ack <id...|all>, \
+                              av-exception <add program|folder PATH [name] | remove PATH>, clam-scan [folder], clam-forget <n>. Only on an explicit request \
+                              from the user. For sysmode profiles use the sysmode tool.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "description": "One of: fw-ban, fw-unban, fw-open, fw-close, av-scan, av-ack, av-exception, clam-scan, clam-forget"},
+                        "args": {"type": "array", "items": {"type": "string"}, "description": "Words for the action, e.g. [\"1.2.3.4\"] for fw-ban"}
+                    },
+                    "required": ["action"]
                 }),
             },
         },
@@ -1426,7 +1482,16 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
     // can forget it and no argument can talk its way past it. Deliberately
     // BEFORE any argument parsing: a gated tool must not so much as look at its
     // arguments, let alone act on them.
-    if !config.external.allow_external_actions && config.external.is_gated(name) {
+    if config.external.is_gated(name) && !config.external.gate_open_for(name) && name == crate::config::HALCYON_DO {
+        tracing::warn!("Refused '{}': the Halcyon-actions gate is closed (args were not acted on)", name);
+        anyhow::bail!(
+            "Refused 'halcyon_do': the user has not switched on 'Control Halcyon' (Halcyon > Luna window > Settings), \
+             or set [external] allow_halcyon_actions = true in ~/.config/luna/luna.toml. Nothing was changed. \
+             Reading still works: use halcyon_info. You cannot pass an argument to open this, and you must not try to \
+             work around it with run_shell."
+        );
+    }
+    if !config.external.allow_external_actions && config.external.is_gated(name) && name != crate::config::HALCYON_DO {
         tracing::warn!(
             "Refused '{}': external-action gate is closed (args were not acted on)",
             name
@@ -1562,6 +1627,10 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
                 Ok(result.stdout.trim().to_string())
             }
         }
+
+        "halcyon_info" => halcyon::call("info", args, None).await,
+        "halcyon_do" => halcyon::call("do", args, None).await,
+        "halcyon_security" => halcyon::call("security", args, sudo_pass).await,
 
         "tool_check" => {
             let name = args["name"].as_str().unwrap_or("");
@@ -2878,6 +2947,8 @@ mod gate_tests {
         let defaults = crate::config::default_capability_tools();
         let missing: Vec<&String> = defaults
             .iter()
+            // `halcyon_security` is gated by NAME in `is_capability_gated`, so no list in the file can leave it open
+            .filter(|t| t.as_str() != crate::config::HALCYON_SECURITY)
             .filter(|t| !text_matches_list(&text, t))
             .collect();
         assert!(
@@ -3161,6 +3232,46 @@ mod gate_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn halcyon_tools_are_gated_even_when_luna_toml_predates_them() {
+        // A luna.toml written before these tools existed carries an explicit `gated_tools` and `capability_tools` without them.
+        // The tools must be gated by name, not by whatever the file lists.
+        let mut cfg = crate::config::ExternalActionConfig::default();
+        cfg.gated_tools = vec!["whatsapp_send".into()];
+        cfg.capability_tools = vec!["nmap_scan".into()];
+        assert!(cfg.is_gated("halcyon_do"));
+        assert!(cfg.is_capability_gated("halcyon_security"));
+        assert!(!cfg.is_gated("halcyon_info") && !cfg.is_capability_gated("halcyon_info"));
+    }
+
+    #[test]
+    fn halcyon_do_has_its_own_human_switch() {
+        let mut cfg = crate::config::ExternalActionConfig::default();
+        assert!(!cfg.gate_open_for("halcyon_do"));
+        cfg.allow_external_actions = true;
+        assert!(!cfg.gate_open_for("halcyon_do"), "texting contacts must not also unlock the desktop");
+        cfg.allow_external_actions = false;
+        cfg.allow_halcyon_actions = true;
+        assert!(cfg.gate_open_for("halcyon_do"));
+        assert!(!cfg.gate_open_for("whatsapp_send"), "tidying the desktop must not unlock messaging");
+    }
+
+    #[tokio::test]
+    async fn a_closed_halcyon_gate_refuses_before_looking_at_the_arguments() {
+        let cfg = crate::config::LunaConfig::default();
+        let c = call("halcyon_do", serde_json::json!({"action": "gaming", "args": ["on"]}));
+        let e = execute(&c, &cfg).await.unwrap_err().to_string();
+        assert!(e.contains("Control Halcyon") && e.contains("Nothing was changed"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn the_security_tool_needs_the_capability_gate() {
+        let cfg = crate::config::LunaConfig::default();
+        let c = call("halcyon_security", serde_json::json!({"action": "fw-ban", "args": ["1.2.3.4"]}));
+        let e = execute(&c, &cfg).await.unwrap_err().to_string();
+        assert!(e.contains("Gate state"), "{e}");
     }
 
     #[test]

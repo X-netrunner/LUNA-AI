@@ -441,6 +441,13 @@ impl SettingsMenuState {
                         setting_type: SettingType::Toggle(config.external.allow_external_actions),
                     },
                     SettingItem {
+                        key: "external.allow_halcyon_actions",
+                        label: "Control Halcyon",
+                        description: "HUMAN SWITCH: Allow Luna to change Halcyon itself (open windows, settings, notes, modes). \
+                                      Reading Halcyon is always allowed; firewall and antivirus changes need the capability gate below.",
+                        setting_type: SettingType::Toggle(config.external.allow_halcyon_actions),
+                    },
+                    SettingItem {
                         key: "updates.allow_apply",
                         label: "Package Upgrade Gate",
                         description: "HUMAN SWITCH: Allow Luna to run pacman upgrade",
@@ -558,6 +565,7 @@ impl SettingsMenuState {
                             "daemon.learning_enabled" => self.config.daemon.learning_enabled = val,
                             "daemon.disk_cleanup" => self.config.daemon.disk_cleanup = val,
                             "external.allow_external_actions" => self.config.external.allow_external_actions = val,
+                            "external.allow_halcyon_actions" => self.config.external.allow_halcyon_actions = val,
                             "updates.allow_apply" => self.config.updates.allow_apply = val,
                             "selfpatch.enabled" => self.config.selfpatch.enabled = val,
                             "vision.enabled" => self.config.vision.enabled = val,

@@ -113,6 +113,11 @@ pub struct ExternalActionConfig {
     /// the machine, not because there are two secrets to manage.
     #[serde(default)]
     pub allow_capability_actions: bool,
+    /// HUMAN GATE for `halcyon_do`: may Luna change Halcyon's own state (open windows, settings, notes, modes)? Its own switch,
+    /// because "tidy my desktop" is not "send messages as me" (`allow_external_actions`). Halcyon's Luna window flips it; the
+    /// model has no argument that can. `halcyon_security` is behind the capability gate above, not this one.
+    #[serde(default)]
+    pub allow_halcyon_actions: bool,
     /// Tools refused unless `allow_capability_actions` is requested AND the
     /// developer key has been presented.
     ///
@@ -153,6 +158,8 @@ pub fn default_capability_tools() -> Vec<String> {
         "self_patch",
         // Installs/updates packages system-wide.
         "system_update",
+        // Changes firewall, antivirus and ClamAV state in Halcyon (bans, ports, exceptions), with admin rights.
+        "halcyon_security",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -164,6 +171,7 @@ impl Default for ExternalActionConfig {
         Self {
             allow_external_actions: false,
             allow_capability_actions: false,
+            allow_halcyon_actions: false,
             capability_tools: default_capability_tools(),
             gated_tools: vec![
                 // Sends a real message to a real person. Irreversible.
@@ -194,19 +202,36 @@ impl Default for ExternalActionConfig {
                 // behaves in later sessions without review.
                 "create_skill".into(),
                 "forget_skill".into(),
+                // Changes Halcyon's own state: windows, settings, notes, modes. Its own human switch (`allow_halcyon_actions`).
+                "halcyon_do".into(),
             ],
         }
     }
 }
 
+/// The two Halcyon tools with a gate of their own. Named here, and checked by name in `is_gated` / `is_capability_gated`, so a
+/// luna.toml written before they existed (an explicit `gated_tools` list without them) cannot leave them open.
+pub const HALCYON_DO: &str = "halcyon_do";
+pub const HALCYON_SECURITY: &str = "halcyon_security";
+
 impl ExternalActionConfig {
     pub fn is_gated(&self, tool: &str) -> bool {
-        self.gated_tools.iter().any(|t| t == tool)
+        tool == HALCYON_DO || self.gated_tools.iter().any(|t| t == tool)
+    }
+
+    /// Is the human gate that applies to this tool open? `halcyon_do` has its own; every other gated tool uses
+    /// `allow_external_actions`.
+    pub fn gate_open_for(&self, tool: &str) -> bool {
+        if tool == HALCYON_DO {
+            self.allow_halcyon_actions
+        } else {
+            self.allow_external_actions
+        }
     }
 
     /// Whether this tool is behind the developer-signed capability gate.
     pub fn is_capability_gated(&self, tool: &str) -> bool {
-        self.capability_tools.iter().any(|t| t == tool)
+        tool == HALCYON_SECURITY || self.capability_tools.iter().any(|t| t == tool)
     }
 
     /// Read-only tools that could serve the same need as a refused one, so the
@@ -239,6 +264,8 @@ impl ExternalActionConfig {
 /// does not scale, so every tool must now appear in exactly one of the two
 /// lists, and a test fails the build if a new tool is added to neither.
 pub const READ_ONLY_TOOLS: &[&str] = &[
+    // Halcyon status, docs, settings, notes, calendar, firewall and antivirus reads. The script refuses anything else under this tier.
+    "halcyon_info",
     "read_file",
     "find_file",
     "write_file",   // local files only; her own source is blocked separately
@@ -1385,6 +1412,29 @@ impl LunaConfig {
         Ok(())
     }
 
+    /// Change ONE value in luna.toml (`"llm.model"`, `"external.allow_halcyon_actions"`) and nothing else.
+    ///
+    /// `save()` rewrites every field from the in-memory config, and the in-memory config holds the secrets it fetched from the
+    /// keyring: saving it would turn `tavily_api_key = "keyring:tavily"` into the key itself, in plain text. A caller that changes
+    /// one setting (the Halcyon window, `/model`) must use this instead. Comments and layout survive (toml_edit).
+    pub fn set_leaf(dotted: &str, value: toml_edit::Value) -> Result<()> {
+        let path = Self::config_path();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let out = edit_leaf(&text, dotted, value)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).context("Failed to create config directory")?;
+        }
+        std::fs::write(&path, out).with_context(|| format!("Failed to write config to {:?}", path))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .context("Failed to restrict config file permissions")?;
+        }
+        Self::restart_daemons_if_running();
+        Ok(())
+    }
+
     /// Restart active Luna daemons (luna-daemon.service and luna-wake.service)
     /// via systemd user services when configuration changes.
     pub fn restart_daemons_if_running() {
@@ -1412,6 +1462,27 @@ impl LunaConfig {
             .join("luna")
             .join("luna.toml")
     }
+}
+
+/// The pure half of `LunaConfig::set_leaf`: `text` with the one value `dotted` ("llm.model") set, everything else as it was.
+pub fn edit_leaf(text: &str, dotted: &str, value: toml_edit::Value) -> Result<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().unwrap_or_default();
+    let mut parts: Vec<&str> = dotted.split('.').collect();
+    let leaf = parts.pop().filter(|l| !l.is_empty()).context("empty setting name")?;
+    let mut table = doc.as_table_mut();
+    for p in parts {
+        if !table.contains_key(p) {
+            table.insert(p, toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        table = table[p].as_table_mut().with_context(|| format!("{p} in luna.toml is not a section"))?;
+    }
+    // keep the old value's surrounding comments ("model = \"a\"  # primary")
+    let mut new = toml_edit::Value::from(value);
+    if let Some(old) = table.get(leaf).and_then(|i| i.as_value()) {
+        *new.decor_mut() = old.decor().clone();
+    }
+    table.insert(leaf, toml_edit::Item::Value(new));
+    Ok(doc.to_string())
 }
 
 /// Recursively write `value` into an existing toml_edit table, updating
@@ -1719,5 +1790,30 @@ num_ctx = 16384
         assert!(out.contains("level = \"debug\""));
         assert!(out.contains("model = \"new\""));
         assert!(out.contains("fast_model = \"f\""));
+    }
+}
+
+#[cfg(test)]
+mod edit_leaf_tests {
+    use super::edit_leaf;
+
+    #[test]
+    fn one_value_changes_and_nothing_else() {
+        let before = "# my notes\n[llm]\nmodel = \"a\"  # primary\n\n[search]\ntavily_api_key = \"keyring:tavily\"\n";
+        let after = edit_leaf(before, "llm.model", toml_edit::Value::from("b")).unwrap();
+        assert!(after.contains("model = \"b\"") && after.contains("# my notes") && after.contains("# primary"), "{after}");
+        assert!(after.contains("tavily_api_key = \"keyring:tavily\""), "a secret reference must stay a reference: {after}");
+    }
+
+    #[test]
+    fn a_missing_section_is_made() {
+        let after = edit_leaf("", "external.allow_halcyon_actions", toml_edit::Value::from(true)).unwrap();
+        assert!(after.contains("[external]") && after.contains("allow_halcyon_actions = true"), "{after}");
+    }
+
+    #[test]
+    fn a_value_is_not_a_section() {
+        assert!(edit_leaf("llm = 3\n", "llm.model", toml_edit::Value::from("x")).is_err());
+        assert!(edit_leaf("", "", toml_edit::Value::from("x")).is_err());
     }
 }
