@@ -2,6 +2,13 @@
 
 A fast, personal AI assistant built in Rust, running entirely locally on your machine. No cloud, no subscriptions, no data leaving your system.
 
+**Luna is part of [Halcyon](https://github.com/X-netrunner/Halcyon)**, a Hyprland desktop, together with
+[ai-firewall](https://github.com/X-netrunner/ai-firewall) and [ai-antivirus](https://github.com/X-netrunner/ai-antivirus). Each of the three works on its own
+(Luna runs in any terminal), and they fit together best: in Halcyon, Luna has her own window with saved chats, her settings and API keys as a page,
+and tools to read, and with your permission operate, the desktop, the firewall and the antivirus. [See Luna in Halcyon](#luna-in-halcyon).
+
+![Luna in Halcyon](docs/luna-chat.webp)
+
 ## Features
 
 - **Local-first** — runs via Ollama, everything stays on your machine
@@ -62,8 +69,62 @@ A fast, personal AI assistant built in Rust, running entirely locally on your ma
 | `whatsapp_send` | Send WhatsApp messages through your own linked account (pair once with `luna --whatsapp-link`). Actions: `send` (to + text), `lookup` (name → number), `contacts` (list full contact book with names & numbers), `status` (bridge health) |
 | `browser_do` | **Run real browser tasks** — spins up the Project-Vision (SIH) VLM planner + a visible Chromium window to execute goals like "add the first PS5 result to cart on amazon.com" or "fill this Google Form". Blocks until done; profile persists so logins only need to happen once. |
 | `sysmode` | Switch system hardening profiles (`secure`/`cyber`/`stealth`/`lockdown`), run a functional self-test of the honeypot/IDS/decoy stack ("is the honeypot working?"), or pull attack logs |
+| `halcyon_info` | **Read Halcyon**, the desktop she lives in: `overview`, `docs <words>`, `settings <words>`, `catalog`, `notes`, `calendar`, `firewall`, `antivirus`, `clamav`, `sysmode`, `updates`. Read only, always available when Halcyon is installed |
+| `halcyon_do` | **Change Halcyon**: open any window or command by id, set a Settings row, gaming mode, do-not-disturb, effect profiles, notes, calendar sync. Needs the human switch `[external] allow_halcyon_actions` ("Control Halcyon" in Halcyon's Luna settings) |
+| `halcyon_security` | **Firewall, antivirus and ClamAV changes** in Halcyon: `fw-ban`, `fw-unban`, `fw-open`, `fw-close`, `av-scan`, `av-ack`, `av-exception`, `clam-scan`, `clam-forget`. Behind the developer-signed capability gate, with admin rights |
 | `todoist_list` / `todoist_add` / `todoist_complete` | Manage Todoist tasks (requires an API token) |
 | `spotify` | Control Spotify via the Web API: liked songs, playlists, search, transport (requires Premium + one-time OAuth) |
+
+## Luna in Halcyon
+
+When Halcyon is installed (`./install.sh --luna` from Halcyon, or build Luna yourself), `>luna` opens her window. It looks and works like Halcyon's other centers.
+
+![Luna's window in Halcyon](docs/luna-chat.webp)
+
+- **Saved chats.** Every conversation is a session on the left. Open an old one and carry on where it stopped: Luna gets that conversation's own memory back.
+  Rename or delete a chat with the pencil and bin that appear on hover. Sessions live in `~/.local/share/halcyon/luna/sessions/`; her long-term memory is the same as in the terminal.
+- **What she is doing.** While she works you see the tools she runs and, with *Show the reasoning*, what she thought. Each answer lists the tools it used.
+- **Slash commands**, the terminal UI's, for what makes sense in a window: `/model [name]`, `/settings`, `/keys`, `/status`, `/new`, `/clear`, `/test-model`, `/help`, `/exit`.
+  Type `/` to see them; Tab completes.
+- **Settings as a page.** The terminal UI's settings (thinking, native tools, voice, the watchdog, the safety gates, the integrations) as switches, plus a model picker for her four roles
+  (main, fast, deep, security) listing what Ollama has.
+
+![Luna's settings](docs/luna-settings.webp)
+
+- **API keys: paste, and Luna stores it.** Tavily, Gemini, Todoist and the Spotify client id each have a *Paste key* button. The key goes into the OS keyring (or her secrets file when there is no keyring);
+  `luna.toml` only gets `keyring:NAME`. It is sent over her input, never as a command-line argument, and never echoed back. Changing any one setting writes only that value to `luna.toml`
+  (comments kept), so keys that live in the keyring are never written out as plain text.
+
+![API keys and gates](docs/luna-keys.webp)
+
+- **The two signed gates stay signed.** *Security Tier: No Refusal* and *Capability Actions* show their real state in the window but cannot be flipped there: they need the developer key (`luna --unlock-security`).
+
+### What she can do in Halcyon
+
+She has three tools for Halcyon, one per risk level, so her existing gates decide what runs. A short manual about Halcyon (what it is, the three tools, the rules) is added to her instructions
+when Halcyon is installed, so she looks things up (`halcyon_info docs ...`) instead of guessing.
+
+| Tool | Gate | Examples |
+|---|---|---|
+| `halcyon_info` | none (read only) | "is my firewall running?", "what does Halcyon say about my antivirus?", "what is on my calendar?", "how do I change the lock screen background?" |
+| `halcyon_do` | `[external] allow_halcyon_actions` (a plain switch; the window has it as **Control Halcyon**) | "open the settings", "turn on gaming mode", "add a note: buy milk", "set the UI style to legacy" |
+| `halcyon_security` | the developer-signed capability gate (like `sysmode`), plus admin rights | "ban 203.0.113.9", "scan my Downloads folder", "add an exception for this program" |
+
+The gates are checked by tool name at the one place every tool call goes through, so an older `luna.toml` that predates these tools cannot leave them open, and no tool argument can open one.
+The admin password, when she has one, travels in the environment of the one process that needs it, never on a command line. If a gate refuses, she tells you which switch opens it and does not try to work around it with `run_shell`.
+
+### Driving Luna from another program (`luna --stdio`)
+
+Halcyon's window talks to Luna through a small JSON-lines protocol, which anything can use: `luna --stdio [--history FILE]`. One JSON object per line on stdin and stdout (logs stay on stderr).
+The turn goes through the same fast / deep / security / full routing as the TUI; `--history` keeps the rolling conversation in a file of your choosing, so a caller can keep one file per conversation and resume any of them.
+
+| In | Out |
+|---|---|
+| `{"type":"turn","text":"..."}` | `activity` (step / tool_start / tool_end), `thinking`, then `reply` (`text`, `model`, `secs`) or `error` |
+| `{"type":"clear"}`, `{"type":"quit"}` | `cleared` |
+| `{"type":"settings_get"}`, `{"type":"setting_set","key":"llm.enable_thinking","value":true}` | `settings` (the TUI's categories, toggles, gates, keys, models), `saved` |
+| `{"type":"models"}`, `{"type":"model_set","name":"qwen3:8b","role":"model"}` | `models`, `saved` (`role`: model, fast, deep, security) |
+| `{"type":"key_set","name":"tavily","value":"..."}` | `key_saved` (never the value) |
 
 ## Requirements
 
@@ -243,6 +304,8 @@ luna --get-key gemini     # print for verification
 gemini_api_key = "keyring:gemini"    # resolved at startup, nothing on disk
 ```
 
+In Halcyon you can paste a key into the Luna window instead (Settings > API keys); it does the same thing.
+
 Luna also chmods `luna.toml` to 600 every time it saves it.
 
 ## Constitution
@@ -377,13 +440,15 @@ cargo test selfpatch -- --ignored --nocapture --test-threads=1
 
 ## The external-action gate
 
-Three separate switches, all **closed by default**, all opened only by a human
-editing `luna.toml`. None of them is a tool argument, so the model cannot pass
+Separate switches, all **closed by default**, all opened only by a human
+(editing `luna.toml`, or flipping the switch in Halcyon's Luna settings). None of them is a tool argument, so the model cannot pass
 one, assert one, or work around one with a prompt.
 
 | Switch | Refuses | Why it exists |
 | --- | --- | --- |
-| `[external] allow_external_actions` | `whatsapp_send`, `todoist_complete`, `todoist_add`, `browser_do`, `desktop_do`, `sysmode`, `spotify`, `create_skill`, `forget_skill` | These act on the world. |
+| `[external] allow_external_actions` | `whatsapp_send`, `todoist_complete`, `todoist_add`, `browser_do`, `desktop_do`, `spotify`, `create_skill`, `forget_skill` | These act on the world. |
+| `[external] allow_halcyon_actions` | `halcyon_do` | Changing Halcyon itself (windows, settings, notes, modes) is its own switch, so tidying the desktop does not also let her text your contacts. |
+| `[external] allow_capability_actions` + developer key | `halcyon_security`, `sysmode`, `nmap_scan`, `pkg_install`, `self_patch`, `system_update` | These act on the machine; a config boolean alone is not enough. |
 | `[updates] allow_apply` | `system_update action=apply` | Installing packages is not reversible by conversation. |
 | `[selfpatch] allow_apply` | `self_patch action=apply` | Rewriting her own source. |
 
@@ -551,6 +616,7 @@ main.rs
 │   ├── ollama.rs       — Ollama HTTP client (streaming + tool calls)
 │   ├── react.rs        — ReAct loop with empty-response retry + per-turn prompt enrichment
 │   └── escalation.rs   — simple/complex query classifier for model routing
+├── stdio.rs            — `luna --stdio`: JSON lines for another program (Halcyon's window): turns, settings, models, keys
 ├── memory/
 │   ├── mod.rs          — rolling context window with tool-artifact filtering
 │   ├── permanent.rs    — persistent fact store, survives `clear` and restarts
@@ -565,6 +631,7 @@ main.rs
 │   ├── web.rs          — Tavily → Gemini → DuckDuckGo search chain
 │   ├── learn.rs        — combined search + fetch for one-shot research
 │   ├── security.rs     — nmap / tshark / encoding / hashing / DNS for CTF work
+│   ├── halcyon.rs      — halcyon_info / halcyon_do / halcyon_security: Halcyon's control script, plus the manual in her prompt
 │   ├── todoist.rs      — Todoist Unified API v1 client
 │   └── proactive.rs    — background battery/disk/update monitor
 ├── daemon/
