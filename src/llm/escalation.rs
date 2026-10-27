@@ -667,6 +667,9 @@ fn classify_general(input: &str) -> QueryComplexity {
         // Halcyon, the desktop she lives in (halcyon_info / halcyon_do / halcyon_security: only the full model has them)
         "halcyon", "my desktop", "the island", "firewall", "antivirus", "anti-virus", "clamav",
         "my notes", "my calendar", "gaming mode", "do not disturb", "lock screen", "wallpaper",
+        // Power actions: the fast model has no tools and answers "I can't do that"; the tool model asks once and acts
+        "shut down", "shutdown", "power off", "poweroff", "reboot", "restart my", "restart the computer",
+        "restart the pc", "restart the laptop", "suspend", "hibernate", "log me out", "log out",
     ];
     if tool_signals.iter().any(|s| lower.contains(s)) {
         return QueryComplexity::Complex;
@@ -1079,6 +1082,13 @@ mod tests {
         // "place an order" is. The two phrases differ by four characters and
         // must not land the same way.
         assert!(is_full("my cart"));
+    }
+
+    #[test]
+    fn power_actions_reach_the_tool_model() {
+        for q in ["shut down my laptop", "please shutdown now", "reboot the computer", "suspend it", "restart my pc"] {
+            assert_eq!(classify(q), QueryComplexity::Complex, "{q}");
+        }
     }
 
     #[test]
