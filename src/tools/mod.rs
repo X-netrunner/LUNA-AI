@@ -58,14 +58,16 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             function: ToolFunction {
                 name: "halcyon_info".into(),
                 description: "Look something up in Halcyon, the desktop you live in (read only). Actions: overview (state of everything), \
+                              system-profile [summary|json|learn] (hardware, security rating, firewall, EDR, command habits, defaults, diagnostics), \
+                              learn-system (deep audit that learns and syncs permanent knowledge), \
                               docs <words> (answers from Halcyon's docs, with setting keys), settings <words>, catalog (every window and \
                               command id), notes, calendar, firewall <status|history|feeds|posture>, antivirus <status|alerts|actions|exceptions|rules>, \
                               clamav <test|exceptions>, sysmode, updates, luna. Use this BEFORE guessing how Halcyon works.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "description": "One of: overview, docs, settings, catalog, notes, calendar, firewall, antivirus, clamav, sysmode, updates, luna"},
-                        "args": {"type": "array", "items": {"type": "string"}, "description": "Words for the action, e.g. [\"how\",\"do\",\"I\",\"hide\",\"the\",\"bar\"] for docs, [\"status\"] for firewall"}
+                        "action": {"type": "string", "description": "One of: system-profile, learn-system, overview, docs, settings, catalog, notes, calendar, firewall, antivirus, clamav, sysmode, updates, luna"},
+                        "args": {"type": "array", "items": {"type": "string"}, "description": "Words for the action, e.g. [\"summary\"] for system-profile, [\"how\",\"do\",\"I\",\"hide\",\"the\",\"bar\"] for docs, [\"status\"] for firewall"}
                     },
                     "required": ["action"]
                 }),
