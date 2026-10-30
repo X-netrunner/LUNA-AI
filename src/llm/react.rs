@@ -10,6 +10,16 @@ use crate::tools;
 use anyhow::Result;
 use serde_json::json;
 use std::io::Write;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// How many tools have run in this process. Read before and after an attempt to learn whether it
+/// DID anything: a model that said "I can't" after running no tool is safe to hand to a bigger model,
+/// one that already acted is not (the retry could repeat the action).
+static TOOL_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn tool_runs() -> usize {
+    TOOL_RUNS.load(Ordering::Relaxed)
+}
 
 pub struct ReactLoop<'a> {
     client: &'a OllamaClient,
@@ -468,6 +478,7 @@ impl<'a> ReactLoop<'a> {
                         used_calls.push(sig);
 
                         let mut call_failed = false;
+                        TOOL_RUNS.fetch_add(1, Ordering::Relaxed);
                         let tool_result = match tools::execute(&tool_call, &self.config).await {
                             Ok(o) => {
                                 had_success = true;
@@ -897,6 +908,7 @@ impl<'a> ReactLoop<'a> {
                         used_calls.push(sig);
 
                         let mut call_failed = false;
+                        TOOL_RUNS.fetch_add(1, Ordering::Relaxed);
                         let tool_result = match tools::execute(tool_call, &self.config).await {
                             Ok(o) => {
                                 had_success = true;
@@ -4222,6 +4234,47 @@ pub(crate) fn receipt_footer(receipt: &[Receipt]) -> String {
         });
     }
 
+/// Things a model says when it is giving up on what was asked. Used to pass the turn UP a tier
+/// instead of showing the user "I can't do that" when a bigger model might.
+const INABILITY_PHRASES: &[&str] = &[
+    "i can't do that",
+    "i cannot do that",
+    "can't do that",
+    "i can't",
+    "i cannot",
+    "i'm unable",
+    "i am unable",
+    "i'm not able",
+    "i am not able",
+    "not able to",
+    "don't have access",
+    "do not have access",
+    "don't have direct access",
+    "don't have the ability",
+    "do not have the ability",
+    "don't have the tools",
+    "no way to",
+    "as an ai",
+    "i can't help",
+    "i cannot help",
+    "sorry, but",
+    "i'm sorry, but",
+];
+
+/// True when a tool-capable model's reply is a short "I can't" that no gate or password explains.
+/// The caller also checks that no tool ran this attempt. Gate and permission messages are excluded:
+/// a bigger model hits the same closed switch.
+pub(crate) fn is_inability_response(text: &str) -> bool {
+    let t = text.to_lowercase();
+    if text.trim().chars().count() >= 400 {
+        return false;
+    }
+    if ["allow_", "gate", "switch", "permission", "password", "sudo"].iter().any(|w| t.contains(w)) {
+        return false;
+    }
+    INABILITY_PHRASES.iter().any(|p| t.contains(p))
+}
+
 /// Detect a standalone `ESCALATE` token in the response, or a general
 /// refusal/uncertainty ("I don't know", "can't answer", …). The latter is the
 /// general safety net: ANY time the fast model confesses it can't answer, the
@@ -4235,7 +4288,8 @@ pub(crate) fn is_escalation_response(text: &str) -> bool {
     }
 
     let t = text.to_lowercase();
-    let phrases: &[&str] = &[
+    let mut phrases: Vec<&str> = INABILITY_PHRASES.to_vec();
+    phrases.extend_from_slice(&[
         "i don't know",
         "i dont know",
         "i do not know",
@@ -4250,9 +4304,7 @@ pub(crate) fn is_escalation_response(text: &str) -> bool {
         "unable to answer",
         "i am unable to",
         "no information",
-        "i can't help",
-        "i cannot help",
-    ];
+    ]);
 
     // A refusal is inherently short; only treat it as escalation when the
     // whole reply is the refusal (short) or it *starts* with the phrase.
@@ -4627,6 +4679,28 @@ mod tests {
         assert!(!is_escalation_response("I'll escalate this to the team."));
         assert!(!is_escalation_response(""));
         assert!(!is_escalation_response("ESCALATED"));
+    }
+
+    #[test]
+    fn the_fast_model_giving_up_escalates() {
+        for s in [
+            "I can't do that.",
+            "I'm sorry, but I can't open your settings.",
+            "I'm unable to check that for you.",
+            "I don't have access to your system.",
+            "As an AI, I can't see your desktop.",
+        ] {
+            assert!(is_escalation_response(s), "{s}");
+        }
+        assert!(!is_escalation_response("Sure, the time is 14:05."));
+    }
+
+    #[test]
+    fn a_tool_model_giving_up_is_passed_up_unless_a_gate_explains_it() {
+        assert!(is_inability_response("I can't fix that, sorry."));
+        assert!(!is_inability_response("I can't: allow_external_actions is closed."));
+        assert!(!is_inability_response("Done. Fixed the widget config."));
+        assert!(!is_inability_response(&"I can't ".repeat(100)));
     }
 
     #[test]

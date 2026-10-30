@@ -409,6 +409,12 @@ pub struct LlmConfig {
     /// half-written `main`, a missing game loop). Fits inside `deep_num_ctx`.
     #[serde(default = "default_deep_max_tokens")]
     pub deep_max_tokens: u32,
+    /// Thinking for the deep/coder tier only. `None` follows `enable_thinking`.
+    /// Lets the deep model reason at length (for a hard build, hours if need be)
+    /// without making the tool-calling main model narrate its reasoning. Thinking
+    /// tokens count against `deep_max_tokens`, so raise that alongside this.
+    #[serde(default)]
+    pub deep_enable_thinking: Option<bool>,
     /// Model for offensive-security work on the user's own systems — exploit and
     /// PoC authoring, reverse shells, wireless testing, lab attack tooling.
     ///
@@ -699,6 +705,7 @@ impl Default for LlmConfig {
             num_ctx: default_num_ctx(),
             deep_num_ctx: default_deep_num_ctx(),
             deep_max_tokens: default_deep_max_tokens(),
+            deep_enable_thinking: None,
         }
     }
 }
@@ -1707,6 +1714,25 @@ num_ctx = 16384
         let cfg: LlmConfig = toml::from_str(src).unwrap();
         assert_eq!(cfg.security_model.as_deref(), Some("whiterabbitneo-coder-tools"));
         assert_eq!(cfg.security_num_ctx, 8192);
+    }
+
+    /// `deep_enable_thinking` is optional, and when set it is independent of the global flag.
+    #[test]
+    fn deep_thinking_is_a_per_tier_override() {
+        let base = r#"
+base_url = "http://localhost:11434"
+model = "qwen2.5:7b-instruct"
+temperature = 0.7
+max_tokens = 2048
+enable_thinking = false
+embedding_model = "nomic-embed-text"
+num_ctx = 16384
+"#;
+        let cfg: LlmConfig = toml::from_str(base).unwrap();
+        assert_eq!(cfg.deep_enable_thinking, None);
+        let cfg: LlmConfig = toml::from_str(&format!("{base}deep_enable_thinking = true\n")).unwrap();
+        assert_eq!(cfg.deep_enable_thinking, Some(true));
+        assert!(!cfg.enable_thinking);
     }
 
     /// The file fallback is what makes `keyring:tavily` work on a headless box,

@@ -691,6 +691,13 @@ fn classify_general(input: &str) -> QueryComplexity {
         "widget", "quickshell", "hyprland", "waybar", "my bar", "show up", "showing up", "not showing",
         "isn't working", "not working", "doesn't work", "won't start", "won't boot", "black screen",
         "crashing", "keeps crashing", "systemctl", "journalctl", "dmesg", "kernel panic", "arch problem",
+        "file map", "filemap", "file structure", "project structure", "directory structure", "folder structure",
+        // More everyday phrasings of "something on my machine is broken" — short, generic enough that
+        // a keyword list alone would always lag behind actual phrasing; the real fix stays the
+        // default-to-tool-model routing change noted in docs/MODELS.md, not an ever-growing list.
+        "won't open", "wont open", "won't launch", "wont launch", "frozen", "freezing", "lagging", "laggy",
+        "stuttering", "disappeared", "went missing", "is missing", "is broken", "is empty", "blank screen",
+        "notes aren't", "notes are not", "theme isn't", "theme is not", "icons are missing", "icons aren't",
         // Power actions: the fast model has no tools and answers "I can't do that"; the tool model asks once and acts
         "shut down", "shutdown", "power off", "poweroff", "reboot", "restart my", "restart the computer",
         "restart the pc", "restart the laptop", "suspend", "hibernate", "log me out", "log out",
@@ -762,6 +769,7 @@ mod halcyon_routing_tests {
             "why my widgets don't show up",
             "my bar is not showing",
             "quickshell keeps crashing",
+            "make a file map of my halcyon folder",
         ] {
             assert_ne!(classify(q), QueryComplexity::Simple, "{q:?} went to the fast model, which has no Halcyon tools");
         }

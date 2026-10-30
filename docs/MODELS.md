@@ -18,3 +18,16 @@ Rule that decides everything: weights that do not fit in VRAM cross the PCIe bus
 
 ## Hybrid offload note
 Only models that do not need tool loops (one-shot code generation) are reasonable to run hybrid.
+
+
+## The real fix for routing misses (not done here, worth doing next)
+
+`escalation.rs` routes by keyword match, so it will always miss some phrasing — "my widgets don't show up"
+had to be added by hand once it was noticed, and the newer batch (frozen, laggy, missing, etc.) is still a
+hand-picked list of the obvious ones, not a general fix. The sturdier design is to invert the default: send
+everything except greetings and short chit-chat to the tool model, and only use the fast model for a small,
+explicit allow-list (greetings, simple factual questions with no system/file content). That would end the
+"small model says I can't" pattern at its root instead of patching individual phrases, at the cost of the fast
+model handling fewer turns (more turns pay its latency to reach the tool model). Flagging this rather than doing
+it silently: it's a bigger behavioral change than a keyword addition and changes how often the fast tier runs
+at all.

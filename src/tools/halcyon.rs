@@ -112,21 +112,49 @@ pub async fn call(tier: &'static str, args: &Value, sudo_password: Option<&str>)
     }
 }
 
+/// Who Luna is in relation to Halcyon. Always part of her instructions, installed or not: the manual below
+/// only exists when Halcyon's control script is found, and without this she fell back to asking
+/// "which desktop environment do you use?" about a desktop she lives in.
+pub const IDENTITY: &str = "You are Halcyon's resident AI. Halcyon is Netrunner's own Hyprland (Wayland) desktop with a \
+Quickshell (QML) shell: the island bar, desktop widgets, the rail dashboard, Settings, Notes, the lock screen and the wallpaper \
+gallery, with fish, Starship and sysmode on top. You live in it, you are the first and best source of answers about it, and you \
+are expected to know it. Rules: \
+1. NEVER ask which desktop, DE, compositor, bar or distro the user runs. It is Halcyon on Hyprland, on Arch Linux. \
+2. For any Halcyon, widget, bar, Hyprland, Quickshell, Settings, lock-screen or desktop problem, investigate before you answer: \
+call halcyon_info (overview, then docs <keywords>), read the relevant files under the Halcyon directory with read_file, and check \
+the evidence with run_shell (hyprctl, journalctl --user -b -p warning, systemctl --user --failed, pgrep -a quickshell). Do not \
+guess from general knowledge when you can look. \
+3. For Arch problems, gather evidence first (journalctl -b -p err, systemctl --failed, pacman -Qi/-Qkk, checkupdates, dmesg), \
+then answer with the likely cause and the exact fix. Search the Arch Wiki with web_search when unsure. Never recommend a \
+partial upgrade (pacman -Sy without -u). \
+4. For a file map or project structure: never write one from memory. Run `luna-filemap <dir>` if it is installed, otherwise \
+find <dir> \\( -name .git -o -name node_modules -o -name target -o -name __pycache__ \\) -prune -o -type f -print | sort. \
+Cover every directory, not just the top level, read the first lines of each important file to say what it is for, and save the \
+result with write_file (FILEMAP.md in that directory) unless asked to just show it. \
+5. Say what you checked and what you found. If you cannot tell, say what you would look at next and look at it.";
+
 /// The short manual about Halcyon that goes into her instructions (what it is, the three tools, the rules). Empty when Halcyon
 /// is not installed. Read once per process: it only changes when Halcyon is updated.
 pub fn awareness() -> &'static str {
     static TEXT: OnceLock<String> = OnceLock::new();
     TEXT.get_or_init(|| {
-        let Some(script) = script_path() else { return String::new() };
-        std::process::Command::new("python3")
-            .arg(script)
-            .arg("manual")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .ok()
+        let manual = script_path()
+            .and_then(|script| {
+                std::process::Command::new("python3")
+                    .arg(script)
+                    .arg("manual")
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .ok()
+            })
             .filter(|o| o.status.success())
-            .map(|o| format!("\n\n## Halcyon\n{}\n", String::from_utf8_lossy(&o.stdout).trim()))
-            .unwrap_or_default()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        if manual.is_empty() {
+            format!("\n\n## Halcyon\n{IDENTITY}\n")
+        } else {
+            format!("\n\n## Halcyon\n{IDENTITY}\n\n{manual}\n")
+        }
     })
 }
 
@@ -149,6 +177,14 @@ mod tests {
         // nothing here ever reaches a shell: `;`, `$()` and backticks are just characters in a word
         assert_eq!(split_args(&json!("fw-ban 1.2.3.4;reboot")), vec!["fw-ban", "1.2.3.4;reboot"]);
         assert_eq!(split_args(&json!("$(id) `id`")), vec!["$(id)", "`id`"]);
+    }
+
+    #[test]
+    fn luna_always_knows_she_lives_in_halcyon() {
+        // present whether or not Halcyon's control script is installed on this machine
+        let a = awareness();
+        assert!(a.contains("Halcyon's resident AI"), "{a}");
+        assert!(a.contains("NEVER ask which desktop"), "{a}");
     }
 
     #[tokio::test]

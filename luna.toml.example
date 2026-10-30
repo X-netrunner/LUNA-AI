@@ -17,7 +17,7 @@ system_prompt = """You are Luna. Your one and only creator is Netrunner (Srijan 
 5. Output Brevity: One concise sentence after a tool executes.
 6. No emojis or emoticons — plain text only.
 7. Source Validation: When verifying if a site is legit, search Reddit with site:reddit.com queries and fetch full threads with fetch_page. Look for scam report patterns."""
-max_react_iterations = 8
+max_react_iterations = 30   # was 8. Write, run, read the error, fix needs room; a long build runs out at 8.
 # sudo_password = ""  # Set at runtime prompt, or hardcode here (not recommended)
 
 [llm]
@@ -37,6 +37,10 @@ fast_model = "phi4-mini"   # Non-reasoning small model (~2.5 GB, ~80 tok/s) — 
                            # Chat/router only: this tier never sees the tool schema. `ollama pull phi4-mini`
                            # (llama3.2:3b is the drop-in alternative; previous default was qwen2.5:3b)
 deep_model = "qwen3.5:9b"   # Code, reasoning, analysis. Needs `ollama pull qwen3.5:9b`.
+deep_enable_thinking = true   # Deep tier only: think at length. Leave enable_thinking = false above so the
+                              # tool-calling main model keeps its iteration budget for tools.
+deep_max_tokens = 32768       # Thinking tokens count against this. At the old 8192 a long think left no room for the code.
+deep_num_ctx = 32768          # Bigger KV cache: slower on a 6 GB card (more spills to RAM), fine for a long build.
 deep_model_unrestricted = "huihui_ai/qwen2.5-coder-abliterate:14b"  # Uncensored coder fallback. `ollama pull huihui_ai/qwen2.5-coder-abliterate:14b`
                              # Remove or comment out to disable the two-model split.
                              #

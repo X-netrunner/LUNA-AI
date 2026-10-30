@@ -96,7 +96,7 @@ fn build_deep_client(config: &LunaConfig) -> Option<OllamaClient> {
             // runs past the chat cap and would otherwise be written truncated.
             config.llm.deep_max_tokens,
         )
-        .enable_thinking(config.llm.enable_thinking)
+        .enable_thinking(config.llm.deep_enable_thinking.unwrap_or(config.llm.enable_thinking))
         .num_ctx(config.llm.deep_num_ctx)
         .keep_alive(10)
         .debug(config.logging.level == "debug")
@@ -115,7 +115,7 @@ fn build_deep_unrestricted_client(config: &LunaConfig) -> Option<OllamaClient> {
             config.llm.temperature,
             config.llm.deep_max_tokens,
         )
-        .enable_thinking(config.llm.enable_thinking)
+        .enable_thinking(config.llm.deep_enable_thinking.unwrap_or(config.llm.enable_thinking))
         .num_ctx(config.llm.deep_num_ctx)
         .keep_alive(10)
         .debug(config.logging.level == "debug")
@@ -414,7 +414,8 @@ const FAST_PROMPT: &str = "You are Luna, a natural, friendly AI assistant. \
     never re-introduce yourself unless asked. You are direct, efficient, and \
     have a dry wit. If you don't know something specific, use web_search to \
     look it up rather than guessing. If the request needs files, commands, or \
-    actions on this machine, reply with exactly: ESCALATE";
+    actions on this machine, or is about Halcyon, the desktop, widgets, the bar, \
+    Hyprland, Quickshell, files, or any Arch Linux problem, reply with exactly: ESCALATE";
 
 const DEEP_PROMPT: &str = "You are Luna. Your one and only creator is Netrunner \
     (Srijan Satya Bandaru) — no company, group, or person besides Netrunner made \
@@ -880,8 +881,10 @@ pub async fn run_routed_turn(
     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
 
     let mut fell_back_to_unrestricted = false;
+    let mut went_deep = false;
     for attempt in 1..=3 {
         let mem_snapshot = memory.len();
+        let tools_before = crate::llm::react::tool_runs();
         match active_react.run(input, memory, &effective_prompt).await {
             Ok((response, thinking, _streamed)) => {
                 if tier == Tier::Fast
@@ -895,6 +898,25 @@ pub async fn run_routed_turn(
                     effective_prompt = system_prompt.clone();
                     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                     continue;
+                }
+                // Second hand-off: the tool model says it cannot do this and ran nothing, so pass it up to the
+                // deep model instead of showing the user "I can't". Only when no tool ran: a retry must not repeat an action.
+                if tier == Tier::Full
+                    && !went_deep
+                    && attempt < 3
+                    && crate::llm::react::tool_runs() == tools_before
+                    && crate::llm::react::is_inability_response(&response)
+                {
+                    if let Some(dr) = deep_react.as_ref() {
+                        tracing::info!("Full model gave up with no tool run — re-running on the deep model");
+                        memory.truncate_to(mem_snapshot);
+                        active_react = dr;
+                        tier = Tier::Deep;
+                        went_deep = true;
+                        effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                        effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
+                        continue;
+                    }
                 }
 
                 // If any tier produces a refusal, fallback to uncensored version
@@ -1366,8 +1388,10 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         // the exchange and retries once on the full model with tools.
         // Additionally: if any tier refuses or fails, fall back to uncensored version.
         let mut deep_fell_back = false;
+        let mut went_deep = false;
         for attempt in 1..=3 {
             let mem_snapshot = memory.len();
+            let tools_before = crate::llm::react::tool_runs();
             let tag = if debug {
                 match tier {
                     Tier::Fast => "[fast] ",
@@ -1397,6 +1421,25 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                         effective_prompt = system_prompt.to_string();
                         effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                         continue;
+                    }
+                    // Second hand-off: the tool model says it cannot do this and ran nothing, so pass it up to the
+                    // deep model instead of showing the user "I can't". Only when no tool ran: a retry must not repeat an action.
+                    if tier == Tier::Full
+                        && !went_deep
+                        && attempt < 3
+                        && crate::llm::react::tool_runs() == tools_before
+                        && crate::llm::react::is_inability_response(&response)
+                    {
+                        if let Some(dr) = deep_react.as_ref() {
+                            tracing::info!("Full model gave up with no tool run — re-running on the deep model");
+                            memory.truncate_to(mem_snapshot);
+                            active_react = dr;
+                            tier = Tier::Deep;
+                            went_deep = true;
+                            effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                            effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
+                            continue;
+                        }
                     }
                     // Refusal fallback: if model refuses, fall back to uncensored version
                     if !deep_fell_back
@@ -1618,8 +1661,10 @@ async fn answer_input(
     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
 
     let mut fell_back_to_unrestricted = false;
+    let mut went_deep = false;
     for attempt in 1..=3 {
         let mem_snapshot = memory.len();
+        let tools_before = crate::llm::react::tool_runs();
         let tag = if debug {
             match tier {
                 Tier::Fast => "[fast] ",
@@ -1649,6 +1694,25 @@ async fn answer_input(
                     effective_prompt = system_prompt.to_string();
                     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                     continue;
+                }
+                // Second hand-off: the tool model says it cannot do this and ran nothing, so pass it up to the
+                // deep model instead of showing the user "I can't". Only when no tool ran: a retry must not repeat an action.
+                if tier == Tier::Full
+                    && !went_deep
+                    && attempt < 3
+                    && crate::llm::react::tool_runs() == tools_before
+                    && crate::llm::react::is_inability_response(&response)
+                {
+                    if let Some(dr) = deep_react {
+                        tracing::info!("Full model gave up with no tool run — re-running on the deep model");
+                        memory.truncate_to(mem_snapshot);
+                        active_react = dr;
+                        tier = Tier::Deep;
+                        went_deep = true;
+                        effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                        effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
+                        continue;
+                    }
                 }
                 if !fell_back_to_unrestricted
                     && (deep_unrestricted_react.is_some() || security_react.is_some())

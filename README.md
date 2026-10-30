@@ -290,6 +290,13 @@ timeout_secs = 600
 
 Model choices for a 6 GB VRAM laptop, and which candidates still need a tool-capability check, are in [docs/MODELS.md](docs/MODELS.md).
 
+### Long builds and the Halcyon file map
+
+- `deep_enable_thinking = true` makes only the deep tier reason at length; the main model's `enable_thinking` is untouched. Raise `deep_max_tokens` and `deep_num_ctx` with it, and `max_react_iterations` so Luna can write, run, read the error and fix in a loop.
+- Luna's instructions always say she is Halcyon's resident AI and must investigate (`halcyon_info`, logs, the files themselves) instead of asking which desktop you use. Troubleshooting phrases ("widgets don't show up", "quickshell keeps crashing", file-map requests) route to the tool model, never the chat-only fast model.
+- **Models hand work up.** If the fast model gives up ("I can't do that", "I don't have access", "I'm unable", or `ESCALATE`), the turn re-runs on the tool model. If the tool model gives up with a short "I can't" and ran no tool, it re-runs on the deep model. Replies explained by a closed gate (`allow_*`, sudo, password) are not passed up, since a bigger model hits the same switch; and a turn that already ran a tool is never retried, so no action is repeated.
+- `scripts/file_map.sh` builds a real file map (every directory, size, line count, purpose from each file's header comment): `install -m755 scripts/file_map.sh ~/.local/bin/luna-filemap`, then ask Luna for a file map, or run `luna-filemap DIR -o FILEMAP.md`.
+
 ## Secrets (OS keyring)
 
 API keys never need to touch disk in plaintext. Store a secret in the
