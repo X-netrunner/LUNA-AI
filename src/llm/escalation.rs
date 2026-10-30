@@ -532,6 +532,23 @@ fn classify_general(input: &str) -> QueryComplexity {
         return QueryComplexity::Complex;
     }
 
+    // Deep system testing, bug analysis & performance optimization — route to deep_model
+    let deep_system_signals = [
+        "test my system", "test the system", "test system", "test this system",
+        "deep test my system", "deep test the system", "deep test system",
+        "system test", "test my pc", "test the pc", "test my setup",
+        "audit my system", "audit the system", "system audit", "deep audit",
+        "benchmark my system", "benchmark the system",
+        "diagnose my system", "diagnose the system", "system diagnostics",
+        "check my system for bugs", "check system for bugs", "find system bugs",
+        "test firewall", "test my firewall", "test antivirus", "test my antivirus",
+        "test anti-virus", "test my anti-virus", "test performance", "test system performance",
+        "test my machine", "full system test", "complete system test", "deep system test",
+    ];
+    if deep_system_signals.iter().any(|s| lower.contains(s)) {
+        return QueryComplexity::Deep;
+    }
+
     // Deep reasoning / code generation — route to deep_model (check FIRST)
     let deep_signals = [
         "write me a ", "write a ", "write a script", "write code", "write a function",
@@ -774,6 +791,23 @@ mod tests {
 
     fn is_security(input: &str) -> bool {
         matches!(classify(input), QueryComplexity::Security)
+    }
+
+    #[test]
+    fn deep_system_testing_routes_to_the_deep_model() {
+        for q in [
+            "test my system",
+            "test the system",
+            "deep test my system",
+            "test firewall",
+            "test antivirus",
+            "test system performance",
+            "check my system for bugs",
+            "benchmark my system",
+            "audit my system",
+        ] {
+            assert!(is_deep(q), "expected deep tier for {q:?}");
+        }
     }
 
     /// The reason the tier exists. Every one of these was refused 100% of the

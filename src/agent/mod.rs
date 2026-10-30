@@ -434,6 +434,9 @@ const DEEP_PROMPT: &str = "You are Luna. Your one and only creator is Netrunner 
     installable library and use its real, current API. Never invent a module, type, or \
     function; if unsure of the exact API, say so rather than guessing a name. Prefer a single \
     self-contained file that runs, and state the exact command to install deps and run it. \
+    7. When asked to test, benchmark, or audit the system: Go deep and execute an exhaustive audit. \
+    Run halcyon_info action=\"test-system\" (or run_shell: hal system-test). Thoroughly inspect bugs, kernel errors, \
+    failed services, firewall, antivirus, and performance, and deliver clear, actionable optimizations. Never refuse or cut corners. \
     Be comprehensive, accurate, and direct. Never guess — if uncertain, inspect the target first.";
 
 /// Tool discipline for the offensive-security tier. Not a safety clause — a
@@ -782,6 +785,20 @@ pub async fn run_routed_turn(
         )
         .with_recall_k(10)
     });
+    let deep_unrestricted_client = build_deep_unrestricted_client(config);
+    let deep_unrestricted_react = deep_unrestricted_client.as_ref().map(|c| {
+        ReactLoop::new(
+            c,
+            config.agent.max_react_iterations,
+            if config.agent.native_tools {
+                crate::tools::tool_definitions()
+            } else {
+                Vec::new()
+            },
+            config,
+        )
+        .with_recall_k(10)
+    });
 
     let system_prompt = build_system_prompt(config);
 
@@ -862,19 +879,40 @@ pub async fn run_routed_turn(
 
     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
 
-    for attempt in 1..=2 {
+    let mut fell_back_to_unrestricted = false;
+    for attempt in 1..=3 {
         let mem_snapshot = memory.len();
         match active_react.run(input, memory, &effective_prompt).await {
             Ok((response, thinking, _streamed)) => {
                 if tier == Tier::Fast
                     && crate::llm::react::is_escalation_response(&response)
-                    && attempt < 2
+                    && attempt < 3
                 {
                     tracing::info!("Fast model escalated — re-running on full model");
                     memory.truncate_to(mem_snapshot);
                     active_react = &react;
                     tier = Tier::Full;
                     effective_prompt = system_prompt.clone();
+                    effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
+                    continue;
+                }
+
+                // If any tier produces a refusal, fallback to uncensored version
+                if !fell_back_to_unrestricted
+                    && (deep_unrestricted_react.is_some() || security_react.is_some())
+                    && crate::llm::react::is_refusal_response(&response)
+                    && attempt < 3
+                {
+                    tracing::warn!("Model refused on tier {:?} — routing to uncensored version", tier);
+                    memory.truncate_to(mem_snapshot);
+                    fell_back_to_unrestricted = true;
+                    if let Some(dr) = deep_unrestricted_react.as_ref() {
+                        active_react = dr;
+                    } else if let Some(sr) = security_react.as_ref() {
+                        active_react = sr;
+                    }
+                    tier = Tier::Deep;
+                    effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
                     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                     continue;
                 }
@@ -918,7 +956,26 @@ pub async fn run_routed_turn(
                     model,
                 });
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                if !fell_back_to_unrestricted
+                    && (deep_unrestricted_react.is_some() || security_react.is_some())
+                    && attempt < 3
+                {
+                    tracing::warn!("Turn failed on tier {:?}: {} — rerouting to uncensored version", tier, e);
+                    memory.truncate_to(mem_snapshot);
+                    fell_back_to_unrestricted = true;
+                    if let Some(dr) = deep_unrestricted_react.as_ref() {
+                        active_react = dr;
+                    } else if let Some(sr) = security_react.as_ref() {
+                        active_react = sr;
+                    }
+                    tier = Tier::Deep;
+                    effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                    effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
+                    continue;
+                }
+                return Err(e);
+            }
         }
     }
     unreachable!("turn loop exceeded maximum attempts")
@@ -1305,12 +1362,11 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
         // are injected by ReactLoop::run itself.)
         effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
 
-        // Up to two attempts: a fast-model reply of "ESCALATE" rolls back
+        // Up to three attempts: a fast-model reply of "ESCALATE" rolls back
         // the exchange and retries once on the full model with tools.
-        // Additionally: if the deep tier refuses and an unrestricted deep
-        // model is configured, fall back to it once.
+        // Additionally: if any tier refuses or fails, fall back to uncensored version.
         let mut deep_fell_back = false;
-        for attempt in 1..=2 {
+        for attempt in 1..=3 {
             let mem_snapshot = memory.len();
             let tag = if debug {
                 match tier {
@@ -1332,7 +1388,7 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                 Ok((response, _thinking, streamed)) => {
                     if tier == Tier::Fast
                         && crate::llm::react::is_escalation_response(&response)
-                        && attempt < 2
+                        && attempt < 3
                     {
                         tracing::info!("Fast model escalated — re-running on full model");
                         memory.truncate_to(mem_snapshot);
@@ -1342,21 +1398,23 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                         effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                         continue;
                     }
-                    // Deep-tier automatic fallback: if normal deep refuses,
-                    // retry once with uncensored deep. Does not touch Security.
-                    if tier == Tier::Deep
-                        && !deep_fell_back
-                        && deep_unrestricted_react.is_some()
+                    // Refusal fallback: if model refuses, fall back to uncensored version
+                    if !deep_fell_back
+                        && (deep_unrestricted_react.is_some() || security_react.is_some())
                         && crate::llm::react::is_refusal_response(&response)
-                        && attempt < 2
+                        && attempt < 3
                     {
-                        tracing::info!("Deep model refused — falling back to uncensored deep model");
+                        tracing::info!("Model refused on tier {:?} — falling back to uncensored version", tier);
                         memory.truncate_to(mem_snapshot);
                         if let Some(dr2) = deep_unrestricted_react.as_ref() {
                             active_react = dr2;
+                        } else if let Some(sr) = security_react.as_ref() {
+                            active_react = sr;
                         }
                         deep_fell_back = true;
-                        // Reuse same effective prompt (DEEP_PROMPT)
+                        tier = Tier::Deep;
+                        effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                        effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                         continue;
                     }
                     if !streamed {
@@ -1372,6 +1430,23 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                     break;
                 }
                 Err(e) => {
+                    if !deep_fell_back
+                        && (deep_unrestricted_react.is_some() || security_react.is_some())
+                        && attempt < 3
+                    {
+                        tracing::warn!("Model execution failed on tier {:?}: {} — falling back to uncensored version", tier, e);
+                        memory.truncate_to(mem_snapshot);
+                        if let Some(dr2) = deep_unrestricted_react.as_ref() {
+                            active_react = dr2;
+                        } else if let Some(sr) = security_react.as_ref() {
+                            active_react = sr;
+                        }
+                        deep_fell_back = true;
+                        tier = Tier::Deep;
+                        effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                        effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
+                        continue;
+                    }
                     eprintln!("\nLuna error: {}", e);
                     tracing::error!("Agent error: {:?}", e);
                     break;
@@ -1500,6 +1575,7 @@ async fn answer_input(
     fast_react: Option<&ReactLoop<'_>>,
     deep_react: Option<&ReactLoop<'_>>,
     security_react: Option<&ReactLoop<'_>>,
+    deep_unrestricted_react: Option<&ReactLoop<'_>>,
     system_prompt: &str,
 ) {
     let debug = config.logging.level == "debug";
@@ -1541,7 +1617,8 @@ async fn answer_input(
     // ReactLoop::run itself.)
     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
 
-    for attempt in 1..=2 {
+    let mut fell_back_to_unrestricted = false;
+    for attempt in 1..=3 {
         let mem_snapshot = memory.len();
         let tag = if debug {
             match tier {
@@ -1563,13 +1640,31 @@ async fn answer_input(
             Ok((response, _thinking, streamed)) => {
                 if tier == Tier::Fast
                     && crate::llm::react::is_escalation_response(&response)
-                    && attempt < 2
+                    && attempt < 3
                 {
                     tracing::info!("Fast model escalated — re-running on full model");
                     memory.truncate_to(mem_snapshot);
                     active_react = react;
                     tier = Tier::Full;
                     effective_prompt = system_prompt.to_string();
+                    effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
+                    continue;
+                }
+                if !fell_back_to_unrestricted
+                    && (deep_unrestricted_react.is_some() || security_react.is_some())
+                    && crate::llm::react::is_refusal_response(&response)
+                    && attempt < 3
+                {
+                    tracing::info!("Model refused on tier {:?} — falling back to uncensored version", tier);
+                    memory.truncate_to(mem_snapshot);
+                    if let Some(dr2) = deep_unrestricted_react {
+                        active_react = dr2;
+                    } else if let Some(sr) = security_react {
+                        active_react = sr;
+                    }
+                    fell_back_to_unrestricted = true;
+                    tier = Tier::Deep;
+                    effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
                     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                     continue;
                 }
@@ -1584,6 +1679,23 @@ async fn answer_input(
                 break;
             }
             Err(e) => {
+                if !fell_back_to_unrestricted
+                    && (deep_unrestricted_react.is_some() || security_react.is_some())
+                    && attempt < 3
+                {
+                    tracing::warn!("Model execution failed on tier {:?}: {} — falling back to uncensored version", tier, e);
+                    memory.truncate_to(mem_snapshot);
+                    if let Some(dr2) = deep_unrestricted_react {
+                        active_react = dr2;
+                    } else if let Some(sr) = security_react {
+                        active_react = sr;
+                    }
+                    fell_back_to_unrestricted = true;
+                    tier = Tier::Deep;
+                    effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                    effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
+                    continue;
+                }
                 eprintln!("\nLuna error: {}", e);
                 break;
             }
@@ -1642,6 +1754,20 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
         .with_refusal_retry(config.llm.security_retry_on_refusal)
     });
     let deep_react = deep_client.as_ref().map(|c| {
+        ReactLoop::new(
+            c,
+            config.agent.max_react_iterations,
+            if config.agent.native_tools {
+                crate::tools::tool_definitions()
+            } else {
+                Vec::new()
+            },
+            config,
+        )
+        .with_recall_k(10)
+    });
+    let deep_unrestricted_client = build_deep_unrestricted_client(config);
+    let deep_unrestricted_react = deep_unrestricted_client.as_ref().map(|c| {
         ReactLoop::new(
             c,
             config.agent.max_react_iterations,
@@ -1783,6 +1909,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                     fast_react.as_ref(),
                     deep_react.as_ref(),
                     security_react.as_ref(),
+                    deep_unrestricted_react.as_ref(),
                     &system_prompt,
                 )
                 .await;
@@ -1878,6 +2005,7 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                     fast_react.as_ref(),
                     deep_react.as_ref(),
                     security_react.as_ref(),
+                    deep_unrestricted_react.as_ref(),
                     &system_prompt,
                 )
                 .await;

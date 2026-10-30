@@ -191,7 +191,9 @@ fn triggers(name: &str) -> &'static [&'static str] {
             "ai-antivirus", "wallpaper", "lock screen", "settings", "setting", "gaming mode", "do not disturb", "dnd", "my notes",
             "calendar", "launcher", "the bar", "status of my", "overview", "what is running", "is my",
             "learn my system", "learn the system", "my system", "system rating", "security rating", "system-profile",
-            "system profile", "default apps", "my habits", "command habits", "audit my system",
+            "system profile", "default apps", "my habits", "command habits", "audit my system", "test my system", "test the system",
+            "test system", "test-system", "system-test", "test firewall", "test antivirus", "test performance", "diagnose system",
+            "system diagnostics", "system bugs", "optimizations",
         ],
         "halcyon_do" => &[
             "halcyon", "island", "my desktop", "the desktop", "wallpaper", "lock screen", "settings", "setting", "gaming mode",
