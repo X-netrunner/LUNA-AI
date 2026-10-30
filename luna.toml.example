@@ -23,6 +23,8 @@ max_react_iterations = 8
 [llm]
 base_url = "http://localhost:11434"
 model = "qwen2.5:7b-instruct-q4_K_M"
+# Orchestrator candidate (4.9 GB, fits 6 GB VRAM, high BFCL tool-calling score): ToolACE-8B Q4_K_M.
+# Only switch after `ollama show <model>` lists "tools" — see docs/MODELS.md.
 temperature = 0.7
 max_tokens = 2048
 enable_thinking = false   # Keep this false. It sends top-level `think: false`, which is
@@ -31,7 +33,9 @@ enable_thinking = false   # Keep this false. It sends top-level `think: false`, 
                           # qwen2.5 rejects `think: true` outright anyway (Luna detects
                           # that and omits the field), so this only changes behaviour
                           # for thinking-capable models like the deep tier below.
-fast_model = "qwen2.5:3b"   # Non-reasoning small model — instant replies, no hidden thinking block
+fast_model = "phi4-mini"   # Non-reasoning small model (~2.5 GB, ~80 tok/s) — instant replies, no hidden thinking block.
+                           # Chat/router only: this tier never sees the tool schema. `ollama pull phi4-mini`
+                           # (llama3.2:3b is the drop-in alternative; previous default was qwen2.5:3b)
 deep_model = "qwen3.5:9b"   # Code, reasoning, analysis. Needs `ollama pull qwen3.5:9b`.
 deep_model_unrestricted = "huihui_ai/qwen2.5-coder-abliterate:14b"  # Uncensored coder fallback. `ollama pull huihui_ai/qwen2.5-coder-abliterate:14b`
                              # Remove or comment out to disable the two-model split.
@@ -65,6 +69,13 @@ deep_model_unrestricted = "huihui_ai/qwen2.5-coder-abliterate:14b"  # Uncensored
 #                                 #   ollama show <model> | grep -A3 Capabilities
 #                                 # A completion-only model here would let Luna describe
 #                                 # scans she never ran. Remove to disable the tier.
+# security_model_abliterated = "richardyoung/qwythos-9b-abliterated"
+#                                 # Used INSTEAD of security_model when the signed no-refusal
+#                                 # gate is unlocked (luna --unlock-security). ~5.6 GB: tight
+#                                 # on 6 GB VRAM, may spill a little into RAM. Candidate only:
+#                                 # verify "tools" under Capabilities before enabling.
+#                                 # Alternative: "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
+#                                 # (~4.9 GB, fits VRAM, but raw GGUFs often lack a tool template).
 # security_num_ctx = 8192           # Security tier only, default 8192. Smaller than num_ctx
 #                                 # on purpose: an 8B model's KV cache at 16k will not fit
 #                                 # beside its weights on a 6GB card.

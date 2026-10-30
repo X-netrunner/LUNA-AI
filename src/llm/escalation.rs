@@ -685,6 +685,12 @@ fn classify_general(input: &str) -> QueryComplexity {
         "halcyon", "my desktop", "the island", "firewall", "antivirus", "anti-virus", "clamav",
         "my notes", "my calendar", "gaming mode", "do not disturb", "lock screen", "wallpaper",
         "learn my system", "learn the system", "system rating", "security rating", "system profile", "system-profile",
+        // Desktop / Arch troubleshooting. These used to fall through to the fast model, which has no tools and no
+        // Halcyon manual, so "why don't my widgets show up" got "which desktop do you use?". Route them to the
+        // tool model so she can inspect the machine instead of asking.
+        "widget", "quickshell", "hyprland", "waybar", "my bar", "show up", "showing up", "not showing",
+        "isn't working", "not working", "doesn't work", "won't start", "won't boot", "black screen",
+        "crashing", "keeps crashing", "systemctl", "journalctl", "dmesg", "kernel panic", "arch problem",
         // Power actions: the fast model has no tools and answers "I can't do that"; the tool model asks once and acts
         "shut down", "shutdown", "power off", "poweroff", "reboot", "restart my", "restart the computer",
         "restart the pc", "restart the laptop", "suspend", "hibernate", "log me out", "log out",
@@ -753,6 +759,9 @@ mod halcyon_routing_tests {
             "what is in my notes",
             "turn on gaming mode",
             "any antivirus alerts?",
+            "why my widgets don't show up",
+            "my bar is not showing",
+            "quickshell keeps crashing",
         ] {
             assert_ne!(classify(q), QueryComplexity::Simple, "{q:?} went to the fast model, which has no Halcyon tools");
         }

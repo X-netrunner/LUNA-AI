@@ -158,7 +158,7 @@ sudo_password = ""          # set here or leave blank and enter at runtime
 [llm]
 model = "qwen2.5:7b-instruct-q4_K_M"
 base_url = "http://localhost:11434"
-fast_model = "qwen2.5:3b"   # non-reasoning small model — instant replies, no hidden thinking
+fast_model = "phi4-mini"    # non-reasoning small model — instant replies, no hidden thinking
 deep_model = "qwen3.5:9b"   # optional, for code/reasoning-heavy tasks
 enable_thinking = false     # required if deep_model can think — see luna.toml.example
 security_model = "whiterabbitneo-coder-tools"  # optional, MUST support tool calls — see below
@@ -287,6 +287,8 @@ cdp_port = 9222
 headless = false
 timeout_secs = 600
 ```
+
+Model choices for a 6 GB VRAM laptop, and which candidates still need a tool-capability check, are in [docs/MODELS.md](docs/MODELS.md).
 
 ## Secrets (OS keyring)
 
