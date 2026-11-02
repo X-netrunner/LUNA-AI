@@ -61,6 +61,13 @@ impl Memory {
             .map(|m| m.content.as_str())
     }
 
+    /// The last (user, assistant) exchange, if the history ends with one.
+    pub fn last_exchange(&self) -> Option<(String, String)> {
+        let a = self.messages.iter().rposition(|m| m.role == "assistant")?;
+        let u = self.messages[..a].iter().rposition(|m| m.role == "user")?;
+        Some((self.messages[u].content.clone(), self.messages[a].content.clone()))
+    }
+
     /// Build context for LLM — filters out tool call artifacts that
     /// confuse the model into echoing them on the next turn.
     pub fn build_context(&self, system_prompt: &str) -> Vec<Message> {

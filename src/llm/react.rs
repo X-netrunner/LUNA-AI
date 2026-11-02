@@ -194,7 +194,14 @@ impl<'a> ReactLoop<'a> {
         system_prompt: &str,
     ) -> Result<(String, Option<String>, bool)> {
         let effective = self.enrich(system_prompt, user_input).await;
-        let (mut answer, think, flag) = self.run_loop(user_input, memory, &effective).await?;
+        // the exchange before this one, in case this message corrects it (agent/lessons.rs)
+        let prev = memory.last_exchange();
+        let mut trace: Vec<Message> = Vec::new();
+        let (mut answer, think, flag) = self.run_loop(user_input, memory, &effective, &mut trace).await?;
+        crate::agent::lessons::after_turn(
+            &self.config,
+            crate::agent::lessons::exchange_for(user_input, &answer, &trace, prev),
+        );
         // Here, not at the call sites: there are two callers (the TUI's
         // `run_routed_turn` and the text-mode loop), and placing the audit in
         // only one left text mode unprotected — measured 2026-10-01, 4 fabricated
@@ -210,6 +217,7 @@ impl<'a> ReactLoop<'a> {
         user_input: &str,
         memory: &mut Memory,
         system_prompt: &str,
+        mut turn_messages: &mut Vec<Message>,
     ) -> Result<(String, Option<String>, bool)> {
         memory.push(Message::user(user_input));
 
@@ -241,7 +249,6 @@ impl<'a> ReactLoop<'a> {
         };
 
         let mut iteration = 0;
-        let mut turn_messages: Vec<Message> = Vec::new();
         let mut empty_retries = 0;
         // One resample per turn, not per iteration: a model that refuses the
         // resampled request will refuse again, and the second refusal is

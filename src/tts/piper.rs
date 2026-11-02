@@ -59,7 +59,16 @@ pub async fn synthesize_to_file(text: &str, config: &crate::config::LunaConfig) 
 import os, sys
 from kokoro_onnx import Kokoro
 import soundfile as sf
-kokoro = Kokoro('{model}', '{voices_bin}')
+# Use the GPU when onnxruntime has a GPU provider (onnxruntime-gpu / ROCm),
+# otherwise the CPU. Falls back to the plain constructor on older kokoro-onnx.
+try:
+    import onnxruntime as ort
+    avail = ort.get_available_providers()
+    providers = [p for p in ('CUDAExecutionProvider', 'ROCMExecutionProvider') if p in avail] + ['CPUExecutionProvider']
+    sess = ort.InferenceSession('{model}', providers=providers)
+    kokoro = Kokoro.from_session(sess, '{voices_bin}')
+except Exception:
+    kokoro = Kokoro('{model}', '{voices_bin}')
 text = os.environ['LUNA_TTS_TEXT']
 samples, sr = kokoro.create(text, voice='{voice}', speed=1.0, lang='en-us')
 sf.write('{out}', samples, sr)

@@ -327,6 +327,10 @@ pub struct AgentConfig {
     /// precisely so she cannot rewrite her own rules.
     #[serde(default)]
     pub constitution_path: Option<String>,
+    /// After a failed tool call or a correction, write one rule that avoids the mistake and follow it on later turns
+    /// (agent/lessons.rs; `luna --lessons` lists them). Off = nothing is reflected on or recalled.
+    #[serde(default = "default_true")]
+    pub learn_from_mistakes: bool,
 }
 
 impl Default for AgentConfig {
@@ -372,6 +376,7 @@ impl Default for AgentConfig {
             sudo_password: None,
             native_tools: true,
             constitution_path: None,
+            learn_from_mistakes: true,
         }
     }
 }

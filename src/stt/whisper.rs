@@ -52,52 +52,67 @@ impl WhisperStt {
             .map(|n| n.get().to_string())
             .unwrap_or_else(|_| "4".to_string());
 
-        let mut cmd = tokio::process::Command::new("whisper-cli");
-        cmd.args([
-            "--model",
-            &self.model_path,
-            "--file",
-            wav_path,
-            "--output-txt",
-            "--language",
-            "en",
-            // Best of N beam search — improves accuracy at small cost
-            "--best-of",
-            "5",
-            "--beam-size",
-            "5",
-            // Use all CPU cores — faster transcription, less clipping
-            "--threads",
-            &threads,
-            // Silero VAD trims silence so Whisper doesn't hallucinate
-            // on quiet frames before/after actual speech.
-            "--vad",
-            "--vad-model",
-            vad_model.to_str().unwrap_or_default(),
-            // No timestamps — cleaner output for assistant use
-            "--no-timestamps",
-        ]);
+        // whisper-cli writes output to <wav_path>.txt
+        let txt_path = format!("{}.txt", wav_path);
 
-        // Add initial prompt if set — this is the #1 knob for accent adaptation
-        if let Some(ref prompt) = self.initial_prompt {
-            cmd.args(["--prompt", prompt]);
-        }
+        // whisper.cpp uses the GPU on its own when its ggml has a GPU backend.
+        // If that run fails (e.g. CUDA out of memory because Ollama holds the
+        // card), retry once on the CPU so voice input still works.
+        for no_gpu in [false, true] {
+            let mut cmd = tokio::process::Command::new("whisper-cli");
+            cmd.args([
+                "--model",
+                &self.model_path,
+                "--file",
+                wav_path,
+                "--output-txt",
+                "--language",
+                "en",
+                // Best of N beam search — improves accuracy at small cost
+                "--best-of",
+                "5",
+                "--beam-size",
+                "5",
+                // Use all CPU cores — faster transcription, less clipping
+                "--threads",
+                &threads,
+                // Silero VAD trims silence so Whisper doesn't hallucinate
+                // on quiet frames before/after actual speech.
+                "--vad",
+                "--vad-model",
+                vad_model.to_str().unwrap_or_default(),
+                // No timestamps — cleaner output for assistant use
+                "--no-timestamps",
+            ]);
 
-        let output = cmd
-            .output()
-            .await
-            .context("Failed to spawn whisper-cli — is whisper.cpp installed?")?;
+            if no_gpu {
+                cmd.arg("--no-gpu");
+            }
 
-        if !output.status.success() {
+            // Add initial prompt if set — this is the #1 knob for accent adaptation
+            if let Some(ref prompt) = self.initial_prompt {
+                cmd.args(["--prompt", prompt]);
+            }
+
+            let output = cmd
+                .output()
+                .await
+                .context("Failed to spawn whisper-cli — is whisper.cpp installed?")?;
+
+            if output.status.success() {
+                break;
+            }
             tracing::warn!(
-                "whisper-cli exited with {:?}: {}",
+                "whisper-cli{} exited with {:?}: {}",
+                if no_gpu { " (CPU)" } else { "" },
                 output.status.code(),
                 String::from_utf8_lossy(&output.stderr).trim()
             );
+            tokio::fs::remove_file(&txt_path).await.ok();
+            if !no_gpu {
+                tracing::info!("Retrying whisper-cli on the CPU (--no-gpu)");
+            }
         }
-
-        // whisper-cli writes output to <wav_path>.txt
-        let txt_path = format!("{}.txt", wav_path);
 
         let raw = tokio::fs::read_to_string(&txt_path)
             .await

@@ -1403,7 +1403,8 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
 
 
     fn root() -> PathBuf {
-        PathBuf::from("/home/netrunner/Projects/luna-stable")
+        // this checkout, wherever it is (was the author's own path, so the tests only passed on that machine)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
 
     #[test]
@@ -1414,7 +1415,7 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
     #[test]
     fn rejects_absolute_paths() {
         assert!(safe_rel(&root(), "/etc/passwd").is_err());
-        assert!(safe_rel(&root(), "/home/netrunner/Projects/luna-stable/src/util.rs").is_err());
+        assert!(safe_rel(&root(), &format!("{}/src/util.rs", env!("CARGO_MANIFEST_DIR"))).is_err());
     }
 
     #[test]
@@ -1536,7 +1537,8 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
 
     #[test]
     fn a_filter_narrows_the_listing_without_guessing() {
-        let cfg = crate::config::SelfPatchConfig::default();
+        let mut cfg = crate::config::SelfPatchConfig::default();
+        cfg.source_dir = env!("CARGO_MANIFEST_DIR").to_string();
         let root = PathBuf::from(&cfg.source_dir);
         let all = list_source_files(&root, "");
         let only = list_source_files(&root, "selfpatch");
@@ -1617,7 +1619,8 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
 
     #[test]
     fn raw_writes_into_her_own_source_are_refused() {
-        let cfg = crate::config::SelfPatchConfig::default();
+        let mut cfg = crate::config::SelfPatchConfig::default();
+        cfg.source_dir = env!("CARGO_MANIFEST_DIR").to_string();
         let root = cfg.source_dir.clone();
         // A real source file:
         assert!(blocks_raw_write(&cfg, &format!("{root}/src/tools/pkgupdate.rs")).is_some());

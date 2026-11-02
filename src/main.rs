@@ -14,6 +14,7 @@ mod config;
 mod daemon;
 mod exec;
 mod first_run;
+mod gpu;
 mod llm;
 mod memory;
 mod overlay;
@@ -60,6 +61,14 @@ struct Args {
     /// one file per conversation and resume any of them
     #[arg(long, value_name = "FILE", requires = "stdio")]
     history: Option<std::path::PathBuf>,
+
+    /// List what Luna learned from her own mistakes, then exit
+    #[arg(long)]
+    lessons: bool,
+
+    /// Forget lesson N (from --lessons), or "all", then exit
+    #[arg(long, value_name = "N|all")]
+    forget_lesson: Option<String>,
 
     /// Increase log verbosity (use multiple times: -v, -vv, -vvv)
     #[arg(short, action = clap::ArgAction::Count)]
@@ -148,6 +157,16 @@ fn session_log_path() -> std::path::PathBuf {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if args.lessons {
+        println!("{}", crate::agent::lessons::list());
+        return Ok(());
+    }
+    if let Some(w) = args.forget_lesson.as_deref() {
+        let n = if w == "all" { None } else { Some(w.parse::<usize>().map_err(|_| anyhow::anyhow!("--forget-lesson takes a number or all"))?) };
+        crate::agent::lessons::forget(n).map_err(|e| anyhow::anyhow!(e))?;
+        println!("{}", crate::agent::lessons::list());
+        return Ok(());
+    }
 
     // Load config first so logging level can come from the file.
     let mut config = LunaConfig::load()?;
@@ -451,6 +470,12 @@ async fn main() -> Result<()> {
         tracing::info!("Voice force-disabled in non-TUI (CLI) mode");
     }
 
+    // Warn (once, in the log) when an NVIDIA GPU is present but Ollama or
+    // whisper-cli has no GPU backend installed and so runs on the CPU.
+    if !args.daemon {
+        gpu::warn_in_background(config.llm.base_url.clone());
+    }
+
     // ── Daemon mode ──────────────────────────────────────────────────────────
     // No tty interaction, no sudo prompt, no Ollama needed.
     if args.daemon {
@@ -471,6 +496,8 @@ async fn main() -> Result<()> {
     // ── Driven by another program (JSON lines) ───────────────────────────────
     // Quiet client output (like the TUI) so stdout carries only the protocol; no sudo prompt, the tty is not there.
     if args.stdio {
+        // Halcyon's Luna window reflects on its own turns (scripts/halcyon-luna.py): not twice
+        crate::agent::lessons::set_external(true);
         config.audio.input_mode = crate::config::InputMode::Tui;
         if let Some(h) = args.history {
             config.memory.history_path = h;

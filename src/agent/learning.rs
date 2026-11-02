@@ -325,6 +325,9 @@ pub async fn learning_block_for(
     out.push_str(&memory_recall_block(input, config, k).await);
     out.push_str(&skills_recall_block(input, config, k.saturating_sub(4).clamp(1, 3)).await);
     out.push_str(&profile_block());
+    if config.agent.learn_from_mistakes {
+        out.push_str(&crate::agent::lessons::block_for(input));
+    }
     if nudge {
         out.push_str(MEMORY_NUDGE);
         if has_skills {

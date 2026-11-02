@@ -1,6 +1,7 @@
 //! agent/mod.rs — The main agent loop
 
 pub mod learning;
+pub mod lessons;
 
 use crate::config::{LunaConfig, VoiceMode};
 use crate::llm::escalation::{classify_with_latch, QueryComplexity};

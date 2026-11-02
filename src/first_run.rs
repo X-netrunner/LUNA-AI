@@ -129,6 +129,14 @@ pub fn guide_text(config: &LunaConfig) -> String {
         out.push_str("  Tip: store your Spotify client id, then run `luna --spotify-auth`\n");
         out.push_str("  to play your liked songs, playlists and more.\n\n");
     }
+    let gpu = crate::gpu::check_installed();
+    if !gpu.is_empty() {
+        out.push_str("  GPU — your models are running on the CPU:\n");
+        for h in gpu {
+            out.push_str(&format!("    - {}\n", h));
+        }
+        out.push('\n');
+    }
     out.push_str("  Say \"ok forget it\" or press Ctrl-C to just start chatting.\n");
     out.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
     out

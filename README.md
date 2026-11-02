@@ -135,6 +135,7 @@ The turn goes through the same fast / deep / security / full routing as the TUI;
 - `wl-copy` / `wl-paste` for clipboard (Wayland)
 - `curl` for web fetch and learning
 - (Optional) `pacman-contrib` for proactive update checks via `checkupdates`
+- (Optional, recommended with an NVIDIA GPU) the GPU backends, so the models run on the GPU instead of the CPU — see [GPU](#gpu)
 
 ## Installation
 
@@ -531,6 +532,20 @@ Three jobs:
 
 All thresholds, ignore lists, and safety rails live under `[daemon]` in
 `luna.toml` — see `luna.toml.example` for the full documented set.
+
+## GPU
+
+Luna doesn't drive the GPU herself: Ollama (the LLM tiers) and `whisper-cli` (voice input) use it automatically, but only when their GPU backend is installed. On Arch the plain `ollama` and `ggml` packages are **CPU-only**, so with an NVIDIA card install the CUDA backends:
+
+```bash
+sudo pacman -S ollama-cuda ggml-cuda      # pulls in the CUDA toolkit (~3 GB download)
+sudo systemctl restart ollama
+ollama ps                                 # PROCESSOR column should say "GPU"
+```
+
+(AMD: `ollama-rocm` + `ggml-hip`; any GPU: `ollama-vulkan` + `ggml-vulkan`.) Without a GPU everything keeps working on the CPU.
+
+Luna checks this at startup: if an NVIDIA GPU is present but a backend is missing, she logs a `GPU:` warning naming the package, and `luna --setup` lists it too. `whisper-cli` is retried on the CPU if a GPU run fails (for example when Ollama has filled the card), and Kokoro uses `onnxruntime`'s CUDA/ROCm provider when one is installed (`python-onnxruntime-cuda`).
 
 ## Voice Setup
 
