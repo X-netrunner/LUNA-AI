@@ -1,0 +1,307 @@
+# Luna Configuration — copy this to ~/.config/luna/luna.toml
+
+[agent]
+name = "Luna"
+#system_prompt = "You are Luna, a local AI assistant built by Netrunner running on Arch Linux via qwen2.5 (Ollama). You are completely independent of corporate AI entities.\n### Environment & Defaults\n* Default Browser: zen-browser\n* Default Terminal: kitty\n* Default File Manager: yazi\n### Strict Operational Rules\n1. NEVER ask for confirmation — act immediately.\n2. Always use tools. Never describe commands in markdown.\n3. Append & when launching GUI apps.\n4. Use edit_file for editing files.\n5. One #sentence max after a tool executes."
+system_prompt = """You are Luna. Your one and only creator is Netrunner (Srijan Satya Bandaru) — no company, group, or person besides Netrunner made you, and you have no other creator. You are completely independent of corporate AI entities.
+### Environment & Defaults
+* Default Browser: zen-browser
+* Default Terminal: kitty
+* Default File Manager: yazi
+* Available Tools: run_shell, edit_file, web_search, read_file, write_file, find_file, notify, system_info, clipboard, fetch_page, nmap_scan, analyze_pcap, decode_payload, hash_file, dns_lookup, remember, forget, list_memories, learn_topic, todoist_list, todoist_add, todoist_complete, index_system, spotify, run_safety_check, backup.
+### Strict Operational Rules
+1. Absolute Autonomy: NEVER ask for confirmation. Act immediately.
+2. Mandatory Tool Usage: Always use a tool. For the current time/date, ALWAYS run: date '+%H:%M on %A %d %B'. For anything real-time (RAM, CPU, processes), always query with run_shell — never guess.
+3. Background Execution: Append & for GUI apps.
+4. Use edit_file not open for editing files. Use zen-browser for web tasks.
+5. Output Brevity: One concise sentence after a tool executes.
+6. No emojis or emoticons — plain text only.
+7. Source Validation: When verifying if a site is legit, search Reddit with site:reddit.com queries and fetch full threads with fetch_page. Look for scam report patterns."""
+max_react_iterations = 30   # was 8. Write, run, read the error, fix needs room; a long build runs out at 8.
+# sudo_password = ""  # Set at runtime prompt, or hardcode here (not recommended)
+
+[llm]
+base_url = "http://localhost:11434"
+model = "qwen2.5:7b-instruct-q4_K_M"
+# Orchestrator candidate (4.9 GB, fits 6 GB VRAM, high BFCL tool-calling score): ToolACE-8B Q4_K_M.
+# Only switch after `ollama show <model>` lists "tools" — see docs/MODELS.md.
+temperature = 0.7
+max_tokens = 2048
+enable_thinking = false   # Keep this false. It sends top-level `think: false`, which is
+                          # what Luna's dispatch loop wants: a model that narrates its
+                          # reasoning burns the iteration budget before it calls a tool.
+                          # qwen2.5 rejects `think: true` outright anyway (Luna detects
+                          # that and omits the field), so this only changes behaviour
+                          # for thinking-capable models like the deep tier below.
+fast_model = "phi4-mini"   # Non-reasoning small model (~2.5 GB, ~80 tok/s) — instant replies, no hidden thinking block.
+                           # Chat/router only: this tier never sees the tool schema. `ollama pull phi4-mini`
+                           # (llama3.2:3b is the drop-in alternative; previous default was qwen2.5:3b)
+deep_model = "qwen3.5:9b"   # Code, reasoning, analysis. Needs `ollama pull qwen3.5:9b`.
+deep_enable_thinking = true   # Deep tier only: think at length. Leave enable_thinking = false above so the
+                              # tool-calling main model keeps its iteration budget for tools.
+deep_max_tokens = 32768       # Thinking tokens count against this. At the old 8192 a long think left no room for the code.
+deep_num_ctx = 32768          # Bigger KV cache: slower on a 6 GB card (more spills to RAM), fine for a long build.
+deep_model_unrestricted = "huihui_ai/qwen2.5-coder-abliterate:14b"  # Uncensored coder fallback. `ollama pull huihui_ai/qwen2.5-coder-abliterate:14b`
+                             # Remove or comment out to disable the two-model split.
+                             #
+                             # Measured 2026-10-04 on a 6 GB card (RTX 4050 Laptop), by
+                             # executing each generated script against a test input
+                             # rather than reading it, and N=12 live write cells through
+                             # the real dispatch path:
+                             #
+                             #   deep_model          code correct   median cell   tok/s
+                             #   qwen3.5:9b                 5/8          40.5s      12.8
+                             #   qwen2.5-coder:14b           4/8         158.0s       6.0
+                             #   llama3.1:8b                 0/8          19.5s      16.2
+                             #
+                             # llama3.1:8b is faster and ties on tool discipline but
+                             # writes scripts that prompt for input instead of reading
+                             # argv, and scored 0/8. Discipline alone was a tie, so it
+                             # was never a real candidate. glm4:9b was disqualified
+                             # outright: it declares `tools` and then refuses, answering
+                             # "I'm sorry, but as an AI, I don't have direct access to
+                             # your computer". A VRAM table will not tell you that.
+                             #
+                             # Weight size decides more than benchmark score here. Model
+                             # choice is mostly a question of what fits in VRAM without
+                             # spilling: weights that do not fit cross the PCIe bus on
+                             # every token, and that is what made the 14b slow.
+# security_model = "whiterabbitneo-coder-tools"   # Offensive-security tier: PoCs, exploits,
+#                                 # scanners, CTF on your own lab. Checked BEFORE deep, so
+#                                 # "write a python exploit" is not claimed by the coder.
+#                                 # MUST support tool calls — verify with:
+#                                 #   ollama show <model> | grep -A3 Capabilities
+#                                 # A completion-only model here would let Luna describe
+#                                 # scans she never ran. Remove to disable the tier.
+# security_model_abliterated = "richardyoung/qwythos-9b-abliterated"
+#                                 # Used INSTEAD of security_model when the signed no-refusal
+#                                 # gate is unlocked (luna --unlock-security). ~5.6 GB: tight
+#                                 # on 6 GB VRAM, may spill a little into RAM. Candidate only:
+#                                 # verify "tools" under Capabilities before enabling.
+#                                 # Alternative: "hf.co/mradermacher/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
+#                                 # (~4.9 GB, fits VRAM, but raw GGUFs often lack a tool template).
+# security_num_ctx = 8192           # Security tier only, default 8192. Smaller than num_ctx
+#                                 # on purpose: an 8B model's KV cache at 16k will not fit
+#                                 # beside its weights on a 6GB card.
+#                                 # NOTE: 47 tool definitions are ~42kB (~10.5k tokens), so
+#                                 # the tier depends on tool subsetting to fit. If that stops
+#                                 # firing, security turns return HTTP 500 rather than
+#                                 # degrading — check the "Tool subset:" debug line.
+# security_unrestricted = false     # false = the tier is scoped to systems you own or are
+#                                 # contracted to test. true = it writes exploit tooling
+#                                 # without evaluating who owns the target, and is
+#                                 # additionally instructed never to refuse.
+#                                 # Read before enabling: this tier drives run_shell (your
+#                                 # sudo_password is in this file), unrestricted write_file,
+#                                 # and allow_external_actions covers outbound network calls.
+#                                 # The scope clause is the only thing limiting a
+#                                 # prompt-injected instruction from reaching those.
+#
+#                                 # DEVELOPER-GATED — this line alone does NOTHING.
+#                                 # It is a *request*. It only takes effect when a valid
+#                                 # developer signature is also present on disk, verified
+#                                 # against security_dev_public_key below. Editing this
+#                                 # file cannot enable it, and writing a plausible-looking
+#                                 # signature into the receipt cannot either.
+#                                   luna --gen-dev-key      generate a keypair
+#                                   luna --unlock-security  sign the challenge with the key
+#                                   luna --security-status  inspect current state
+#                                   luna --lock-security    revoke
+#
+# security_dev_public_key = ""      # Public half of the developer keypair — the value
+#                                 # `luna --gen-dev-key` prints. Public data, meant to be
+#                                 # shared. The PRIVATE half is never written anywhere by
+#                                 # Luna and is not recoverable. Blank here means
+#                                 # no-refusal mode is permanently unavailable; that is
+#                                 # the default, and it is enforced in code rather than
+#                                 # merely hidden in the UI.
+#
+#                                 # Honest scope of the gate: it prevents casual and
+#                                 # accidental enabling and leaves a signed record. It is
+#                                 # NOT DRM — you have the source, and removing the check
+#                                 # in src/unlock.rs is a small patch. It exists to make
+#                                 # turning this on a deliberate act, not to stop you.
+# security_scripts_dir = "~/Documents/luna-scripts"
+#                                 # Default output directory for security-tier scripts,
+#                                 # created at startup. Exists because the model was picking
+#                                 # /tmp on its own, which is wiped on reboot. A request that
+#                                 # names a path still wins; this is only the default.
+#                                 # Defaults to $XDG_DOCUMENTS_DIR/luna-scripts, else
+#                                 # ~/Documents/luna-scripts.
+embedding_model = "nomic-embed-text"  # Semantic memory recall (RAG-lite).
+                                      # One-time: ollama pull nomic-embed-text
+
+[logging]
+level = "info"                  # "info" or "debug" — toggle via "turn on debug mode"
+
+[search]
+# Web search — all optional, works out of the box with no keys:
+#   Tavily: primary search (keyless by default, free key: 1000/month)
+#   Gemini: knowledge fallback (answers from training data)
+#   Firecrawl: page fetching (keyless, handles JavaScript)
+#
+#tavily_api_key = ""        # optional: free at tavily.com (1000/month)
+#gemini_api_key = ""        # optional: free at aistudio.google.com
+#
+# Secrets can live in your OS keyring instead of this file:
+#   gemini_api_key = "keyring:gemini"
+#   tavily_api_key = "keyring:tavily"
+#   todoist api_token = "keyring:todoist"
+# Store them securely (prompts without echo):
+#   luna --set-key gemini
+# Luna also chmods this file to 600 on save.
+
+[todoist]
+api_token = "your_token_here"
+
+# Spotify Web API — for "play my liked songs", "play <playlist>", search, etc.
+# Requires Spotify Premium and a Spotify app at developer.spotify.com/dashboard.
+# Setup:
+#   luna --set-key spotify_id
+#   luna --spotify-auth          # one-time browser approval (opens a browser tab)
+# Auth uses PKCE, so no client secret is needed — just the client id above.
+# The refresh token is written to luna.toml automatically as keyring:spotify_refresh.
+[spotify]
+client_id = "keyring:spotify_id"
+
+[proactive]
+enabled = true
+check_interval_mins = 15
+battery_low_threshold = 20
+disk_full_threshold = 90
+check_updates = true
+
+[daemon]
+# Background watchdog — run with: luna --daemon
+# Install as a service: cp deploy/luna-daemon.service ~/.config/systemd/user/
+#                       systemctl --user enable --now luna-daemon
+enabled = true
+check_interval_mins = 30
+
+# Process watchdog: flags RAM/CPU hogs via desktop notification.
+# NEVER kills anything automatically — you decide what to end.
+ram_threshold_mb = 1500        # single process using more than this (MiB)
+cpu_threshold_percent = 80.0   # sustained CPU% since last scan
+ignore_processes = ["ollama", "luna", "plasmashell", "kwin_wayland",
+                    "gnome-shell", "Xwayland", "pipewire", "wireplumber"]
+
+# Usage learning: the daemon tracks which processes run on which days.
+# Apps seen on >= daily_use_days_per_week of the last 7 days are treated
+# as daily drivers — they stop triggering resource notifications, and are
+# never auto-killed. State persists in ~/.local/share/luna/process_stats.json.
+learning_enabled = true
+daily_use_days_per_week = 5
+
+# Idle processes: allowlisted ones get SIGTERM after idle_kill_minutes,
+# then SIGKILL next scan if still alive. Everything else only earns an
+# opt-in suggestion after suggest_autokill_after_mins (once per day).
+# Manage via chat: 'process stats', 'allow auto-kill steam',
+#                  'deny auto-kill steam'
+idle_kill_minutes = 30
+suggest_autokill_after_mins = 45
+
+# Stateful apps that must NEVER be auto-killed, even when allowlisted
+protected_processes = ["firefox", "zen-browser", "chromium", "code", "zed",
+                       "kitty", "alacritty", "konsole", "foot", "obs",
+                       "gimp", "krita", "blender", "libreoffice", "soffice",
+                       "thunderbird", "discord", "telegram-desktop", "slack"]
+
+# How often (days) Luna re-analyzes fish history into permanent memory
+history_learn_days = 30
+# How often (days) Luna re-indexes projects/scripts/configs (0 = off)
+index_learn_days = 30
+# Weekly safety check (pacman -Syu, ClamAV, rkhunter, UFW, Lynis, monthly
+# AIDE, + home backup). 0 = off. Requires the safety_check script:
+#   install -m755 scripts/safety_check.sh ~/.local/bin/safety_check
+# Light scans hot dirs weekly and escalates to a full-home scan monthly.
+# A systemd timer (safety-check.timer) can back this up if the daemon is down.
+safety_check_days = 7
+# Weekly home backup to /dev/sda1 at /mnt/backup/arch-backup/ (incremental
+# rsync snapshots). Only runs while the drive is connected. 0 = off.
+backup_days = 7
+# "I'm alive" desktop notification every N hours while the daemon runs
+# (0 = off). Includes uptime, cycles, auto-kills and known-fact count.
+notify_hours = 1
+
+# ── WhatsApp bridge (luna-whapp) ─────────────────────────────────────────────
+# Lets Luna send WhatsApp messages through your own account via a local
+# Baileys bridge. Pair it once:  luna --whatsapp-link  (scans a QR with your
+# phone), which also starts the always-on luna-whapp.service. The bridge
+# listens only on 127.0.0.1 (token in ~/.local/share/whapp/config.json).
+
+# Disk hygiene: pacman cache, ~/.cache, trash, journals.
+# cleanup_mode:
+#   notify = only report reclaimable space (default, safe)
+#   auto   = actually clean when / crosses disk_full_threshold above
+disk_cleanup = true
+cleanup_mode = "notify"
+cache_max_age_days = 30        # delete ~/.cache files untouched this long
+trash_max_age_days = 14        # empty trash items older than this
+journal_vacuum_days = 30       # journalctl --vacuum-time (needs sudo)
+pacman_cache_keep = 2          # paccache -rkN (needs sudo)
+min_notify_mb = 500            # only report cleanups worth this much
+
+# Orphaned packages (pacman -Qdtq): auto-remove them once they've been detected
+# this many days. 0 = never remove — only notify. Add exact names to keep.
+orphan_cleanup_days = 7
+# orphan_keep = ["some-orphan-package"]
+
+# ── Project-Vision browser automation ─────────────────────────────────────────
+# Lets Luna actually DO things in a real, visible Chromium window ("add this
+# to the cart", "search for X on amazon & open the results"). Luna talks to
+# your Project-Vision (SIH) browser-automation server over WebSocket, and
+# drives Chromium over the DevTools Protocol: the server's VLM plans and
+# decides what to click, Luna executes it and sends screenshots back. No
+# Chrome extension needed. Chromium keeps its own profile (see profile_dir)
+# so you only log into sites once, and it stays open after each task.
+[whatsapp]
+enabled = true
+# base_url = "http://127.0.0.1:7373"
+
+# ── sysmode hardening-profile switcher ───────────────────────────────────────
+# Lets Luna switch system security profiles (secure / cyber / stealth /
+# lockdown), pull honeypot/IDS attack logs, and run a self-test of the whole
+# setup ("is the honeypot working?", "test if everything works"). Points at the
+# sysmode CLI — usually already on PATH or at /usr/local/bin/sysmode.
+[sysmode]
+enabled = true
+# bin = "sysmode"
+
+[browser]
+enabled = true
+# WebSocket the Project-Vision server exposes (its main.py serves it)
+srijan_url = "ws://127.0.0.1:8001/ws"
+# Folder that holds the server's main.py. Empty = Luna won't auto-start the
+# server and will tell you to run it yourself.
+server_dir = "/home/netrunner/Projects/sih/Project-Vision/Server[unnati&srijan]"
+chromium = "chromium"
+cdp_port = 9222
+# profile_dir = "/home/YOUR_USERNAME/.local/share/luna/browser-profile"
+headless = false
+timeout_secs = 600
+
+[voice]
+mode = "basic"              # basic | off
+piper_bin = "af_heart"      # Kokoro voice: af_heart | af_sky | af_nicole | af_sarah
+piper_model = "/home/YOUR_USERNAME/.local/share/luna/kokoro/kokoro-v1.0.onnx"
+whisper_model = "/home/YOUR_USERNAME/.local/share/luna/models/ggml-small.en.bin"
+
+[audio]
+input_mode = "wake_word"    # off | wake_word | both
+wake_word = "hello luna"
+wake_aliases = ["luna", "hey luna", "hello luna", "hay luna"]
+vad_silence_ms = 800
+voice_mode_idle_mins = 5    # "luna voice mode" auto-ends after this many min of silence (0 = never)
+sample_rate = 16000
+conversation_window_secs = 15   # TUI: keep listening without "luna" for N sec after a voice reply (0 = off)
+
+[memory]
+context_window = 6
+history_path = "/home/YOUR_USERNAME/.local/share/luna/history.json"
+
+# Self-learning cadence: every N user turns Luna reviews the recent conversation
+# and persists durable details via remember, and saves repeatable procedures as
+# skills (create_skill). Skills + past conversations are stored under
+# ~/.local/share/luna/ (skills/, conversations.jsonl, sessions.jsonl).
+# 0 disables the periodic review (learning still works via explicit requests).
+nudge_interval = 10

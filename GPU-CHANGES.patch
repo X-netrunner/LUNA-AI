@@ -1,0 +1,436 @@
+diff --git a/README.md b/README.md
+index da94ae2..ba038d6 100755
+--- a/README.md
++++ b/README.md
+@@ -135,6 +135,7 @@ The turn goes through the same fast / deep / security / full routing as the TUI;
+ - `wl-copy` / `wl-paste` for clipboard (Wayland)
+ - `curl` for web fetch and learning
+ - (Optional) `pacman-contrib` for proactive update checks via `checkupdates`
++- (Optional, recommended with an NVIDIA GPU) the GPU backends, so the models run on the GPU instead of the CPU — see [GPU](#gpu)
+ 
+ ## Installation
+ 
+@@ -532,6 +533,20 @@ Three jobs:
+ All thresholds, ignore lists, and safety rails live under `[daemon]` in
+ `luna.toml` — see `luna.toml.example` for the full documented set.
+ 
++## GPU
++
++Luna doesn't drive the GPU herself: Ollama (the LLM tiers) and `whisper-cli` (voice input) use it automatically, but only when their GPU backend is installed. On Arch the plain `ollama` and `ggml` packages are **CPU-only**, so with an NVIDIA card install the CUDA backends:
++
++```bash
++sudo pacman -S ollama-cuda ggml-cuda      # pulls in the CUDA toolkit (~3 GB download)
++sudo systemctl restart ollama
++ollama ps                                 # PROCESSOR column should say "GPU"
++```
++
++(AMD: `ollama-rocm` + `ggml-hip`; any GPU: `ollama-vulkan` + `ggml-vulkan`.) Without a GPU everything keeps working on the CPU.
++
++Luna checks this at startup: if an NVIDIA GPU is present but a backend is missing, she logs a `GPU:` warning naming the package, and `luna --setup` lists it too. `whisper-cli` is retried on the CPU if a GPU run fails (for example when Ollama has filled the card), and Kokoro uses `onnxruntime`'s CUDA/ROCm provider when one is installed (`python-onnxruntime-cuda`).
++
+ ## Voice Setup
+ 
+ Kokoro doesn't need a heavy ML stack — it runs on `onnxruntime`, which Arch already packages, so the venv can reuse your system packages instead of pip-building everything from scratch:
+diff --git a/src/first_run.rs b/src/first_run.rs
+index ea6d17a..52462cf 100644
+--- a/src/first_run.rs
++++ b/src/first_run.rs
+@@ -129,6 +129,14 @@ pub fn guide_text(config: &LunaConfig) -> String {
+         out.push_str("  Tip: store your Spotify client id, then run `luna --spotify-auth`\n");
+         out.push_str("  to play your liked songs, playlists and more.\n\n");
+     }
++    let gpu = crate::gpu::check_installed();
++    if !gpu.is_empty() {
++        out.push_str("  GPU — your models are running on the CPU:\n");
++        for h in gpu {
++            out.push_str(&format!("    - {}\n", h));
++        }
++        out.push('\n');
++    }
+     out.push_str("  Say \"ok forget it\" or press Ctrl-C to just start chatting.\n");
+     out.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
+     out
+diff --git a/src/gpu.rs b/src/gpu.rs
+new file mode 100644
+index 0000000..8b797bf
+--- /dev/null
++++ b/src/gpu.rs
+@@ -0,0 +1,218 @@
++//! gpu.rs — notice when a GPU is present but Luna's models still run on the CPU.
++//!
++//! Luna never drives the GPU directly. Ollama (the LLM tiers) and whisper.cpp
++//! (speech to text) pick it up on their own, but only when their GPU backend is
++//! installed. On Arch the plain `ollama` and `ggml` packages are CPU-only, so a
++//! machine with an NVIDIA card silently runs every model on the CPU. This module
++//! spots that and says which package fixes it. It only looks; it installs nothing.
++
++use std::path::{Path, PathBuf};
++
++/// Directories where Ollama keeps its compute backends (distro package, official installer).
++const OLLAMA_LIB_DIRS: &[&str] = &["/usr/lib/ollama", "/usr/local/lib/ollama"];
++/// Directory where the split `ggml` package (used by whisper-cli) keeps its backends.
++const GGML_LIB_DIR: &str = "/usr/lib/ggml";
++
++/// Is an NVIDIA GPU with a working driver present?
++pub fn nvidia_present() -> bool {
++    Path::new("/proc/driver/nvidia/version").exists()
++}
++
++/// Does this backend directory hold any GPU backend (CUDA, ROCm or Vulkan)?
++fn has_gpu_backend(dir: &Path) -> bool {
++    let Ok(entries) = std::fs::read_dir(dir) else {
++        return false;
++    };
++    entries.flatten().any(|e| {
++        let name = e.file_name().to_string_lossy().to_lowercase();
++        name.starts_with("cuda_")
++            || name.starts_with("rocm")
++            || name.starts_with("vulkan")
++            || name.starts_with("libggml-cuda")
++            || name.starts_with("libggml-hip")
++            || name.starts_with("libggml-vulkan")
++    })
++}
++
++/// Whether Ollama has a GPU backend installed. None when no Ollama lib dir is found
++/// (unknown install layout, e.g. a container), so we stay quiet instead of guessing.
++fn ollama_has_gpu_backend(dirs: &[PathBuf]) -> Option<bool> {
++    let existing: Vec<&PathBuf> = dirs.iter().filter(|d| d.is_dir()).collect();
++    if existing.is_empty() {
++        return None;
++    }
++    Some(existing.iter().any(|d| has_gpu_backend(d)))
++}
++
++/// Whether the shared ggml library has a GPU backend. None when whisper-cli does not
++/// use the split ggml package (it may bundle its own backends), so we stay quiet.
++fn ggml_has_gpu_backend(dir: &Path) -> Option<bool> {
++    dir.is_dir().then(|| has_gpu_backend(dir))
++}
++
++/// From Ollama's `/api/ps` reply: true when models are loaded and none of them is on the GPU.
++fn ps_says_cpu_only(ps: &serde_json::Value) -> bool {
++    let Some(models) = ps["models"].as_array() else {
++        return false;
++    };
++    !models.is_empty()
++        && models
++            .iter()
++            .all(|m| m["size_vram"].as_u64().unwrap_or(0) == 0)
++}
++
++/// Problems to fix, each with the command that fixes it. Empty = nothing to report.
++fn hints(
++    nvidia: bool,
++    ollama_gpu: Option<bool>,
++    ollama_ps_cpu: bool,
++    ggml_gpu: Option<bool>,
++) -> Vec<String> {
++    let mut out = Vec::new();
++    if !nvidia {
++        return out;
++    }
++    if ollama_gpu == Some(false) || ollama_ps_cpu {
++        out.push(
++            "Ollama is running on the CPU even though an NVIDIA GPU is present. \
++             Install its CUDA backend and restart it: \
++             `sudo pacman -S ollama-cuda && sudo systemctl restart ollama`"
++                .to_string(),
++        );
++    }
++    if ggml_gpu == Some(false) {
++        out.push(
++            "whisper-cli (voice input) is running on the CPU even though an NVIDIA GPU is present. \
++             Install the CUDA backend for ggml: `sudo pacman -S ggml-cuda`"
++                .to_string(),
++        );
++    }
++    out
++}
++
++/// Same check from the installed files alone (no network), for the setup guide.
++pub fn check_installed() -> Vec<String> {
++    let dirs: Vec<PathBuf> = OLLAMA_LIB_DIRS.iter().map(PathBuf::from).collect();
++    hints(
++        nvidia_present(),
++        ollama_has_gpu_backend(&dirs),
++        false,
++        ggml_has_gpu_backend(Path::new(GGML_LIB_DIR)),
++    )
++}
++
++/// Check this machine and return the GPU setup hints (empty when the GPU is used or absent).
++pub async fn check(ollama_base_url: &str) -> Vec<String> {
++    let nvidia = nvidia_present();
++    if !nvidia {
++        return Vec::new();
++    }
++    let dirs: Vec<PathBuf> = OLLAMA_LIB_DIRS.iter().map(PathBuf::from).collect();
++    let ollama_gpu = ollama_has_gpu_backend(&dirs);
++    let ggml_gpu = ggml_has_gpu_backend(Path::new(GGML_LIB_DIR));
++
++    let url = format!("{}/api/ps", ollama_base_url.trim_end_matches('/'));
++    let ps_cpu = match reqwest::Client::new()
++        .get(&url)
++        .timeout(std::time::Duration::from_secs(2))
++        .send()
++        .await
++    {
++        Ok(r) => r
++            .json::<serde_json::Value>()
++            .await
++            .map(|v| ps_says_cpu_only(&v))
++            .unwrap_or(false),
++        Err(_) => false,
++    };
++    hints(nvidia, ollama_gpu, ps_cpu, ggml_gpu)
++}
++
++/// Log the hints once at startup. Goes through tracing so it never corrupts the TUI.
++pub fn warn_in_background(ollama_base_url: String) {
++    tokio::spawn(async move {
++        for h in check(&ollama_base_url).await {
++            tracing::warn!("GPU: {}", h);
++        }
++    });
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    fn tmpdir(name: &str) -> PathBuf {
++        let d =
++            std::env::temp_dir().join(format!("luna_gpu_test_{}_{}", name, uuid::Uuid::new_v4()));
++        std::fs::create_dir_all(&d).unwrap();
++        d
++    }
++
++    #[test]
++    fn cpu_only_ollama_dir_is_flagged() {
++        let d = tmpdir("cpu");
++        std::fs::write(d.join("libggml-cpu-haswell.so"), b"").unwrap();
++        assert_eq!(ollama_has_gpu_backend(&[d.clone()]), Some(false));
++        std::fs::create_dir(d.join("cuda_v13")).unwrap();
++        assert_eq!(ollama_has_gpu_backend(&[d.clone()]), Some(true));
++        std::fs::remove_dir_all(d).ok();
++    }
++
++    #[test]
++    fn unknown_layout_stays_quiet() {
++        assert_eq!(
++            ollama_has_gpu_backend(&[PathBuf::from("/nonexistent/luna/ollama")]),
++            None
++        );
++        assert_eq!(
++            ggml_has_gpu_backend(Path::new("/nonexistent/luna/ggml")),
++            None
++        );
++    }
++
++    #[test]
++    fn ggml_cuda_backend_is_recognised() {
++        let d = tmpdir("ggml");
++        std::fs::write(d.join("libggml-cpu-zen4.so"), b"").unwrap();
++        assert_eq!(ggml_has_gpu_backend(&d), Some(false));
++        std::fs::write(d.join("libggml-cuda.so"), b"").unwrap();
++        assert_eq!(ggml_has_gpu_backend(&d), Some(true));
++        std::fs::remove_dir_all(d).ok();
++    }
++
++    #[test]
++    fn ps_reply_cpu_vs_gpu() {
++        assert!(ps_says_cpu_only(
++            &json!({"models":[{"name":"a","size_vram":0}]})
++        ));
++        assert!(!ps_says_cpu_only(
++            &json!({"models":[{"name":"a","size_vram":3100198829u64}]})
++        ));
++        assert!(
++            !ps_says_cpu_only(&json!({"models":[]})),
++            "nothing loaded is not evidence"
++        );
++        assert!(!ps_says_cpu_only(&json!({})));
++    }
++
++    #[test]
++    fn no_nvidia_means_no_hints() {
++        assert!(hints(false, Some(false), true, Some(false)).is_empty());
++    }
++
++    #[test]
++    fn hints_name_the_fixing_package() {
++        let h = hints(true, Some(false), false, Some(false));
++        assert_eq!(h.len(), 2);
++        assert!(h[0].contains("ollama-cuda"));
++        assert!(h[1].contains("ggml-cuda"));
++        assert!(hints(true, Some(true), false, Some(true)).is_empty());
++        assert!(hints(true, None, false, None).is_empty());
++        assert_eq!(
++            hints(true, Some(true), true, None).len(),
++            1,
++            "loaded on CPU despite backend"
++        );
++    }
++}
+diff --git a/src/main.rs b/src/main.rs
+index c31b5b1..ac840ab 100755
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -14,6 +14,7 @@ mod config;
+ mod daemon;
+ mod exec;
+ mod first_run;
++mod gpu;
+ mod llm;
+ mod memory;
+ mod overlay;
+@@ -469,6 +470,12 @@ async fn main() -> Result<()> {
+         tracing::info!("Voice force-disabled in non-TUI (CLI) mode");
+     }
+ 
++    // Warn (once, in the log) when an NVIDIA GPU is present but Ollama or
++    // whisper-cli has no GPU backend installed and so runs on the CPU.
++    if !args.daemon {
++        gpu::warn_in_background(config.llm.base_url.clone());
++    }
++
+     // ── Daemon mode ──────────────────────────────────────────────────────────
+     // No tty interaction, no sudo prompt, no Ollama needed.
+     if args.daemon {
+diff --git a/src/stt/whisper.rs b/src/stt/whisper.rs
+index 2449c14..833b01b 100755
+--- a/src/stt/whisper.rs
++++ b/src/stt/whisper.rs
+@@ -52,53 +52,68 @@ impl WhisperStt {
+             .map(|n| n.get().to_string())
+             .unwrap_or_else(|_| "4".to_string());
+ 
+-        let mut cmd = tokio::process::Command::new("whisper-cli");
+-        cmd.args([
+-            "--model",
+-            &self.model_path,
+-            "--file",
+-            wav_path,
+-            "--output-txt",
+-            "--language",
+-            "en",
+-            // Best of N beam search — improves accuracy at small cost
+-            "--best-of",
+-            "5",
+-            "--beam-size",
+-            "5",
+-            // Use all CPU cores — faster transcription, less clipping
+-            "--threads",
+-            &threads,
+-            // Silero VAD trims silence so Whisper doesn't hallucinate
+-            // on quiet frames before/after actual speech.
+-            "--vad",
+-            "--vad-model",
+-            vad_model.to_str().unwrap_or_default(),
+-            // No timestamps — cleaner output for assistant use
+-            "--no-timestamps",
+-        ]);
+-
+-        // Add initial prompt if set — this is the #1 knob for accent adaptation
+-        if let Some(ref prompt) = self.initial_prompt {
+-            cmd.args(["--prompt", prompt]);
+-        }
+-
+-        let output = cmd
+-            .output()
+-            .await
+-            .context("Failed to spawn whisper-cli — is whisper.cpp installed?")?;
++        // whisper-cli writes output to <wav_path>.txt
++        let txt_path = format!("{}.txt", wav_path);
+ 
+-        if !output.status.success() {
++        // whisper.cpp uses the GPU on its own when its ggml has a GPU backend.
++        // If that run fails (e.g. CUDA out of memory because Ollama holds the
++        // card), retry once on the CPU so voice input still works.
++        for no_gpu in [false, true] {
++            let mut cmd = tokio::process::Command::new("whisper-cli");
++            cmd.args([
++                "--model",
++                &self.model_path,
++                "--file",
++                wav_path,
++                "--output-txt",
++                "--language",
++                "en",
++                // Best of N beam search — improves accuracy at small cost
++                "--best-of",
++                "5",
++                "--beam-size",
++                "5",
++                // Use all CPU cores — faster transcription, less clipping
++                "--threads",
++                &threads,
++                // Silero VAD trims silence so Whisper doesn't hallucinate
++                // on quiet frames before/after actual speech.
++                "--vad",
++                "--vad-model",
++                vad_model.to_str().unwrap_or_default(),
++                // No timestamps — cleaner output for assistant use
++                "--no-timestamps",
++            ]);
++
++            if no_gpu {
++                cmd.arg("--no-gpu");
++            }
++
++            // Add initial prompt if set — this is the #1 knob for accent adaptation
++            if let Some(ref prompt) = self.initial_prompt {
++                cmd.args(["--prompt", prompt]);
++            }
++
++            let output = cmd
++                .output()
++                .await
++                .context("Failed to spawn whisper-cli — is whisper.cpp installed?")?;
++
++            if output.status.success() {
++                break;
++            }
+             tracing::warn!(
+-                "whisper-cli exited with {:?}: {}",
++                "whisper-cli{} exited with {:?}: {}",
++                if no_gpu { " (CPU)" } else { "" },
+                 output.status.code(),
+                 String::from_utf8_lossy(&output.stderr).trim()
+             );
++            tokio::fs::remove_file(&txt_path).await.ok();
++            if !no_gpu {
++                tracing::info!("Retrying whisper-cli on the CPU (--no-gpu)");
++            }
+         }
+ 
+-        // whisper-cli writes output to <wav_path>.txt
+-        let txt_path = format!("{}.txt", wav_path);
+-
+         let raw = tokio::fs::read_to_string(&txt_path)
+             .await
+             .unwrap_or_default();
+diff --git a/src/tts/piper.rs b/src/tts/piper.rs
+index 3a0a936..78049a7 100755
+--- a/src/tts/piper.rs
++++ b/src/tts/piper.rs
+@@ -59,7 +59,16 @@ pub async fn synthesize_to_file(text: &str, config: &crate::config::LunaConfig)
+ import os, sys
+ from kokoro_onnx import Kokoro
+ import soundfile as sf
+-kokoro = Kokoro('{model}', '{voices_bin}')
++# Use the GPU when onnxruntime has a GPU provider (onnxruntime-gpu / ROCm),
++# otherwise the CPU. Falls back to the plain constructor on older kokoro-onnx.
++try:
++    import onnxruntime as ort
++    avail = ort.get_available_providers()
++    providers = [p for p in ('CUDAExecutionProvider', 'ROCMExecutionProvider') if p in avail] + ['CPUExecutionProvider']
++    sess = ort.InferenceSession('{model}', providers=providers)
++    kokoro = Kokoro.from_session(sess, '{voices_bin}')
++except Exception:
++    kokoro = Kokoro('{model}', '{voices_bin}')
+ text = os.environ['LUNA_TTS_TEXT']
+ samples, sr = kokoro.create(text, voice='{voice}', speed=1.0, lang='en-us')
+ sf.write('{out}', samples, sr)

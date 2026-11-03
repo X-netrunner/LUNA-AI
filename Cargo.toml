@@ -1,0 +1,95 @@
+[package]
+name = "luna"
+version = "0.1.0"
+edition = "2021"
+
+# ── Feature flags ─────────────────────────────────────────────────────────────
+# voice-basic  = Piper only (CPU, always fast)
+# voice-jinx   = Piper → RVC (CPU + GPU, sounds like Jinx)
+[features]
+default = ["voice-basic"]
+voice-basic = []
+voice-jinx  = []
+
+# ── Core dependencies ─────────────────────────────────────────────────────────
+[dependencies]
+
+# Async runtime — every concurrent thing in Luna runs through tokio
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# HTTP client — streams Ollama responses chunk by chunk
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Serialization — tool definitions, Ollama payloads, config file
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Browser automation — native CDP client, zero-copy, async
+chromiumoxide = { version = "0.8", features = ["tokio"] }
+chromiumoxide_cdp = "0.8"
+
+# Config file — luna.toml: model name, voice mode, wake word, etc.
+toml = "0.8"
+toml_edit = "0.22"  # comment-preserving config rewrites (set_debug etc.)
+
+# CLI args — things like `luna --voice jinx` or `luna --no-voice`
+clap = { version = "=4.4.18", features = ["derive"] }
+
+# Interactive input — line editing + persistent history (up/down arrows)
+rustyline = { version = "14", features = ["with-file-history"] }
+
+# Error handling
+anyhow = "1"
+
+# Logging — tracing is async-aware unlike log/env_logger
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Audio capture — mic input, works with pipewire on Arch
+cpal = "0.15"
+
+# Audio playback — plays wav output from Piper/RVC
+rodio = { version = "0.19", features = ["wav"] }
+hound = "3.5"   # wav file writing for STT input
+
+# Utility
+dirs   = "5"         # finds ~/.config/luna, ~/.local/share/luna, etc.
+uuid   = { version = "1", features = ["v4"] }
+rpassword = "7"             # sudo password prompt via /dev/tty
+chrono = { version = "0.4", features = ["serde"] }
+
+# OS keyring (freedesktop Secret Service) — stores API keys encrypted
+# instead of plaintext in luna.toml
+keyring = { version = "3", features = ["sync-secret-service"] }
+base64 = "0.22"     # Spotify Basic-auth header for OAuth token requests
+sha2 = "0.10"       # PKCE S256 code_challenge for Spotify OAuth
+# Ed25519 sign/verify for the developer gate on the security tier's no-refusal
+# mode. Already in the tree via `keyring`, so this costs no extra compilation.
+# Ed25519 rather than RSA: the only pure-Rust RSA crate published is a release
+# candidate, and the gate only needs "only the key holder can produce a
+# verifying signature" — see src/unlock.rs.
+ring = "0.17"
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+
+# ── Desktop overlay ("she's listening" indicator) — pure Rust Wayland ─────────
+# wlr-layer-shell overlay surface + manual shared-memory buffers + software
+# text so the listening/thinking indicator is drawn by Luna herself with no
+# extra window, no compositor hacks, and no Python.
+wayland-client = "0.31"
+wayland-protocols = "0.32"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+memmap2 = "0.9"
+fontdue = "0.9"
+
+
+# ── Build profiles ────────────────────────────────────────────────────────────
+[profile.dev]
+opt-level = 1        # faster to compile, still debuggable
+
+[profile.release]
+opt-level = 3
+lto = true           # link-time optimization — meaningful speed gains
+codegen-units = 1    # slower compile, better binary
+strip = true         # strip debug symbols from release binary

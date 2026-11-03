@@ -1,0 +1,179 @@
+//! stt/whisper.rs — Speech to text via whisper-cli subprocess
+//!
+//! Calls whisper-cli as a subprocess, reads the output txt file.
+//! Avoids all CUDA compilation issues with whisper-rs bindings.
+
+use anyhow::{Context, Result};
+
+// Whisper hallucinates these tokens on silence/noise — filter them out.
+// Keep this list growing if you see new ones in logs.
+const HALLUCINATION_PATTERNS: &[&str] = &[
+    "[music]",
+    "[silence]",
+    "[blank_audio]",
+    "(music)",
+    "(silence)",
+    "[ music ]",
+    "[ silence ]",
+    "thank you.",
+    "thanks for watching",
+    "thanks for watching.",
+    "please subscribe",
+];
+
+#[derive(Clone)]
+pub struct WhisperStt {
+    model_path: String,
+    /// Initial prompt fed to Whisper — massively helps with accents and
+    /// domain-specific words. Think of it as priming the decoder.
+    /// Set to None to disable.
+    initial_prompt: Option<String>,
+}
+
+impl WhisperStt {
+    /// Create with a custom initial prompt (or None to disable)
+    pub fn with_prompt(model_path: &str, prompt: Option<String>) -> Self {
+        Self {
+            model_path: model_path.to_string(),
+            initial_prompt: prompt,
+        }
+    }
+
+    /// Transcribe a wav file to text using whisper-cli
+    pub async fn transcribe(&self, wav_path: &str) -> Result<String> {
+        tracing::debug!("Transcribing: {}", wav_path);
+
+        let vad_model = std::path::Path::new(&self.model_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("ggml-silero-v6.2.0.bin");
+
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get().to_string())
+            .unwrap_or_else(|_| "4".to_string());
+
+        // whisper-cli writes output to <wav_path>.txt
+        let txt_path = format!("{}.txt", wav_path);
+
+        // whisper.cpp uses the GPU on its own when its ggml has a GPU backend.
+        // If that run fails (e.g. CUDA out of memory because Ollama holds the
+        // card), retry once on the CPU so voice input still works.
+        for no_gpu in [false, true] {
+            let mut cmd = tokio::process::Command::new("whisper-cli");
+            cmd.args([
+                "--model",
+                &self.model_path,
+                "--file",
+                wav_path,
+                "--output-txt",
+                "--language",
+                "en",
+                // Best of N beam search — improves accuracy at small cost
+                "--best-of",
+                "5",
+                "--beam-size",
+                "5",
+                // Use all CPU cores — faster transcription, less clipping
+                "--threads",
+                &threads,
+                // Silero VAD trims silence so Whisper doesn't hallucinate
+                // on quiet frames before/after actual speech.
+                "--vad",
+                "--vad-model",
+                vad_model.to_str().unwrap_or_default(),
+                // No timestamps — cleaner output for assistant use
+                "--no-timestamps",
+            ]);
+
+            if no_gpu {
+                cmd.arg("--no-gpu");
+            }
+
+            // Add initial prompt if set — this is the #1 knob for accent adaptation
+            if let Some(ref prompt) = self.initial_prompt {
+                cmd.args(["--prompt", prompt]);
+            }
+
+            let output = cmd
+                .output()
+                .await
+                .context("Failed to spawn whisper-cli — is whisper.cpp installed?")?;
+
+            if output.status.success() {
+                break;
+            }
+            tracing::warn!(
+                "whisper-cli{} exited with {:?}: {}",
+                if no_gpu { " (CPU)" } else { "" },
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            tokio::fs::remove_file(&txt_path).await.ok();
+            if !no_gpu {
+                tracing::info!("Retrying whisper-cli on the CPU (--no-gpu)");
+            }
+        }
+
+        let raw = tokio::fs::read_to_string(&txt_path)
+            .await
+            .unwrap_or_default();
+
+        // Clean up temp file
+        tokio::fs::remove_file(&txt_path).await.ok();
+
+        let text = clean_transcript(&raw);
+        if text.is_empty() {
+            tracing::debug!("Transcription empty (silence or hallucination filtered)");
+        } else {
+            tracing::info!("Transcribed: \"{}\"", text);
+        }
+
+        Ok(text)
+    }
+}
+
+/// Strip whisper hallucinations and normalise whitespace.
+fn clean_transcript(raw: &str) -> String {
+    let lower = raw.trim().to_lowercase();
+
+    // Exact-match hallucination check
+    if HALLUCINATION_PATTERNS.iter().any(|p| lower == *p) {
+        return String::new();
+    }
+
+    // Partial-match: if the whole transcript is essentially just a hallucination
+    // token (with maybe minor punctuation), drop it
+    let stripped = lower
+        .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+        .to_string();
+    if HALLUCINATION_PATTERNS
+        .iter()
+        .any(|p| stripped == p.trim_matches(|c: char| c.is_ascii_punctuation()))
+    {
+        return String::new();
+    }
+
+    raw.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_music_hallucination() {
+        assert_eq!(clean_transcript("[Music]"), "");
+        assert_eq!(clean_transcript("[SILENCE]"), "");
+        assert_eq!(clean_transcript("  [blank_audio]  "), "");
+        assert_eq!(clean_transcript("Thank you."), "");
+    }
+
+    #[test]
+    fn keeps_real_speech() {
+        assert_eq!(
+            clean_transcript("Hey Luna, what time is it?"),
+            "Hey Luna, what time is it?"
+        );
+        assert_eq!(clean_transcript("Open the terminal"), "Open the terminal");
+    }
+}

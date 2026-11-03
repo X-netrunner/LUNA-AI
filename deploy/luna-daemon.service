@@ -1,0 +1,25 @@
+# Luna background daemon — systemd *user* service
+#
+# Install:
+#   cargo build --release
+#   install -Dm755 target/release/luna ~/.local/bin/luna
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/luna-daemon.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now luna-daemon
+#
+# Logs:
+#   journalctl --user -u luna-daemon -f   (also ~/.local/share/luna/session.log)
+
+[Unit]
+Description=Luna background daemon (process/disk watchdog, reminders, learning)
+Wants=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/luna --daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
