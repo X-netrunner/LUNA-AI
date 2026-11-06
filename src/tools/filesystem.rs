@@ -16,6 +16,31 @@ const READ_MAX_LINES: usize = 1500;
 /// range is given, the slice is prefixed with a `lines X-Y of Z` header so the
 /// model knows where it is in the file.
 pub async fn read_file(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
+    // A folder used to fail with "Is a directory", and the model then guessed at file names (or went looking in other places).
+    // Now it gets the listing, newest first, and can read the right file next.
+    if tokio::fs::metadata(path).await.map(|m| m.is_dir()).unwrap_or(false) {
+        let mut rd = tokio::fs::read_dir(path)
+            .await
+            .with_context(|| format!("Failed to read folder: {}", path))?;
+        let mut items: Vec<(std::time::SystemTime, String, bool)> = Vec::new();
+        while let Some(e) = rd.next_entry().await? {
+            let meta = tokio::fs::metadata(e.path()).await.ok();
+            let when = meta.as_ref().and_then(|m| m.modified().ok()).unwrap_or(std::time::UNIX_EPOCH);
+            let is_dir = meta.map(|m| m.is_dir()).unwrap_or(false);
+            items.push((when, e.file_name().to_string_lossy().to_string(), is_dir));
+        }
+        items.sort_by(|a, b| b.0.cmp(&a.0));
+        let list: Vec<String> = items
+            .iter()
+            .take(200)
+            .map(|(_, n, d)| if *d { format!("{}/", n) } else { n.clone() })
+            .collect();
+        return Ok(format!(
+            "[{path} is a folder with {} entries, newest first; read_file one of them]\n{}",
+            items.len(),
+            list.join("\n")
+        ));
+    }
     let body = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("Failed to read: {}", path))?;

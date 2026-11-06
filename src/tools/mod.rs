@@ -861,7 +861,7 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                               (pacman -Syu), ClamAV antivirus, rkhunter rootkit check, UFW firewall, \
                               Lynis audit, monthly AIDE integrity, and home-directory backup. \
                               Use for 'run a security check', 'is my system secure', 'run the weekly \
-                              safety scan', 'how did the last safety check go'. It can take up to an \
+                              safety scan', 'how did the last safety check go', 'summarise the safety check logs'. It can take up to an \
                               hour (or more for the monthly full home scan). An 'attention needed' \
                               result means review the listed problems. Do NOT script it by hand with \
                               run_shell — use this tool.".into(),
@@ -870,9 +870,11 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["run", "status"],
+                            "enum": ["run", "status", "report"],
                             "description": "run = execute the full check now (status then depends on what it found), \
-                                           status = report how the last check went without starting a new one"
+                                           status = report how the last check went without starting a new one, \
+                                           report = the findings: the text of the newest safety-check log (use this to summarise or \
+                                           explain the logs / findings / results of a safety check; do not search for the file)"
                         },
                         "mode": {
                             "type": "string",
@@ -1618,7 +1620,7 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
             let result = shell::run_command(
                 &format!(
-                    "find '{}' -name '{}' 2>/dev/null | head -10",
+                    "find -L '{}' -name '{}' 2>/dev/null | head -10",
                     expanded, name
                 ),
                 sudo_pass,
@@ -2373,6 +2375,7 @@ echo "STATUS=$STATUS"
                         }
                     }
                 }
+                "report" => Ok(crate::tools::safety::report()),
                 _ => Ok(crate::tools::safety::status()),
             }
         }

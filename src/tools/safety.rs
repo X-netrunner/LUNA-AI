@@ -29,16 +29,56 @@ fn log_dir() -> std::path::PathBuf {
         .join("logs/safety_check")
 }
 
+/// Every place a safety-check log can be: `~/logs` is a symlink to /var/log/halcyon on a Halcyon install (the check runs as root),
+/// and without root the check falls back to the user's own state folder.
+fn log_dirs() -> Vec<std::path::PathBuf> {
+    let home = dirs::home_dir().unwrap_or_default();
+    vec![
+        log_dir(),
+        std::path::PathBuf::from("/var/log/halcyon/safety_check"),
+        home.join(".local/state/halcyon/safety_check"),
+    ]
+}
+
 fn newest_log() -> Option<std::path::PathBuf> {
-    let dir = log_dir();
-    let mut logs: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("log"))
-        .collect();
+    let mut logs: Vec<std::path::PathBuf> = Vec::new();
+    for dir in log_dirs() {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            logs.extend(
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("log")),
+            );
+        }
+    }
     logs.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH));
     logs.pop()
+}
+
+/// The findings: the newest log's LAST run (a day's log holds every run of that day), so "summarise the safety check logs" is answered
+/// from the real text instead of the model hunting for a file. Long runs keep their end (the verdicts come last).
+pub fn report() -> String {
+    let Some(log) = newest_log() else {
+        return "No safety check log found in ~/logs/safety_check/ (also looked in /var/log/halcyon/safety_check and \
+                ~/.local/state/halcyon/safety_check). Run the safety check first."
+            .into();
+    };
+    let raw = match std::fs::read_to_string(&log) {
+        Ok(r) => r,
+        Err(e) => return format!("Could not read {}: {}", log.display(), e),
+    };
+    let lines: Vec<&str> = raw.lines().collect();
+    let start = lines.iter().rposition(|l| l.contains("Safety Check started")).unwrap_or(0);
+    let run = lines[start..].join("\n");
+    const MAX: usize = 6000;
+    let total = run.chars().count();
+    let body = if total > MAX {
+        let tail: String = run.chars().skip(total - MAX).collect();
+        format!("[the start of this run is cut; showing the last {} characters]\n{}", MAX, tail)
+    } else {
+        run
+    };
+    format!("Safety check log: {}\n{}", log.display(), body)
 }
 
 /// Run the script. Returns a digest of the freshest log so the reply is

@@ -220,7 +220,7 @@ fn triggers(name: &str) -> &'static [&'static str] {
         ],
         "system_update" => &["system update", "update the system", "upgrade the system", "update packages"],
         "backup" => &["backup", "back up", "snapshot"],
-        "run_safety_check" => &["safety check", "health check", "are you ok", "self check"],
+        "run_safety_check" => &["safety check", "safety_check", "safety log", "health check", "are you ok", "self check"],
         "index_system" => &["index my", "index the system", "build an index"],
         "learn_topic" => &["learn about", "study up on", "teach yourself about"],
         "set_debug" => &["debug mode", "turn on debug", "turn off debug"],
