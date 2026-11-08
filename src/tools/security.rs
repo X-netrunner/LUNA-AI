@@ -95,12 +95,12 @@ pub async fn decode_payload(data: &str, encoding: &str, sudo_pass: Option<&str>)
         "base64" => format!("printf '%s' '{}' | base64 -d 2>&1", safe_data),
         "hex" => format!("printf '%s' '{}' | xxd -r -p 2>&1", safe_data),
         "url" => format!(
-            "python3 -c \"import urllib.parse, sys; print(urllib.parse.unquote('{}'))\"",
+            "printf '%s' '{}' | python3 -c \"import urllib.parse, sys; print(urllib.parse.unquote(sys.stdin.read()))\"",
             safe_data
         ),
         "rot13" => format!("printf '%s' '{}' | tr 'A-Za-z' 'N-ZA-Mn-za-m'", safe_data),
         "binary" => format!(
-            "python3 -c \"print(''.join(chr(int(b,2)) for b in '{}'.split()))\"",
+            "printf '%s' '{}' | python3 -c \"import sys; print(''.join(chr(int(b,2)) for b in sys.stdin.read().split()))\"",
             safe_data
         ),
         "auto" => {
@@ -1178,5 +1178,15 @@ mod allowlist_scope_tests {
             !cfg.external.is_capability_gated("run_shell"),
             "run_shell is capability-gated: update the note above"
         );
+    }
+}
+
+#[cfg(test)]
+mod decoder_regression_tests {
+    #[tokio::test]
+    async fn url_decoder_treats_shell_and_python_syntax_as_data() {
+        let payload = "$(printf INJECTED) \" ' %41";
+        let result = super::decode_payload(payload, "url", None).await.unwrap();
+        assert!(result.contains("$(printf INJECTED) \" ' A"));
     }
 }
