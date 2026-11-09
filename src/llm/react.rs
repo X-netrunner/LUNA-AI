@@ -198,6 +198,7 @@ impl<'a> ReactLoop<'a> {
         let prev = memory.last_exchange();
         let mut trace: Vec<Message> = Vec::new();
         let (mut answer, think, flag) = self.run_loop(user_input, memory, &effective, &mut trace).await?;
+        crate::agent::lessons::observe(&self.config, &effective, &trace);
         crate::agent::lessons::after_turn(
             &self.config,
             crate::agent::lessons::exchange_for(user_input, &answer, &trace, prev),
@@ -279,6 +280,7 @@ impl<'a> ReactLoop<'a> {
         // not appear in the file, followed by the identical retry. One nudge to
         // re-read, then the loop guard owns it.
         let mut edit_retried = false;
+        let mut validation_retries = 0u8;
         // What this turn actually called and got back, so the final answer can be
         // checked against it rather than against the shape of its prose.
         let mut receipt: Vec<Receipt> = Vec::new();
@@ -561,6 +563,11 @@ impl<'a> ReactLoop<'a> {
                         // model is now making calls that fail. Answer from the
                         // work that landed instead of spending the remaining
                         // iterations on a flail.
+                        if call_failed && push_validation_correction(
+                            &tool_name, &tool_result, &mut validation_retries, &mut turn_messages,
+                        ) {
+                            continue;
+                        }
                         if call_failed && had_success {
                             tracing::warn!(
                                 "Stopping turn: '{}' failed after an earlier success",
@@ -999,6 +1006,11 @@ impl<'a> ReactLoop<'a> {
                         // answer from what succeeded instead of burning the
                         // remaining iterations. This is the path the 8B security
                         // model actually takes (it emits native tool_calls).
+                        if call_failed && push_validation_correction(
+                            &tool_name, &tool_result, &mut validation_retries, &mut turn_messages,
+                        ) {
+                            continue 'react;
+                        }
                         if call_failed && had_success {
                             tracing::warn!(
                                 "Stopping turn: '{}' failed after an earlier success",
@@ -2255,6 +2267,22 @@ fn push_write_correction(
         "Correction: {intro}. {remedy} Do not tell the user the change is done until \
          the tool call has succeeded."
     )));
+    true
+}
+
+/// Bounded recovery for parser rejection or a concurrent edit, even after an earlier successful read.
+fn push_validation_correction(tool: &str, result: &str, retries: &mut u8, messages: &mut Vec<Message>) -> bool {
+    if *retries >= 2 || !matches!(tool, "write_file" | "edit_file") {
+        return false;
+    }
+    if !(result.contains("not written") && result.contains("does not parse"))
+        && !result.contains("File changed during editing") {
+        return false;
+    }
+    *retries += 1;
+    messages.push(Message::tool(
+        "The proposed change was not saved. Read the current file if it exists, inspect the parser error, and correct the change. Preserve unrelated content. Do not repeat the same failed arguments or claim completion. After saving, run focused project checks."
+    ));
     true
 }
 
@@ -5967,3 +5995,20 @@ looking at first.";
     }
 }
 
+
+#[cfg(test)]
+mod validation_recovery_tests {
+    use super::*;
+    #[test]
+    fn parser_failures_get_two_corrective_attempts_only() {
+        let mut retries = 0;
+        let mut messages = Vec::new();
+        let error = "Error: File was not written: generated content does not parse";
+        assert!(!push_validation_correction("run_shell", error, &mut retries, &mut messages));
+        assert!(!push_validation_correction("write_file", "permission denied", &mut retries, &mut messages));
+        assert!(push_validation_correction("write_file", error, &mut retries, &mut messages));
+        assert!(push_validation_correction("edit_file", "File changed during editing", &mut retries, &mut messages));
+        assert!(!push_validation_correction("edit_file", error, &mut retries, &mut messages));
+        assert_eq!(messages.len(), 2);
+    }
+}

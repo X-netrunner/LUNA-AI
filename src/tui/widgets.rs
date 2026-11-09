@@ -182,9 +182,9 @@ impl<'a> Widget for ChatHistory<'a> {
         block.render(area, buf);
 
         if self.messages.is_empty() {
-            let empty = Paragraph::new("No messages yet. Type a message or :config to edit settings.")
+            let empty = Paragraph::new("What would you like to do?\n\nTry: Explain this project · Help debug an error\n\nEnter sends your message · F1 shows shortcuts")
                 .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Center);
+                .alignment(Alignment::Center).wrap(Wrap { trim: false });
             empty.render(inner, buf);
             return;
         }
@@ -201,22 +201,41 @@ impl<'a> Widget for ChatHistory<'a> {
 
 pub struct InputLine<'a> {
     input: &'a str,
+    cursor: usize,
 }
 
 impl<'a> InputLine<'a> {
     pub fn new(input: &'a str) -> Self {
-        Self { input }
+        Self { input, cursor: input.len() }
     }
 
-    pub fn cursor_area(area: Rect, cursor_pos: usize, _input: &str) -> Option<(u16, u16)> {
-        let x = area.x + 1 + cursor_pos as u16;
-        let y = area.y + 1;
-        if x < area.x + area.width - 1 && y < area.y + area.height - 1 {
-            Some((x, y))
-        } else {
-            None
-        }
+    pub fn with_cursor(mut self, cursor: usize) -> Self {
+        self.cursor = cursor;
+        self
     }
+
+    fn viewport(input: &str, cursor: usize, width: usize) -> (String, usize) {
+        let cursor = cursor.min(input.len());
+        let before: String = input.char_indices().take_while(|(i, _)| *i < cursor)
+            .map(|(_, c)| c).collect();
+        let column = Line::from(before.as_str()).width();
+        let skip = column.saturating_sub(width.saturating_sub(1));
+        let mut removed = 0;
+        let visible: String = input.chars().skip_while(|c| {
+            if removed < skip {
+                removed += Span::raw(c.to_string()).width();
+                true
+            } else { false }
+        }).collect();
+        (visible, column.saturating_sub(removed))
+    }
+
+    pub fn cursor_area(area: Rect, cursor_pos: usize, input: &str) -> Option<(u16, u16)> {
+        if area.width < 3 || area.height < 3 { return None; }
+        let (_, column) = Self::viewport(input, cursor_pos, usize::from(area.width - 2));
+        Some((area.x + 1 + column as u16, area.y + 1))
+    }
+
 }
 
 impl<'a> Widget for InputLine<'a> {
@@ -225,19 +244,19 @@ impl<'a> Widget for InputLine<'a> {
             .title(" ❯ Prompt ")
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Rgb(80, 200, 140)));
+            .border_style(Style::default().fg(Color::Rgb(166, 227, 161)));
 
         let inner = block.inner(area);
         block.render(area, buf);
 
         if self.input.is_empty() {
-            let placeholder = Paragraph::new("Type a message or :config to edit luna.toml…")
-                .style(Style::default().fg(Color::Rgb(90, 90, 90)));
+            let placeholder = Paragraph::new("Ask anything…  Enter send · F1 help · :config settings")
+                .style(Style::default().fg(Color::Rgb(166, 173, 200)));
             placeholder.render(inner, buf);
         } else {
-            let paragraph = Paragraph::new(self.input)
-                .style(Style::default().fg(Color::White))
-                .wrap(Wrap { trim: false });
+            let (visible, _) = Self::viewport(self.input, self.cursor, inner.width as usize);
+            let paragraph = Paragraph::new(visible)
+                .style(Style::default().fg(Color::Rgb(205, 214, 244)));
             paragraph.render(inner, buf);
         }
     }
@@ -303,7 +322,7 @@ impl<'a> Widget for DebugPanel<'a> {
         if self.logs.is_empty() {
             let empty = Paragraph::new("No system logs.")
                 .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Center);
+                .alignment(Alignment::Center).wrap(Wrap { trim: false });
             empty.render(inner, buf);
             return;
         }
@@ -399,7 +418,7 @@ pub struct ShortcutsBar;
 impl Widget for ShortcutsBar {
     fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let spans = vec![
-            Span::styled(" [F2] ", Style::default().fg(Color::Rgb(80, 200, 140)).add_modifier(Modifier::BOLD)),
+            Span::styled(" [F2] ", Style::default().fg(Color::Rgb(166, 227, 161)).add_modifier(Modifier::BOLD)),
             Span::styled("Config  ", Style::default().fg(Color::Rgb(160, 160, 160))),
             Span::styled(" [Tab] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::styled("Switch Focus  ", Style::default().fg(Color::Rgb(160, 160, 160))),
@@ -543,7 +562,7 @@ impl<'a> Widget for ConfigEditorModal<'a> {
             .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Rgb(80, 200, 140)).add_modifier(Modifier::BOLD));
+            .border_style(Style::default().fg(Color::Rgb(166, 227, 161)).add_modifier(Modifier::BOLD));
 
         let inner = block.inner(area);
         block.render(area, buf);
@@ -681,7 +700,7 @@ impl<'a> Widget for SettingsMenuModal<'a> {
             .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Rgb(80, 200, 140)).add_modifier(Modifier::BOLD));
+            .border_style(Style::default().fg(Color::Rgb(166, 227, 161)).add_modifier(Modifier::BOLD));
 
         let inner = block.inner(area);
         block.render(area, buf);
@@ -771,5 +790,17 @@ impl<'a> Widget for SettingsMenuModal<'a> {
 
         let paragraph = Paragraph::new(lines);
         paragraph.render(inner, buf);
+    }
+}
+#[cfg(test)]
+mod prompt_viewport_tests {
+    use super::*;
+    #[test]
+    fn cursor_tracks_unicode_and_long_input() {
+        let area = Rect::new(0, 0, 8, 3);
+        assert_eq!(InputLine::cursor_area(area, "界".len(), "界"), Some((3, 1)));
+        assert_eq!(InputLine::cursor_area(area, 10, "abcdefghij"), Some((6, 1)));
+        assert_eq!(InputLine::viewport("abcdefghij", 10, 6).0, "fghij");
+        assert_eq!(InputLine::cursor_area(Rect::new(0, 0, 1, 1), 0, ""), None);
     }
 }

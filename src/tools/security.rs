@@ -7,6 +7,20 @@
 use super::shell;
 use anyhow::Result;
 
+/// A failed tool must reach the agent as an error, including any partial evidence.
+fn check_command_result(result: &shell::ShellOutput) -> Result<()> {
+    if result.exit_code != 0 {
+        let state = match result.exit_code {
+            124 => "timed out; results may be incomplete",
+            127 => "required command is missing",
+            _ => "failed",
+        };
+        anyhow::bail!("Security command {state} (exit {}). stdout: {} stderr: {}",
+            result.exit_code, result.stdout.trim(), result.stderr.trim());
+    }
+    Ok(())
+}
+
 // ── nmap ─────────────────────────────────────────────────────────────────────
 
 pub async fn nmap_scan(
@@ -27,7 +41,7 @@ pub async fn nmap_scan(
         "full-ports" => "-T4 -p- -sV -sC",
         "os" => "-T4 -O",
         "udp" => "-T4 -sU --top-ports 20",
-        _ => "-T4 -F",
+        _ => anyhow::bail!("Unknown scan type: {scan_type}; use quick, full, ports, full-ports, os or udp"),
     };
 
     // Hard cap of 3 minutes regardless of scan type — protects the agent
@@ -38,6 +52,7 @@ pub async fn nmap_scan(
     );
 
     let result = shell::run_command(&cmd, sudo_pass).await?;
+    check_command_result(&result)?;
     if result.stdout.trim().is_empty() {
         Ok(format!(
             "nmap produced no output. stderr: {}",
@@ -60,24 +75,25 @@ pub async fn analyze_pcap(path: &str, mode: &str, sudo_pass: Option<&str>) -> Re
 
     let cmd = match mode {
         "summary"   => format!("timeout 60 capinfos '{}' 2>&1", safe_path),
-        "talkers"   => format!("timeout 60 tshark -q -z conv,ip -r '{}' 2>&1 | head -50", safe_path),
-        "protocols" => format!("timeout 60 tshark -q -z io,phs -r '{}' 2>&1 | head -60", safe_path),
+        "talkers"   => format!("set -o pipefail; timeout 60 tshark -q -z conv,ip -r '{}' 2>&1 | sed -n '1,50p'", safe_path),
+        "protocols" => format!("set -o pipefail; timeout 60 tshark -q -z io,phs -r '{}' 2>&1 | sed -n '1,60p'", safe_path),
         "http"      => format!(
-            "timeout 60 tshark -r '{}' -Y http.request -T fields -e ip.src -e http.host -e http.request.method -e http.request.uri 2>&1 | head -50",
+            "set -o pipefail; timeout 60 tshark -r '{}' -Y http.request -T fields -e ip.src -e http.host -e http.request.method -e http.request.uri 2>&1 | sed -n '1,50p'",
             safe_path
         ),
         "dns"       => format!(
-            "timeout 60 tshark -r '{}' -Y dns.flags.response==0 -T fields -e ip.src -e dns.qry.name 2>&1 | sort -u | head -50",
+            "set -o pipefail; timeout 60 tshark -r '{}' -Y dns.flags.response==0 -T fields -e ip.src -e dns.qry.name 2>&1 | sort -u | sed -n '1,50p'",
             safe_path
         ),
         "creds"     => format!(
-            "timeout 60 tshark -r '{}' -Y 'http.request.method==POST || ftp.request.command==\"PASS\" || ftp.request.command==\"USER\"' -T fields -e frame.number -e ip.src -e _ws.col.Protocol 2>&1 | head -30",
+            "set -o pipefail; timeout 60 tshark -r '{}' -Y 'http.request.method==POST || ftp.request.command==\"PASS\" || ftp.request.command==\"USER\"' -T fields -e frame.number -e ip.src -e _ws.col.Protocol 2>&1 | sed -n '1,30p'",
             safe_path
         ),
         _ => format!("timeout 60 capinfos '{}' 2>&1", safe_path),
     };
 
     let result = shell::run_command(&cmd, sudo_pass).await?;
+    check_command_result(&result)?;
     let out = result.stdout.trim();
     if out.is_empty() {
         Ok(format!("No results. stderr: {}", result.stderr.trim()))
@@ -116,6 +132,7 @@ pub async fn decode_payload(data: &str, encoding: &str, sudo_pass: Option<&str>)
     };
 
     let result = shell::run_command(&cmd, sudo_pass).await?;
+    check_command_result(&result)?;
     let out = if result.stdout.trim().is_empty() {
         &result.stderr
     } else {
@@ -149,6 +166,7 @@ pub async fn hash_file(path: &str, algo: &str, sudo_pass: Option<&str>) -> Resul
     };
 
     let result = shell::run_command(&cmd, sudo_pass).await?;
+    check_command_result(&result)?;
     Ok(result.stdout.trim().to_string())
 }
 
@@ -160,12 +178,13 @@ pub async fn dns_lookup(target: &str, mode: &str, sudo_pass: Option<&str>) -> Re
     let cmd = match mode {
         "dns" => format!("timeout 15 dig +short '{}' ANY 2>&1", safe_target),
         "reverse" => format!("timeout 15 dig +short -x '{}' 2>&1", safe_target),
-        "whois" => format!("timeout 20 whois '{}' 2>&1 | head -60", safe_target),
+        "whois" => format!("set -o pipefail; timeout 20 whois '{}' 2>&1 | sed -n '1,60p'", safe_target),
         "mx" => format!("timeout 15 dig +short '{}' MX 2>&1", safe_target),
         _ => format!("timeout 15 dig +short '{}' 2>&1", safe_target),
     };
 
     let result = shell::run_command(&cmd, sudo_pass).await?;
+    check_command_result(&result)?;
     let out = result.stdout.trim();
     if out.is_empty() {
         Ok("No results found".to_string())
@@ -1188,5 +1207,20 @@ mod decoder_regression_tests {
         let payload = "$(printf INJECTED) \" ' %41";
         let result = super::decode_payload(payload, "url", None).await.unwrap();
         assert!(result.contains("$(printf INJECTED) \" ' A"));
+    }
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+    #[test]
+    fn failed_scans_are_not_successful_findings() {
+        for code in [1, 124, 127] {
+            let result = shell::ShellOutput { stdout: "partial evidence".into(), stderr: "failure detail".into(), exit_code: code };
+            let error = check_command_result(&result).unwrap_err().to_string();
+            assert!(error.contains("partial evidence") && error.contains("failure detail"));
+            if code == 124 { assert!(error.contains("incomplete")); }
+        }
+        assert!(check_command_result(&shell::ShellOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }).is_ok());
     }
 }

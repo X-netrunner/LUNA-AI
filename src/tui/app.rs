@@ -2537,7 +2537,7 @@ impl TuiApp {
         f.render_widget(debug, mid[1]);
 
         // Input line
-        let input = InputLine::new(&self.input);
+        let input = InputLine::new(&self.input).with_cursor(self.cursor_pos);
         f.render_widget(input, outer[2]);
 
         // Shortcuts bar (rendered only when visible)

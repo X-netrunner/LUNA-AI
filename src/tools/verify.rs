@@ -60,101 +60,90 @@ fn checker_for(path: &Path) -> Option<&'static str> {
 /// Writes to a scratch file rather than the real path: this runs *before* the
 /// write is committed, and a checker that truncates the user's file to test it
 /// would be worse than the bug it is looking for.
-fn verify_content(path: &Path, content: &str, checker: &str) -> Verdict {
-    let scratch = std::env::temp_dir().join(format!(
-        "luna_verify_{}_{}{}",
-        std::process::id(),
-        // Distinct per call, so two checks cannot collide.
-        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| format!(".{e}"))
-            .unwrap_or_default()
-    ));
-    if std::fs::write(&scratch, content).is_err() {
-        return Verdict::Unverifiable;
+fn verify_content(path: &Path, content: &str, _checker: &str) -> Verdict {
+    match syntax_check(&path.to_string_lossy(), content) {
+        SyntaxCheck::Passed => Verdict::Valid,
+        SyntaxCheck::Failed(_) => Verdict::Invalid,
+        SyntaxCheck::Unavailable(_) => Verdict::Unverifiable,
     }
-    let mut cmd = match checker {
-        "python3 -m py_compile" => {
-            let mut c = std::process::Command::new("python3");
-            c.args(["-m", "py_compile"]).arg(&scratch);
-            c
-        }
-        "bash -n" => {
-            let mut c = std::process::Command::new("bash");
-            c.args(["-n"]).arg(&scratch);
-            c
-        }
-        _ => return Verdict::Unverifiable,
-    };
-    let verdict = match cmd.output() {
-        Ok(o) if o.status.success() => Verdict::Valid,
-        Ok(_) => Verdict::Invalid,
-        Err(_) => Verdict::Unverifiable,
-    };
-    std::fs::remove_file(&scratch).ok();
-    verdict
 }
 
-static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[derive(Debug, PartialEq)]
+pub enum SyntaxCheck {
+    Passed,
+    Failed(String),
+    Unavailable(String),
+}
 
-/// A non-executing syntax check for a freshly written source file.
-///
-/// Separate from the escape-repair `checker_for` above, which is deliberately
-/// conservative. This exists for the `write_file` path: a small local model
-/// often emits code that does not even parse and then reports the file as done.
-/// Each checker here is syntax-only and runs NOTHING from the file — `py_compile`
-/// compiles without running, `node --check` and `ruby -c` parse without
-/// executing, `luac -p` and `php -l` only lint — so it is safe to run on any
-/// content, including security-tier scripts.
-///
-/// Returns the checker's complaint when the content does not parse, or `None`
-/// when it parses, has no checker, or the checker is not installed (absence of a
-/// tool must never read as "broken").
-pub fn syntax_warning(path: &str, content: &str) -> Option<String> {
-    let p = Path::new(path);
-    let (program, args): (&str, &[&str]) = match p.extension().and_then(|e| e.to_str()) {
-        Some("py") => ("python3", &["-m", "py_compile"]),
-        Some("js" | "mjs" | "cjs") => ("node", &["--check"]),
-        Some("lua") => ("luac", &["-p"]),
-        Some("rb") => ("ruby", &["-c"]),
-        Some("php") => ("php", &["-l"]),
-        _ => return None,
-    };
-    let scratch = std::env::temp_dir().join(format!(
-        "luna_syntax_{}_{}{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        p.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| format!(".{e}"))
-            .unwrap_or_default()
-    ));
-    if std::fs::write(&scratch, content).is_err() {
-        return None;
-    }
-    let out = std::process::Command::new(program)
-        .args(args)
-        .arg(&scratch)
-        .output();
-    std::fs::remove_file(&scratch).ok();
-    match out {
-        Ok(o) if o.status.success() => None,
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            let raw = if stderr.trim().is_empty() {
-                String::from_utf8_lossy(&o.stdout).into_owned()
-            } else {
-                stderr.into_owned()
-            };
-            // Replace the scratch path with the real filename so the message
-            // reads about the file the model wrote, not a temp path.
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-            let cleaned = raw.replace(scratch.to_string_lossy().as_ref(), name);
-            Some(crate::util::truncate(cleaned.trim(), 400).to_string())
+impl SyntaxCheck {
+    pub fn receipt(&self) -> String {
+        match self {
+            Self::Passed => "Syntax check passed; behavioral tests have not been run by this tool.".into(),
+            Self::Failed(error) => format!("Syntax check failed: {error}"),
+            Self::Unavailable(reason) => format!("Syntax unverified: {reason}. Run the project's checks before claiming correctness."),
         }
-        Err(_) => None,
     }
+}
+
+pub fn syntax_warning(path: &str, content: &str) -> Option<String> {
+    match syntax_check(path, content) {
+        SyntaxCheck::Failed(error) => Some(error),
+        _ => None,
+    }
+}
+
+/// Parse only, using a private temporary directory and bounded external checkers.
+pub fn syntax_check(path: &str, content: &str) -> SyntaxCheck {
+    use std::os::unix::fs::DirBuilderExt;
+    let p = Path::new(path);
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext == "json" {
+        return match serde_json::from_str::<serde_json::Value>(content) {
+            Ok(_) => SyntaxCheck::Passed,
+            Err(e) => SyntaxCheck::Failed(e.to_string()),
+        };
+    }
+    if ext == "toml" {
+        return match toml::from_str::<toml::Value>(content) {
+            Ok(_) => SyntaxCheck::Passed,
+            Err(e) => SyntaxCheck::Failed(e.to_string()),
+        };
+    }
+    let (program, args): (&str, &[&str]) = match ext {
+        "py" => ("python3", &["-I", "-c", "import sys; compile(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1], 'exec')"]),
+        "js" | "mjs" | "cjs" => ("node", &["--check"]),
+        "sh" | "bash" => ("bash", &["--noprofile", "--norc", "-n"]),
+        "lua" => ("luac", &["-p"]),
+        "rb" => ("ruby", &["-c"]),
+        "php" => ("php", &["-l"]),
+        _ => return SyntaxCheck::Unavailable("no standalone parser for this file type".into()),
+    };
+    let dir = std::env::temp_dir().join(format!("luna-check-{}", uuid::Uuid::new_v4()));
+    if let Err(e) = std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        return SyntaxCheck::Unavailable(format!("cannot create scratch directory: {e}"));
+    }
+    let scratch = dir.join(format!("source.{ext}"));
+    let result = (|| {
+        if let Err(e) = std::fs::write(&scratch, content) {
+            return SyntaxCheck::Unavailable(format!("cannot write scratch file: {e}"));
+        }
+        let output = std::process::Command::new("timeout").args(["--kill-after=1", "10"])
+            .arg(program).args(args).arg(&scratch)
+            .env_remove("NODE_OPTIONS").env_remove("BASH_ENV").output();
+        match output {
+            Ok(o) if o.status.success() => SyntaxCheck::Passed,
+            Ok(o) if matches!(o.status.code(), Some(124 | 126 | 127 | 137)) =>
+                SyntaxCheck::Unavailable(format!("{program} unavailable or exceeded its time limit")),
+            Ok(o) => {
+                let raw = if o.stderr.is_empty() { o.stdout } else { o.stderr };
+                let error = String::from_utf8_lossy(&raw).replace(scratch.to_string_lossy().as_ref(), path);
+                SyntaxCheck::Failed(crate::util::truncate(error.trim(), 600).to_string())
+            }
+            Err(e) => SyntaxCheck::Unavailable(format!("cannot run parser: {e}")),
+        }
+    })();
+    let _ = std::fs::remove_dir_all(dir);
+    result
 }
 
 /// Turn the two-character sequence `\n` into real line breaks.
@@ -332,5 +321,24 @@ mod tests {
             "shell is left alone"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+#[cfg(test)]
+mod configuration_syntax_tests {
+    use super::*;
+    #[test]
+    fn structured_files_are_checked_and_unknown_types_are_explicit() {
+        assert_eq!(syntax_check("config.json", r#"{"ok":true}"#), SyntaxCheck::Passed);
+        assert!(matches!(syntax_check("config.json", "{oops"), SyntaxCheck::Failed(_)));
+        assert_eq!(syntax_check("config.toml", "enabled = true"), SyntaxCheck::Passed);
+        assert!(matches!(syntax_check("config.toml", "enabled = ["), SyntaxCheck::Failed(_)));
+        assert!(matches!(syntax_check("code.rs", "fn main() {}"), SyntaxCheck::Unavailable(_)));
+        assert!(syntax_check("code.rs", "").receipt().contains("unverified"));
+        assert!(SyntaxCheck::Passed.receipt().contains("behavioral tests have not"));
+    }
+    #[test]
+    fn shell_syntax_is_checked_without_executing_it() {
+        assert_eq!(syntax_check("sample.sh", "exit 99\n"), SyntaxCheck::Passed);
+        assert!(matches!(syntax_check("sample.sh", "if then"), SyntaxCheck::Failed(_)));
     }
 }

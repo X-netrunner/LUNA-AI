@@ -41,13 +41,17 @@ pub async fn read_file(path: &str, offset: Option<usize>, limit: Option<usize>) 
             list.join("\n")
         ));
     }
+    let metadata = tokio::fs::metadata(path).await?;
+    if !metadata.is_file() || metadata.len() > 8 * 1024 * 1024 {
+        anyhow::bail!("read_file requires a regular text file of at most 8 MiB; use a targeted search for larger files");
+    }
     let body = tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("Failed to read: {}", path))?;
 
     // Fast path: no range asked for and the file is small enough to send whole.
     let total = body.lines().count();
-    if offset.is_none() && limit.is_none() && total <= READ_MAX_LINES {
+    if offset.is_none() && limit.is_none() && total <= READ_MAX_LINES && body.len() <= 32_000 {
         return Ok(body);
     }
 
@@ -57,7 +61,13 @@ pub async fn read_file(path: &str, offset: Option<usize>, limit: Option<usize>) 
     let start = offset.map(|o| o.saturating_sub(1)).unwrap_or(0).min(total);
     let count = limit.unwrap_or(READ_MAX_LINES).min(READ_MAX_LINES);
     let end = start.saturating_add(count).min(total);
-    let slice = lines[start..end].join("\n");
+    let mut slice = lines[start..end].join("\n");
+    if slice.len() > 32_000 {
+        let mut cut = 32_000;
+        while !slice.is_char_boundary(cut) { cut -= 1; }
+        slice.truncate(cut);
+        slice.push_str("\n[Output truncated at 32000 bytes; use a smaller line range or targeted search. This is not the whole file.]");
+    }
 
     if ranged {
         Ok(format!(
@@ -75,15 +85,47 @@ pub async fn read_file(path: &str, offset: Option<usize>, limit: Option<usize>) 
     }
 }
 
+/// Replace through a sibling temporary file, preserving permissions and symlink targets.
+async fn atomic_write(path: &str, content: &str, expected: Option<&str>) -> Result<()> {
+    let path = path.to_owned();
+    let content = content.to_owned();
+    let expected = expected.map(str::to_owned);
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let requested = Path::new(&path);
+        let target = if std::fs::symlink_metadata(requested).is_ok() { std::fs::canonicalize(requested)? } else { requested.to_path_buf() };
+        let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let metadata = match std::fs::metadata(&target) {
+            Ok(m) => {
+                if !m.is_file() || m.nlink() > 1 { anyhow::bail!("Refusing atomic replacement of a nonregular or hard-linked file: {path}"); }
+                Some(m)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let tmp = parent.join(format!(".luna-{}.tmp", uuid::Uuid::new_v4()));
+        let result = (|| -> Result<()> {
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+            file.write_all(content.as_bytes())?;
+            if let Some(meta) = metadata { file.set_permissions(meta.permissions())?; }
+            file.sync_all()?;
+            if let Some(before) = expected {
+                if std::fs::read_to_string(&target)? != before {
+                    anyhow::bail!("File changed during editing; re-read {path} before retrying");
+                }
+            }
+            std::fs::rename(&tmp, &target)?;
+            Ok(())
+        })();
+        if result.is_err() { let _ = std::fs::remove_file(&tmp); }
+        result
+    }).await?
+}
+
 pub async fn write_file(path: &str, content: &str) -> Result<()> {
-    if let Some(parent) = Path::new(path).parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .context("Failed to create parent dirs")?;
-    }
-    tokio::fs::write(path, content)
-        .await
-        .with_context(|| format!("Failed to write: {}", path))
+    atomic_write(path, content, None).await
 }
 
 pub async fn edit_file(
@@ -98,7 +140,14 @@ pub async fn edit_file(
             .context("Failed to create parent dirs")?;
     }
 
+    if content.is_some() && (old_str.is_some() || new_str.is_some()) {
+        anyhow::bail!("Choose a targeted replacement or full content, not both");
+    }
+    if old_str.is_some() != new_str.is_some() {
+        anyhow::bail!("Targeted edits require both old_str and new_str");
+    }
     if let (Some(old), Some(new)) = (old_str, new_str) {
+        if old.is_empty() { anyhow::bail!("old_str must not be empty; read the file and quote a unique fragment"); }
         if !Path::new(path).exists() {
             anyhow::bail!("File '{}' does not exist to perform text editing.", path);
         }
@@ -131,18 +180,22 @@ pub async fn edit_file(
             );
         }
         let updated = original.replace(old, new);
-        tokio::fs::write(path, updated)
-            .await
-            .with_context(|| format!("Failed to write edited content to: {}", path))?;
+        let check = super::verify::syntax_check(path, &updated);
+        if let super::verify::SyntaxCheck::Failed(error) = &check {
+            anyhow::bail!("Edit was not written: resulting file does not parse: {error}");
+        }
+        atomic_write(path, &updated, Some(&original)).await?;
         Ok(format!(
-            "Successfully edited '{}': replaced {} occurrence(s).",
-            path, matches_count
+            "Successfully edited '{}': replaced {} occurrence(s).\n{}",
+            path, matches_count, check.receipt()
         ))
     } else if let Some(new_content) = content {
-        tokio::fs::write(path, new_content)
-            .await
-            .with_context(|| format!("Failed to write content to: {}", path))?;
-        Ok(format!("Successfully wrote content to '{}'", path))
+        let check = super::verify::syntax_check(path, new_content);
+        if let super::verify::SyntaxCheck::Failed(error) = &check {
+            anyhow::bail!("Edit was not written: resulting file does not parse: {error}");
+        }
+        atomic_write(path, new_content, None).await?;
+        Ok(format!("Successfully wrote content to '{}'\n{}", path, check.receipt()))
     } else {
         anyhow::bail!("No edit content or old_str/new_str provided for '{}'", path);
     }
@@ -262,5 +315,38 @@ mod tests {
             .expect_err("absent old_str must be refused");
         assert!(err.to_string().contains("not found"), "got: {err}");
         let _ = tokio::fs::remove_file(path).await;
+    }
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+    #[tokio::test]
+    async fn edits_preserve_permissions_and_symlinks_and_reject_stale_content() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&dir).unwrap();
+        let file = dir.join("code.py");
+        let link = dir.join("link.py");
+        std::fs::write(&file, "print('old')\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o750)).unwrap();
+        symlink(&file, &link).unwrap();
+        edit_file(link.to_str().unwrap(), Some("'old'"), Some("'new'"), None).await.unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o750);
+        assert!(atomic_write(file.to_str().unwrap(), "oops", Some("stale")).await.is_err());
+        assert!(edit_file(file.to_str().unwrap(), Some("print('new')"), Some("def broken("), None).await.is_err());
+        assert!(edit_file(file.to_str().unwrap(), Some(""), Some("x"), None).await.is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "print('new')\n");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn long_unicode_lines_are_bounded_and_labelled_partial() {
+        let file = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::write(&file, "界".repeat(20000)).unwrap();
+        let result = read_file(file.to_str().unwrap(), None, None).await.unwrap();
+        assert!(result.len() < 33000 && result.contains("not the whole file"));
+        std::fs::remove_file(file).unwrap();
     }
 }

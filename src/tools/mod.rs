@@ -1701,7 +1701,10 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             let content = args["content"].as_str();
 
             if open_in_gui || (old_str.is_none() && new_str.is_none() && content.is_none()) {
-                shell::run_command(&format!("zeditor {} &", expanded), sudo_pass).await?;
+                if expanded.trim().is_empty() { anyhow::bail!("edit_file requires a path"); }
+                tokio::process::Command::new("zeditor").arg("--").arg(&expanded)
+                    .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()).spawn()?;
                 Ok("Opened in editor".to_string())
             } else {
                 if let Some(reason) = selfpatch::blocks_raw_write(&config.selfpatch, &expanded) {
@@ -1752,7 +1755,8 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
                         .to_string(),
                 )));
             };
-            let content = args["content"].as_str().unwrap_or("");
+            let content = args["content"].as_str().ok_or_else(|| anyhow::anyhow!(
+                "write_file requires an explicit content string; nothing was written"))?;
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
             // Her own source must go through the self_patch gate, not a raw write.
             if let Some(reason) = selfpatch::blocks_raw_write(&config.selfpatch, &expanded) {
@@ -1791,14 +1795,12 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
                     )
                 }
             };
+            let check = verify::syntax_check(&expanded, &content);
+            if let verify::SyntaxCheck::Failed(error) = &check {
+                anyhow::bail!("File was not written: generated content does not parse; fix it first: {error}");
+            }
             filesystem::write_file(&expanded, &content).await?;
-            // Syntax-check what was just written (non-executing). Catching a
-            // file that does not even parse here, and handing the model the
-            // error, stops Luna reporting a broken program as done — and lets
-            // the ReAct loop fix it in the same turn.
-            let syntax = verify::syntax_warning(&expanded, &content)
-                .map(|e| format!("\n⚠ This file does not parse — fix it:\n{e}"))
-                .unwrap_or_default();
+            let syntax = format!("\n{}", check.receipt());
             Ok(match repair_note {
                 Some(note) => format!("Written to {expanded}{note}{syntax}"),
                 None => format!("Written to {expanded}{syntax}"),
@@ -3001,6 +3003,12 @@ mod gate_tests {
         .await
         .expect("well-formed write_file must succeed");
         assert!(out.contains("Written to"), "{out}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "print('ok')");
+        let missing = execute(&call("write_file", serde_json::json!({"path": path.to_string_lossy()})), &config).await;
+        assert!(missing.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "print('ok')");
+        let invalid = execute(&call("write_file", serde_json::json!({"path": path.to_string_lossy(), "content": "def broken("})), &config).await;
+        assert!(invalid.is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "print('ok')");
         let _ = std::fs::remove_dir_all(&dir);
     }

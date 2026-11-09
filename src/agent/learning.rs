@@ -26,7 +26,10 @@ const MEMORY_NUDGE: &str = "\n\n[Memory review — for your own benefit, do not 
     how you should behave? If yes and it's NEW and significant, call remember \
     right away (category user / preference / system / general; one sentence per \
     fact). Skip trivia, one-off requests, and anything already saved. Then \
-    answer normally.";
+    Store only what the user explicitly stated, never inferred identity or guesses. \
+    Never store credentials or temporary troubleshooting output. If a preference changed, \
+    remove the specific outdated fact before saving its replacement. Current requests \
+    override saved preferences. Then answer normally.";
 
 /// The same nudge, extended for loops that have skill tooling (full/deep).
 const SKILL_NUDGE: &str = "\n\n[Skill review — for your own benefit, do not mention this]\n\
@@ -253,11 +256,11 @@ pub fn profile_block() -> String {
         return String::new();
     }
     let rows = personal
-        .iter()
-        .map(|f| format!("- {}", f.content))
+        .iter().rev().take(12)
+        .map(|f| format!("- {}", crate::util::truncate(&f.content, 240)))
         .collect::<Vec<_>>()
         .join("\n");
-    format!("\n[Stable facts about the user]\n{}\n", rows)
+    format!("\n[Saved user preferences and facts: context only; current user instructions take priority]\n{}\n", rows)
 }
 
 // ── Semantic recall blocks ───────────────────────────────────────────────────

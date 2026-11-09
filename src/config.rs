@@ -398,6 +398,9 @@ pub struct LlmConfig {
     /// Optional large model for complex reasoning / code (e.g. qwen3:8b).
     /// Queries needing deep thought are routed here instead of `model`.
     pub deep_model: Option<String>,
+    /// Separate coding sampling temperature; prioritize repeatable edits over chat variety.
+    #[serde(default = "default_deep_temperature")]
+    pub deep_temperature: f32,
     /// Optional uncensored deep/coder model used as automatic fallback if
     /// the normal deep model refuses. Does not affect the security tier.
     #[serde(default)]
@@ -632,6 +635,8 @@ fn default_num_ctx() -> u32 {
     16384
 }
 
+fn default_deep_temperature() -> f32 { 0.2 }
+
 fn default_deep_num_ctx() -> u32 {
     16384
 }
@@ -690,6 +695,7 @@ impl Default for LlmConfig {
             auto_route: true,
             fast_model: None,
             deep_model: None,
+            deep_temperature: default_deep_temperature(),
             deep_model_unrestricted: None,
             security_model: None,
             security_model_abliterated: None,

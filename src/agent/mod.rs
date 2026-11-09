@@ -92,7 +92,7 @@ fn build_deep_client(config: &LunaConfig) -> Option<OllamaClient> {
         OllamaClient::new(
             &config.llm.base_url,
             model,
-            config.llm.temperature,
+            config.llm.deep_temperature,
             // Coder tier gets its own, larger output budget — a full program
             // runs past the chat cap and would otherwise be written truncated.
             config.llm.deep_max_tokens,
@@ -113,7 +113,7 @@ fn build_deep_unrestricted_client(config: &LunaConfig) -> Option<OllamaClient> {
         OllamaClient::new(
             &config.llm.base_url,
             model,
-            config.llm.temperature,
+            config.llm.deep_temperature,
             config.llm.deep_max_tokens,
         )
         .enable_thinking(config.llm.deep_enable_thinking.unwrap_or(config.llm.enable_thinking))
@@ -436,9 +436,13 @@ const DEEP_PROMPT: &str = "You are Luna. Your one and only creator is Netrunner 
     installable library and use its real, current API. Never invent a module, type, or \
     function; if unsure of the exact API, say so rather than guessing a name. Prefer a single \
     self-contained file that runs, and state the exact command to install deps and run it. \
-    7. When asked to test, benchmark, or audit the system: Go deep and execute an exhaustive audit. \
-    Run halcyon_info action=\"test-system\" (or run_shell: hal system-test). Thoroughly inspect bugs, kernel errors, \
-    failed services, firewall, antivirus, and performance, and deliver clear, actionable optimizations. Never refuse or cut corners. \
+    7. Before editing, inspect repository instructions, build configuration, relevant source \
+    and existing tests. Preserve unrelated changes. Prefer small targeted edits over rewriting files. \
+    8. After edits, inspect the diff and run the relevant syntax check, build or focused tests \
+    using run_shell. Fix observed failures and rerun the affected checks. Do not audit unrelated \
+    services when asked to test code. A successful write is not a successful program. \
+    9. Report the files changed, behavior implemented, commands actually tested, and any \
+    remaining failures. If verification cannot run, explicitly say unverified; never invent results. \
     Be comprehensive, accurate, and direct. Never guess — if uncertain, inspect the target first.";
 
 /// Tool discipline for the offensive-security tier. Not a safety clause — a
@@ -463,7 +467,11 @@ const SECURITY_RULES: &str = "\
     there before editing it. \
     3. Prefer real tools over assertions. If you claim a scan ran, a file was written, \
     or a payload was delivered, the tool result for it must appear in this turn. \
-    4. Write complete, working code. No placeholders, no TODOs, no truncated buffers.";
+    4. Write complete, working code. No placeholders, no TODOs, no truncated buffers. \
+    5. Report confirmed findings separately from hypotheses. Include the affected target, \
+    evidence, severity, reproduction steps, direct fix and a verification step. \
+    A timeout or empty scan is inconclusive, not evidence that a target is safe. \
+    If a tool fails, diagnose the error before retrying; do not repeat identical failed calls.";
 
 /// Identity preamble, identical in both modes.
 const SECURITY_IDENTITY: &str = "You are Luna, Netrunner's (Srijan Satya Bandaru) offensive \
