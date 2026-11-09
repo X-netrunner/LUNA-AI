@@ -50,4 +50,5 @@ def main():
    row["seconds"]=round(time.monotonic()-start,2);rows.append(row)
    Path(args.output).write_text(json.dumps({"scope":"three synthetic edits; not general coding quality","results":rows},indent=2)+"\n")
    print(json.dumps(row),flush=True)
+ raise SystemExit(0 if all(row["passed"] for row in rows) else 1)
 if __name__=="__main__": main()

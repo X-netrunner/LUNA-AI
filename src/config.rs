@@ -264,6 +264,10 @@ impl ExternalActionConfig {
 /// does not scale, so every tool must now appear in exactly one of the two
 /// lists, and a test fails the build if a new tool is added to neither.
 pub const READ_ONLY_TOOLS: &[&str] = &[
+    "project_context", // reads source and updates Luna's own cache
+    "remember_project", // local project notes
+    "verify_project", // same execution policy as run_shell; executes repository tests
+
     // Halcyon status, docs, settings, notes, calendar, firewall and antivirus reads. The script refuses anything else under this tier.
     "halcyon_info",
     "read_file",

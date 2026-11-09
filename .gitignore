@@ -33,3 +33,5 @@ __pycache__/
 # Scratch/upload artifacts
 *.zip
 ADD_TO_CARGO_TOML.txt
+
+live-eval/

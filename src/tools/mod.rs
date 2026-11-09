@@ -11,6 +11,7 @@ pub mod halcyon;
 pub mod learn;
 pub mod pkgupdate;
 pub mod proactive;
+pub mod project;
 pub mod reminders;
 pub mod safety;
 pub mod select;
@@ -32,6 +33,21 @@ use std::time::Instant;
 
 pub fn tool_definitions() -> Vec<ToolDef> {
     vec![
+        ToolDef { r#type: "function".into(), function: ToolFunction {
+            name: "remember_project".into(),
+            description: "Save a concise repository-specific architecture, test-command or troubleshooting note after inspecting evidence. Invalidated when source changes; not a user preference.".into(),
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"},"note":{"type":"string"}},"required":["path","note"]}),
+        }},
+        ToolDef { r#type: "function".into(), function: ToolFunction {
+            name: "project_context".into(),
+            description: "Read repository instructions, manifests and architecture notes; persist a fingerprinted project context cache. Use before coding.".into(),
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+        }},
+        ToolDef { r#type: "function".into(), function: ToolFunction {
+            name: "verify_project".into(),
+            description: "Run the detected project test command after edits (up to five minutes). Returns actual output; failures are errors to fix. Tests may execute project code.".into(),
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+        }},
         ToolDef {
             r#type: "function".into(),
             function: ToolFunction {
@@ -1690,6 +1706,17 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             let target = args["target"].as_str().unwrap_or("");
             let mode = args["mode"].as_str().unwrap_or("dns");
             security::dns_lookup(target, mode, sudo_pass).await
+        }
+
+        "remember_project" => project::remember(
+            args["path"].as_str().context("Missing project path")?,
+            args["note"].as_str().context("Missing project note")?,
+        ),
+
+        "project_context" | "verify_project" => {
+            let path = args["path"].as_str().filter(|p| !p.trim().is_empty())
+                .context("Provide an explicit project path")?;
+            if name == "project_context" { project::context(path) } else { project::verify(path).await }
         }
 
         "edit_file" => {

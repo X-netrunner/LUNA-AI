@@ -281,6 +281,7 @@ impl<'a> ReactLoop<'a> {
         // re-read, then the loop guard owns it.
         let mut edit_retried = false;
         let mut validation_retries = 0u8;
+        let mut coding_verification_prompted = false;
         // What this turn actually called and got back, so the final answer can be
         // checked against it rather than against the shape of its prose.
         let mut receipt: Vec<Receipt> = Vec::new();
@@ -812,6 +813,17 @@ impl<'a> ReactLoop<'a> {
                     // Nesting it inside the other condition would have hidden
                     // both behind a gate that never opened.
                     let mut text = text;
+                    let changed_code = used_calls.iter().any(|c| c.starts_with("write_file") || c.starts_with("edit_file"));
+                    let verification_attempted = used_calls.iter().any(|c|
+                        c.starts_with("verify_project") || c.starts_with("run_shell") &&
+                        ["cargo test", "pytest", "npm test", "go test"].iter().any(|check| c.contains(check)));
+                    if changed_code && !verification_attempted && !coding_verification_prompted {
+                        coding_verification_prompted = true;
+                        turn_messages.push(Message::tool(
+                            "Files were changed but no project verification is recorded. Call verify_project with the repository path, or inspect project_context and run the documented checks using run_shell. Review the diff. If execution is unavailable, explicitly report unverified changes; do not claim tests passed."
+                        ));
+                        continue;
+                    }
                     if let Some(claim) = unsupported_evidence(&text, &receipt) {
                         tracing::warn!(
                             "Answer contains output this turn's tools did not produce ({claim})"
@@ -2272,16 +2284,17 @@ fn push_write_correction(
 
 /// Bounded recovery for parser rejection or a concurrent edit, even after an earlier successful read.
 fn push_validation_correction(tool: &str, result: &str, retries: &mut u8, messages: &mut Vec<Message>) -> bool {
-    if *retries >= 2 || !matches!(tool, "write_file" | "edit_file") {
+    if *retries >= 2 || !matches!(tool, "write_file" | "edit_file" | "verify_project") {
         return false;
     }
     if !(result.contains("not written") && result.contains("does not parse"))
-        && !result.contains("File changed during editing") {
+        && !result.contains("File changed during editing")
+        && !(tool == "verify_project" && result.contains("Project verification failed")) {
         return false;
     }
     *retries += 1;
     messages.push(Message::tool(
-        "The proposed change was not saved. Read the current file if it exists, inspect the parser error, and correct the change. Preserve unrelated content. Do not repeat the same failed arguments or claim completion. After saving, run focused project checks."
+        "The change or its verification failed. Inspect the reported error and current files, correct the code, and rerun the affected check. Preserve unrelated content. Do not repeat the same failed arguments or claim completion. After saving, run focused project checks."
     ));
     true
 }

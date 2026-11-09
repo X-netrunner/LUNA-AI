@@ -43,5 +43,7 @@ def main():
             args.output.write_text(json.dumps({"scope": "Three synthetic decisions, not a general capability ranking", "results": rows}, indent=2) + "\n")
             print(json.dumps(row), flush=True)
 
+    raise SystemExit(0 if all(row["passed"] for row in rows) else 1)
+
 if __name__ == "__main__":
     main()
