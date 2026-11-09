@@ -97,7 +97,12 @@ pub fn load() -> Vec<Lesson> {
 }
 
 fn rank(items: &mut [Lesson]) {
-    items.sort_by(|a, b| a.failed_turns.cmp(&b.failed_turns).then(b.hits.cmp(&a.hits)).then(b.ts.cmp(&a.ts)));
+    items.sort_by(|a, b| {
+        a.failed_turns.cmp(&b.failed_turns)
+            .then(b.clean_tool_turns.cmp(&a.clean_tool_turns))
+            .then(b.hits.cmp(&a.hits))
+            .then(b.ts.cmp(&a.ts))
+    });
 }
 
 fn save(mut items: Vec<Lesson>) -> Result<(), String> {
@@ -344,6 +349,15 @@ pub fn block_for(input: &str) -> String {
     )
 }
 
+/// Extract the bare tool name from an assistant tool call string.
+/// Handles forms like `write_file(...)`, `<|tool_call|>write_file {...}`, and `call:write_file(...)`.
+pub fn extract_tool_name(call: &str) -> String {
+    let s = call.trim_start();
+    let s = s.strip_prefix("<|tool_call|>").unwrap_or(s).trim_start();
+    let s = s.strip_prefix("call:").unwrap_or(s).trim_start();
+    s.split(['(', ' ', '{', ':']).next().unwrap_or("").trim().to_string()
+}
+
 /// Track observed outcomes, not success claims. Repeated failures suspend advice.
 pub fn observe(config: &LunaConfig, prompt: &str, trace: &[Message]) {
     if EXTERNAL.load(Ordering::Relaxed) || !config.agent.learn_from_mistakes { return; }
@@ -353,15 +367,22 @@ pub fn observe(config: &LunaConfig, prompt: &str, trace: &[Message]) {
     for lesson in &mut items {
         if prompt.lines().any(|line| line == format!("- {}", lesson.text)) {
             lesson.exposures = lesson.exposures.saturating_add(1);
-            let relevant: Vec<_> = trace.windows(2).filter(|pair|
-                pair[0].role == "assistant" && pair[1].role == "tool"
-                && !lesson.tool.is_empty()
-                && pair[0].content.split(['(', ' ', '{']).next() == Some(lesson.tool.as_str())
-            ).collect();
-            if relevant.iter().any(|pair| pair[1].content.trim_start().to_ascii_lowercase().starts_with("error:")) {
+            let relevant: Vec<_> = trace.windows(2).filter(|pair| {
+                if pair[0].role != "assistant" || pair[1].role != "tool" || lesson.tool.is_empty() {
+                    return false;
+                }
+                let name = extract_tool_name(&pair[0].content);
+                name == lesson.tool
+            }).collect();
+            if relevant.iter().any(|pair| {
+                let c = pair[1].content.trim_start().to_ascii_lowercase();
+                c.starts_with("error:") || c.starts_with("project verification failed") || c.starts_with("failed (exit")
+            }) {
                 lesson.failed_turns = lesson.failed_turns.saturating_add(1);
             } else if !relevant.is_empty() {
                 lesson.clean_tool_turns = lesson.clean_tool_turns.saturating_add(1);
+                // Reinforcement learning: award bonus hits when a lesson leads to clean tool execution
+                lesson.hits = lesson.hits.saturating_add(1);
             }
             changed = true;
         }
@@ -476,13 +497,19 @@ pub fn looks_like_correction(text: &str) -> bool {
     ANY.iter().any(|s| t.contains(s))
 }
 
-/// Failed tool calls in a turn's trace: (tool name or call, error text). A tool message starting "Error:" follows the
-/// assistant message that called it.
+/// Failed tool calls in a turn's trace: (tool name or call, error text).
 pub fn failures(trace: &[Message]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (i, m) in trace.iter().enumerate() {
         let c = m.content.trim_start();
-        if m.role == "tool" && (c.starts_with("Error:") || c.starts_with("ERROR:")) {
+        let is_err = c.starts_with("Error:") || c.starts_with("ERROR:")
+            || c.starts_with("Project verification failed")
+            || c.starts_with("Refused:")
+            || c.starts_with("Security command failed")
+            || c.starts_with("Target text to replace was not found")
+            || c.starts_with("File not found:")
+            || c.starts_with("FAILED (exit ");
+        if m.role == "tool" && is_err {
             let call = i
                 .checked_sub(1)
                 .and_then(|j| trace.get(j))
@@ -538,12 +565,7 @@ pub fn exchange_for(
     if f.is_empty() || answer.trim().is_empty() {
         return None;
     }
-    let tool = f[0]
-        .0
-        .split(['(', ' ', '{'])
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let tool = extract_tool_name(&f[0].0);
     // Reflection must see observed recovery, not just a claimed final answer.
     let recovery = trace.windows(2)
         .filter(|pair| pair[0].role == "assistant" && pair[1].role == "tool")
@@ -789,5 +811,25 @@ mod tests {
             Some("Use the notes window.")
         );
         assert_eq!(parse_lesson("NONE"), None);
+    }
+
+    #[test]
+    fn tool_name_extraction_from_template_markers() {
+        assert_eq!(extract_tool_name("<|tool_call|>project_context {\"path\": \"/x\"}<|/tool_call|>"), "project_context");
+        assert_eq!(extract_tool_name("<|tool_call|>verify_project {\"project_path\": \"/x\"}<|/tool_call|>"), "verify_project");
+        assert_eq!(extract_tool_name("call:write_file({\"path\": \"/x\"})"), "write_file");
+        assert_eq!(extract_tool_name("nmap_scan {\"target\": \"127.0.0.1\"}"), "nmap_scan");
+    }
+
+    #[test]
+    fn failures_recognises_project_and_execution_errors() {
+        let trace = vec![
+            Message::assistant("<|tool_call|>verify_project {\"path\": \"/tmp\"}<|/tool_call|>"),
+            Message::tool("Project verification failed: tests exited 1"),
+        ];
+        let f = failures(&trace);
+        assert_eq!(f.len(), 1);
+        assert_eq!(extract_tool_name(&f[0].0), "verify_project");
+        assert!(f[0].1.contains("Project verification failed"));
     }
 }

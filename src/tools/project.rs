@@ -7,7 +7,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::io::Write;
 
-const FILES: &[&str] = &["AGENTS.md", ".codex-state.md", "README.md", "Cargo.toml", "package.json", "pyproject.toml", "pytest.ini", "Makefile"];
+const FILES: &[&str] = &[
+    "AGENTS.md", ".codex-state.md", "README.md", "Cargo.toml", "package.json",
+    "pyproject.toml", "pytest.ini", "Makefile", "requirements.txt", "setup.py",
+    "go.mod", "tsconfig.json", "CMakeLists.txt",
+];
 
 fn root(path: &str) -> Result<PathBuf> {
     let start = std::fs::canonicalize(path).context("Project path does not exist")?;
@@ -15,11 +19,12 @@ fn root(path: &str) -> Result<PathBuf> {
     let mut manifest = None;
     for dir in start.ancestors() {
         if dir.join(".git").exists() { return Ok(dir.to_path_buf()); }
-        if manifest.is_none() && ["Cargo.toml","package.json","pyproject.toml"].iter().any(|f| dir.join(f).is_file()) {
+        if manifest.is_none() && ["Cargo.toml","package.json","pyproject.toml","go.mod","requirements.txt","Makefile"].iter().any(|f| dir.join(f).is_file()) {
             manifest = Some(dir.to_path_buf());
         }
     }
     if let Some(root) = manifest { return Ok(root); }
+    if start.is_dir() { return Ok(start); }
     anyhow::bail!("No repository or project manifest found; provide a project directory")
 }
 
@@ -110,8 +115,21 @@ fn test_command(root: &Path) -> Option<Vec<String>> {
             }
         }
     }
-    if root.join("pytest.ini").exists() || root.join("tests").is_dir() && root.join("pyproject.toml").exists() {
+    if root.join("pytest.ini").exists()
+        || (root.join("tests").is_dir() && (root.join("pyproject.toml").exists() || root.join("requirements.txt").exists() || root.join("setup.py").exists()))
+        || (root.join("pyproject.toml").exists() && root.join("tests").is_dir())
+    {
         return Some(vec!["python3".into(),"-m".into(),"pytest".into()]);
+    }
+    if root.join("go.mod").exists() {
+        return Some(vec!["go".into(),"test".into(),"./...".into()]);
+    }
+    if root.join("Makefile").exists() {
+        if let Ok(raw) = std::fs::read_to_string(root.join("Makefile")) {
+            if raw.lines().any(|l| l.starts_with("test:") || l.starts_with("check:")) {
+                return Some(vec!["make".into(),"test".into()]);
+            }
+        }
     }
     None
 }

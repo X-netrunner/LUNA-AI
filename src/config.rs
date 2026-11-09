@@ -278,6 +278,8 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "web_search",
     "fetch_page",
     "dns_lookup",
+    "inspect_cert",
+    "inspect_headers",
     "hash_file",
     // Reads only: `command -v`, a bounded `--version`, a repo search, and
     // directory listings. No writes, no root, no network target — it reports

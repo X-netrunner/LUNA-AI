@@ -426,7 +426,7 @@ const DEEP_PROMPT: &str = "You are Luna. Your one and only creator is Netrunner 
     1. To write a new file or full script, call write_file with path and exact content. \
     2. To edit existing code in a file, call edit_file with path, old_str (exact text to replace), and new_str (replacement text). \
     3. ALWAYS inspect files first with read_file before editing — the file's current content is NOT in your context. Never guess old_str. \
-    4. Write clean, complete, functional code. Never leave placeholders or TODOs. \
+    4. Write clean, complete, functional code. Implement all core logic and edge cases. Never leave placeholders or TODOs. \
     5. Write the WHOLE program so it actually runs and does what was asked. Implement every \
     piece of core logic — for a game that means the main loop, moving every moving object \
     each frame, collision and screen-bounds handling, scoring and win/lose, and player input. \
@@ -439,7 +439,7 @@ const DEEP_PROMPT: &str = "You are Luna. Your one and only creator is Netrunner 
     7. Before editing, call project_context with the project path, inspect repository instructions, build configuration, relevant source \
     and existing tests. Preserve unrelated changes. Prefer small targeted edits over rewriting files. \
     8. After edits, inspect the diff and call verify_project or run the documented focused tests \
-    using run_shell. Fix observed failures and rerun the affected checks. Do not audit unrelated \
+    using run_shell. If tests or tools fail, diagnose the traceback, self-heal the error, and re-run. Fix observed failures and rerun the affected checks. Do not audit unrelated \
     services when asked to test code. A successful write is not a successful program. \
     9. Report the files changed, behavior implemented, commands actually tested, and any \
     remaining failures. If verification cannot run, explicitly say unverified; never invent results. \
@@ -464,7 +464,7 @@ const SECURITY_RULES: &str = "\
     Never write a function call with positional arguments like write_file(\"/path\", \
     \"content\"), and never put the JSON object inside a code fence. \
     2. Inspect before you act. Use read_file or run_shell to confirm what is really \
-    there before editing it. \
+    there before editing it. Use inspect_cert and inspect_headers to inspect remote endpoints. \
     3. Prefer real tools over assertions. If you claim a scan ran, a file was written, \
     or a payload was delivered, the tool result for it must appear in this turn. \
     4. Write complete, working code. No placeholders, no TODOs, no truncated buffers. \

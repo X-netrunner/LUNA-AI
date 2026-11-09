@@ -85,6 +85,7 @@ impl SyntaxCheck {
     }
 }
 
+#[allow(dead_code)]
 pub fn syntax_warning(path: &str, content: &str) -> Option<String> {
     match syntax_check(path, content) {
         SyntaxCheck::Failed(error) => Some(error),

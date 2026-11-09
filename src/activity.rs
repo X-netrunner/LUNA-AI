@@ -172,9 +172,11 @@ mod tests {
     }
 
     use std::sync::Arc;
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn events_reach_every_subscriber() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_s1, a) = counter();
         let (_s2, b) = counter();
         publish(Event::Iteration { n: 1 });
@@ -234,6 +236,7 @@ mod tests {
     /// is the whole reason `publish` isolates each call.
     #[test]
     fn a_panicking_subscriber_cannot_break_the_turn() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _s = subscribe(|_| panic!("subscriber is broken"));
         let (_ok, n) = counter();
         publish(Event::Iteration { n: 2 });

@@ -2287,9 +2287,17 @@ fn push_validation_correction(tool: &str, result: &str, retries: &mut u8, messag
     if *retries >= 2 || !matches!(tool, "write_file" | "edit_file" | "verify_project") {
         return false;
     }
-    if !(result.contains("not written") && result.contains("does not parse"))
-        && !result.contains("File changed during editing")
-        && !(tool == "verify_project" && result.contains("Project verification failed")) {
+    if tool == "write_file" && !(result.contains("not written") && result.contains("does not parse")) {
+        return false;
+    }
+    if tool == "edit_file" && !result.contains("File changed during editing") {
+        return false;
+    }
+    if tool == "verify_project"
+        && !(result.contains("Project verification failed")
+            || result.contains("project path")
+            || result.contains("No known test command"))
+    {
         return false;
     }
     *retries += 1;

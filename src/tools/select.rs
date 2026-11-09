@@ -115,6 +115,8 @@ fn triggers(name: &str) -> &'static [&'static str] {
         "decode_payload" => &["decode", "payload", "shellcode", "exploit", "reverse engineer", "base64"],
         "hash_file" => &["hash", "sha256", "sha1", "md5", "checksum", "file integrity"],
         "dns_lookup" => &["dns", "nameserver", "mx record", "resolve domain", "whois"],
+        "inspect_cert" => &["certificate", "cert", "ssl", "tls", "x509", "https cert", "expire", "issuer"],
+        "inspect_headers" => &["headers", "security headers", "hsts", "csp", "cors", "http header", "cookie security"],
         // Availability before install. Measured 2026-10-02: asked to exploit SSH
         // she cited `hydra` and a rockyou path, and neither exists here. The
         // trigger includes ordinary "is X installed" phrasings so this is

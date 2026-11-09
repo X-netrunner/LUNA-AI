@@ -274,18 +274,47 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             function: ToolFunction {
                 name: "decode_payload".into(),
                 description: "Decode an encoded string — common in CTF challenges. \
-                              Supports base64, hex, URL encoding, ROT13, and raw binary.".into(),
+                              Supports base64, hex, URL encoding, ROT13, raw binary, JWT tokens, and string reversal.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "data": { "type": "string", "description": "The encoded string to decode" },
                         "encoding": {
                             "type": "string",
-                            "enum": ["auto", "base64", "hex", "url", "rot13", "binary"],
-                            "description": "auto tries base64 then hex; specify if known"
+                            "enum": ["auto", "base64", "hex", "url", "url_all", "rot13", "binary", "jwt", "reverse"],
+                            "description": "auto tries JWT/base64/hex; specify if known"
                         }
                     },
                     "required": ["data", "encoding"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "inspect_cert".into(),
+                description: "Inspect an SSL/TLS certificate chain, expiration, issuer, and SANs on a target host/port.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "target": { "type": "string", "description": "Target hostname or IP address" },
+                        "port": { "type": "integer", "description": "Port number (default 443)" }
+                    },
+                    "required": ["target"]
+                }),
+            },
+        },
+        ToolDef {
+            r#type: "function".into(),
+            function: ToolFunction {
+                name: "inspect_headers".into(),
+                description: "Inspect HTTP response security headers (HSTS, CSP, X-Frame-Options, CORS, cookies) for a target URL or host.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "target": { "type": "string", "description": "Target URL (e.g. https://example.com) or hostname" }
+                    },
+                    "required": ["target"]
                 }),
             },
         },
@@ -1670,10 +1699,14 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
         }
 
         "nmap_scan" => {
-            let target = args["target"].as_str().unwrap_or("");
+            let target = args["target"].as_str()
+                .or_else(|| args["host"].as_str())
+                .or_else(|| args["ip"].as_str())
+                .or_else(|| args["hostname"].as_str())
+                .unwrap_or("");
             let scan_type = args["scan_type"].as_str().unwrap_or("quick");
             if target.is_empty() {
-                anyhow::bail!("No target provided");
+                return Err(anyhow::Error::new(MalformedCall("No target provided for nmap_scan. Pass target=<ip_or_host>".to_string())));
             }
             security::nmap_scan(
                 target,
@@ -1685,47 +1718,120 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
         }
 
         "analyze_pcap" => {
-            let path = args["path"].as_str().unwrap_or("");
+            let path = args["path"].as_str()
+                .or_else(|| args["file"].as_str())
+                .or_else(|| args["pcap"].as_str())
+                .unwrap_or("");
             let mode = args["mode"].as_str().unwrap_or("summary");
+            if path.is_empty() {
+                return Err(anyhow::Error::new(MalformedCall("No path provided for analyze_pcap. Pass path=<pcap_path>".to_string())));
+            }
             security::analyze_pcap(path, mode, sudo_pass).await
         }
 
         "decode_payload" => {
-            let data = args["data"].as_str().unwrap_or("");
+            let data = args["data"].as_str()
+                .or_else(|| args["payload"].as_str())
+                .or_else(|| args["text"].as_str())
+                .unwrap_or("");
             let encoding = args["encoding"].as_str().unwrap_or("auto");
             security::decode_payload(data, encoding, sudo_pass).await
         }
 
         "hash_file" => {
-            let path = args["path"].as_str().unwrap_or("");
+            let path = args["path"].as_str()
+                .or_else(|| args["file"].as_str())
+                .or_else(|| args["filepath"].as_str())
+                .unwrap_or("");
             let algo = args["algo"].as_str().unwrap_or("sha256");
+            if path.is_empty() {
+                return Err(anyhow::Error::new(MalformedCall("No path provided for hash_file. Pass path=<file_path>".to_string())));
+            }
             security::hash_file(path, algo, sudo_pass).await
         }
 
         "dns_lookup" => {
-            let target = args["target"].as_str().unwrap_or("");
+            let target = args["target"].as_str()
+                .or_else(|| args["host"].as_str())
+                .or_else(|| args["domain"].as_str())
+                .unwrap_or("");
             let mode = args["mode"].as_str().unwrap_or("dns");
+            if target.is_empty() {
+                return Err(anyhow::Error::new(MalformedCall("No target provided for dns_lookup. Pass target=<domain_or_ip>".to_string())));
+            }
             security::dns_lookup(target, mode, sudo_pass).await
         }
 
-        "remember_project" => project::remember(
-            args["path"].as_str().context("Missing project path")?,
-            args["note"].as_str().context("Missing project note")?,
-        ),
+        "inspect_cert" => {
+            let target = args["target"].as_str()
+                .or_else(|| args["host"].as_str())
+                .or_else(|| args["domain"].as_str())
+                .unwrap_or("");
+            let port = args["port"].as_u64().unwrap_or(443) as u16;
+            if target.is_empty() {
+                return Err(anyhow::Error::new(MalformedCall("No target provided for inspect_cert. Pass target=<host>".to_string())));
+            }
+            security::inspect_cert(target, port, sudo_pass, &config.llm.scan_allowlist).await
+        }
+
+        "inspect_headers" => {
+            let target = args["target"].as_str()
+                .or_else(|| args["url"].as_str())
+                .or_else(|| args["host"].as_str())
+                .unwrap_or("");
+            if target.is_empty() {
+                return Err(anyhow::Error::new(MalformedCall("No target provided for inspect_headers. Pass target=<url_or_host>".to_string())));
+            }
+            security::inspect_headers(target, sudo_pass, &config.llm.scan_allowlist).await
+        }
+
+        "remember_project" => {
+            let path = args["path"].as_str()
+                .or_else(|| args["project_path"].as_str())
+                .or_else(|| args["dir"].as_str())
+                .or_else(|| args["directory"].as_str())
+                .or_else(|| args["project_dir"].as_str())
+                .filter(|p| !p.trim().is_empty())
+                .ok_or_else(|| anyhow::Error::new(MalformedCall("Missing project path (pass path=...)".into())))?;
+            let note = args["note"].as_str()
+                .or_else(|| args["text"].as_str())
+                .filter(|n| !n.trim().is_empty())
+                .ok_or_else(|| anyhow::Error::new(MalformedCall("Missing project note (pass note=...)".into())))?;
+            project::remember(path, note)
+        }
 
         "project_context" | "verify_project" => {
-            let path = args["path"].as_str().filter(|p| !p.trim().is_empty())
-                .context("Provide an explicit project path")?;
+            let path = args["path"].as_str()
+                .or_else(|| args["project_path"].as_str())
+                .or_else(|| args["dir"].as_str())
+                .or_else(|| args["directory"].as_str())
+                .or_else(|| args["project_dir"].as_str())
+                .or_else(|| args["repo_path"].as_str())
+                .filter(|p| !p.trim().is_empty())
+                .ok_or_else(|| anyhow::Error::new(MalformedCall(
+                    format!("{name} requires a project path. Pass path=<directory>, e.g. path=/path/to/project")
+                )))?;
             if name == "project_context" { project::context(path) } else { project::verify(path).await }
         }
 
         "edit_file" => {
-            let path = args["path"].as_str().unwrap_or("");
+            let path = args["path"].as_str()
+                .or_else(|| args["file"].as_str())
+                .or_else(|| args["filepath"].as_str())
+                .unwrap_or("");
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
             let open_in_gui = args["open_in_gui"].as_bool().unwrap_or(false);
-            let old_str = args["old_str"].as_str();
-            let new_str = args["new_str"].as_str();
-            let content = args["content"].as_str();
+            let old_str = args["old_str"].as_str()
+                .or_else(|| args["target"].as_str())
+                .or_else(|| args["search"].as_str())
+                .or_else(|| args["find"].as_str())
+                .or_else(|| args["original"].as_str());
+            let new_str = args["new_str"].as_str()
+                .or_else(|| args["replacement"].as_str())
+                .or_else(|| args["replace"].as_str());
+            let content = args["content"].as_str()
+                .or_else(|| args["text"].as_str())
+                .or_else(|| args["code"].as_str());
 
             if open_in_gui || (old_str.is_none() && new_str.is_none() && content.is_none()) {
                 if expanded.trim().is_empty() { anyhow::bail!("edit_file requires a path"); }
@@ -1755,7 +1861,10 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             // Same defect as write_file/run_shell: a missing `path` used to
             // read /dev/null, which is empty, so the model received "" and
             // concluded the file did not exist.
-            let Some(path) = args["path"].as_str().filter(|p| !p.trim().is_empty()) else {
+            let Some(path) = args["path"].as_str()
+                .or_else(|| args["file"].as_str())
+                .or_else(|| args["filepath"].as_str())
+                .filter(|p| !p.trim().is_empty()) else {
                 return Err(anyhow::Error::new(MalformedCall(
                     "read_file was called with no path. Re-issue with an explicit `path`."
                         .to_string(),
@@ -1775,14 +1884,20 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             // exists to prevent. Observed once in six exploit-authoring turns,
             // where the model omitted `path` and Luna cheerfully reported
             // writing to /dev/null instead of the requested file.
-            let Some(path) = args["path"].as_str().filter(|p| !p.trim().is_empty()) else {
+            let Some(path) = args["path"].as_str()
+                .or_else(|| args["file"].as_str())
+                .or_else(|| args["filepath"].as_str())
+                .filter(|p| !p.trim().is_empty()) else {
                 return Err(anyhow::Error::new(MalformedCall(
                     "write_file was called with no path. Nothing was written. \
                      Re-issue the call with an explicit `path` argument."
                         .to_string(),
                 )));
             };
-            let content = args["content"].as_str().ok_or_else(|| anyhow::anyhow!(
+            let content = args["content"].as_str()
+                .or_else(|| args["text"].as_str())
+                .or_else(|| args["code"].as_str())
+                .ok_or_else(|| anyhow::anyhow!(
                 "write_file requires an explicit content string; nothing was written"))?;
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
             // Her own source must go through the self_patch gate, not a raw write.
@@ -3391,6 +3506,29 @@ mod gate_tests {
                  Known: {known:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn parameter_aliases_are_accepted_across_tools() {
+        let cfg = crate::config::LunaConfig::default();
+        // project_context with project_path alias instead of path
+        let tmp = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&tmp).unwrap();
+        std::fs::write(tmp.join("Cargo.toml"), "[package]\nname = \"dummy\"\n").unwrap();
+
+        let c1 = call("project_context", serde_json::json!({"project_path": tmp.to_str().unwrap()}));
+        let res1 = execute(&c1, &cfg).await;
+        assert!(res1.is_ok(), "project_context should accept project_path: {:?}", res1.err());
+
+        // remember_project with project_path and text
+        let c2 = call("remember_project", serde_json::json!({
+            "project_path": tmp.to_str().unwrap(),
+            "text": "architecture note"
+        }));
+        let res2 = execute(&c2, &cfg).await;
+        assert!(res2.is_ok(), "remember_project should accept project_path & text: {:?}", res2.err());
+
+        std::fs::remove_dir_all(tmp).unwrap();
     }
 }
 

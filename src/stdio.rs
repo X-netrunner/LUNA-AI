@@ -346,8 +346,6 @@ pub async fn run(config: &LunaConfig) -> Result<()> {
                 let started = Instant::now();
                 match crate::agent::run_routed_turn(&text, &mut memory, &*config).await {
                     Ok(outcome) => {
-                        crate::agent::learning::append_turn("user", &text);
-                        crate::agent::learning::append_turn("assistant", &outcome.text);
                         emit(json!({
                             "type": "reply", "text": outcome.text, "thinking": outcome.thinking,
                             "model": outcome.model, "secs": (started.elapsed().as_secs_f64() * 10.0).round() / 10.0,

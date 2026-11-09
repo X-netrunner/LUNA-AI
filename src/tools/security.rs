@@ -115,18 +115,33 @@ pub async fn decode_payload(data: &str, encoding: &str, sudo_pass: Option<&str>)
             safe_data
         ),
         "rot13" => format!("printf '%s' '{}' | tr 'A-Za-z' 'N-ZA-Mn-za-m'", safe_data),
+        "reverse" => format!("printf '%s' '{}' | rev", safe_data),
+        "url_all" => format!(
+            "printf '%s' '{}' | python3 -c \"import urllib.parse, sys; s = sys.stdin.read();\nfor _ in range(5):\n    n = urllib.parse.unquote(s)\n    if n == s: break\n    s = n\nprint(s)\"",
+            safe_data
+        ),
+        "jwt" => format!(
+            "printf '%s' '{}' | python3 -c \"import sys, json, base64; tok = sys.stdin.read().strip(); parts = tok.split('.'); dec = lambda s: json.loads(base64.urlsafe_b64decode(s + '=' * ((4 - len(s) % 4) % 4))); print('Header:', json.dumps(dec(parts[0]), indent=2)); print('Payload:', json.dumps(dec(parts[1]), indent=2))\" 2>&1",
+            safe_data
+        ),
         "binary" => format!(
             "printf '%s' '{}' | python3 -c \"import sys; print(''.join(chr(int(b,2)) for b in sys.stdin.read().split()))\"",
             safe_data
         ),
         "auto" => {
-            // Try base64 first since it's the most common in CTF payloads
-            format!(
-                "printf '%s' '{}' | base64 -d 2>/dev/null \
-                 || printf '%s' '{}' | xxd -r -p 2>/dev/null \
-                 || echo 'Could not auto-decode — specify encoding explicitly'",
-                safe_data, safe_data
-            )
+            if safe_data.starts_with("eyJ") {
+                format!(
+                    "printf '%s' '{}' | python3 -c \"import sys, json, base64; tok = sys.stdin.read().strip(); parts = tok.split('.'); dec = lambda s: json.loads(base64.urlsafe_b64decode(s + '=' * ((4 - len(s) % 4) % 4))); print('Header:', json.dumps(dec(parts[0]), indent=2)); print('Payload:', json.dumps(dec(parts[1]), indent=2))\" 2>&1",
+                    safe_data
+                )
+            } else {
+                format!(
+                    "printf '%s' '{}' | base64 -d 2>/dev/null \
+                     || printf '%s' '{}' | xxd -r -p 2>/dev/null \
+                     || echo 'Could not auto-decode — specify encoding explicitly'",
+                    safe_data, safe_data
+                )
+            }
         }
         _ => anyhow::bail!("Unknown encoding: {}", encoding),
     };
@@ -188,6 +203,58 @@ pub async fn dns_lookup(target: &str, mode: &str, sudo_pass: Option<&str>) -> Re
     let out = result.stdout.trim();
     if out.is_empty() {
         Ok("No results found".to_string())
+    } else {
+        Ok(out.to_string())
+    }
+}
+
+// ── TLS / Certificate inspection ─────────────────────────────────────────────
+
+pub async fn inspect_cert(
+    target: &str,
+    port: u16,
+    sudo_pass: Option<&str>,
+    allowlist: &[String],
+) -> Result<String> {
+    ensure_scan_target_allowed(target, allowlist)?;
+    let safe_target = sanitize_target(target);
+    let port = if port == 0 { 443 } else { port };
+    let cmd = format!(
+        "set -o pipefail; timeout 15 openssl s_client -connect '{safe_target}:{port}' -servername '{safe_target}' </dev/null 2>/dev/null | openssl x509 -noout -issuer -subject -dates -fingerprint 2>&1 | head -n 40"
+    );
+    let result = shell::run_command(&cmd, sudo_pass).await?;
+    check_command_result(&result)?;
+    let out = result.stdout.trim();
+    if out.is_empty() {
+        Ok("No certificate returned or connection refused".to_string())
+    } else {
+        Ok(out.to_string())
+    }
+}
+
+// ── HTTP security headers inspection ─────────────────────────────────────────
+
+pub async fn inspect_headers(
+    target: &str,
+    sudo_pass: Option<&str>,
+    allowlist: &[String],
+) -> Result<String> {
+    let clean = target.trim_start_matches("http://").trim_start_matches("https://");
+    let host = clean.split('/').next().unwrap_or(clean).split(':').next().unwrap_or(clean);
+    ensure_scan_target_allowed(host, allowlist)?;
+    let safe_target = if target.starts_with("http://") || target.starts_with("https://") {
+        target.replace('\'', "'\\''")
+    } else {
+        format!("http://{}", target.replace('\'', "'\\''"))
+    };
+    let cmd = format!(
+        "set -o pipefail; timeout 15 curl -sIL -k -m 10 '{safe_target}' 2>&1 | grep -iE '^(HTTP/|strict-transport|content-security|x-frame|x-content|set-cookie|access-control|server)' | head -n 40"
+    );
+    let result = shell::run_command(&cmd, sudo_pass).await?;
+    check_command_result(&result)?;
+    let out = result.stdout.trim();
+    if out.is_empty() {
+        Ok("No security headers returned (endpoint unreachable or sent no matching headers)".to_string())
     } else {
         Ok(out.to_string())
     }
@@ -356,6 +423,20 @@ mod scan_scope_tests {
         for t in ["127.0.0.1.evil.test", "127.example.com", "localhost.evil.test"] {
             assert!(!is_loopback_target(t), "{t} should not count as loopback");
         }
+    }
+
+    #[tokio::test]
+    async fn payload_decoding_jwt_and_reverse() {
+        let rev = decode_payload("anticipate", "reverse", None).await.unwrap();
+        assert_eq!(rev, "etapicitna");
+
+        // Synthetic JWT: header {"alg":"none"}, payload {"user":"admin","role":"root"}
+        let jwt = "eyJhbGciOiJub25lIn0.eyJ1c2VyIjoiYWRtaW4iLCJyb2xlIjoicm9vdCJ9.sig";
+        let out = decode_payload(jwt, "jwt", None).await.unwrap();
+        assert!(out.contains("admin") && out.contains("root") && out.contains("Header"));
+
+        let auto_out = decode_payload(jwt, "auto", None).await.unwrap();
+        assert!(auto_out.contains("admin") && auto_out.contains("root"));
     }
 }
 // ── Tool availability ────────────────────────────────────────────────────────
