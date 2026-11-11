@@ -12,7 +12,9 @@ pub struct ShellOutput {
 
 pub async fn run_command(command: &str, sudo_pass: Option<&str>) -> Result<ShellOutput> {
     let final_cmd = inject_sudo_password(command, sudo_pass);
-    let pass = sudo_pass.map(str::to_string);
+    let pass = sudo_pass
+        .filter(|_| final_cmd.contains(SUDO_PASS_ENV))
+        .map(str::to_string);
     tracing::debug!("Running: {}", command); // log original, never log password
 
     let output = tokio::task::spawn_blocking(move || {
@@ -191,7 +193,7 @@ pub fn inject_sudo_password(cmd: &str, sudo_pass: Option<&str>) -> String {
 
     match sudo_pass {
         Some(_) => format!(
-            "sudo() {{ printf '%s\\n' \"${SUDO_PASS_ENV}\" | command sudo -S -p '' \"$@\"; }}; {}",
+            "__luna_pw=\"${SUDO_PASS_ENV}\"; unset {SUDO_PASS_ENV}; sudo() {{ printf '%s\\n' \"$__luna_pw\" | command sudo -S -p '' \"$@\"; }}; {}",
             cmd
         ),
         None => {
@@ -224,7 +226,26 @@ mod sudo_tests {
     fn the_password_never_appears_in_the_command_line() {
         let script = inject_sudo_password("sudo pacman -Syu", Some("hunter2's"));
         assert!(!script.contains("hunter2"), "{script}");
-        assert!(script.contains(SUDO_PASS_ENV));
+        assert!(script.contains(&format!("unset {SUDO_PASS_ENV}")));
+    }
+
+    #[tokio::test]
+    async fn child_processes_do_not_inherit_the_password() {
+        let dir = std::env::temp_dir().join(format!("luna-sudo-env-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        let stub = dir.join("sudo");
+        std::fs::write(&stub, "#!/bin/sh\ncat >/dev/null\n").expect("stub");
+        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
+        let cmd = format!("PATH={}:$PATH; sudo true; env", dir.display());
+        let out = run_command(&cmd, Some("hunter2")).await.expect("run");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!out.stdout.contains("hunter2"), "{}", out.stdout);
+        let plain = run_command("env", Some("hunter2")).await.expect("run");
+        assert!(
+            !plain.stdout.contains("hunter2"),
+            "no sudo in the command, no password in its environment"
+        );
     }
 
     #[tokio::test]
