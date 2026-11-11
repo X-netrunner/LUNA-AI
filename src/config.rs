@@ -1603,11 +1603,23 @@ fn resolve_secret_ref(value: Option<String>) -> Option<String> {
 }
 
 /// Path to the file-based secrets store (fallback when OS keyring unavailable).
-fn secrets_path() -> PathBuf {
+fn secrets_path() -> Result<PathBuf> {
     dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("luna")
-        .join("secrets.toml")
+        .map(|d| d.join("luna").join("secrets.toml"))
+        .context("No config directory to keep secrets in (HOME is not set)")
+}
+
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    f.write_all(text.as_bytes())
 }
 
 /// Store a secret — tries OS keyring first, falls back to encrypted file.
@@ -1620,7 +1632,7 @@ pub fn keyring_set(name: &str, secret: &str) -> Result<()> {
     }
 
     // Fallback: file-based storage
-    let path = secrets_path();
+    let path = secrets_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("Failed to create secrets directory")?;
     }
@@ -1638,7 +1650,7 @@ pub fn keyring_set(name: &str, secret: &str) -> Result<()> {
     secrets.insert(name.to_string(), toml::Value::String(secret.to_string()));
 
     let toml_str = toml::to_string_pretty(&secrets).context("Failed to serialize secrets")?;
-    std::fs::write(&path, toml_str)
+    write_private(&path, &toml_str)
         .with_context(|| format!("Failed to write secrets to {:?}", path))?;
 
     Ok(())
@@ -1654,7 +1666,7 @@ pub fn keyring_get(name: &str) -> Result<String> {
     }
 
     // Fallback: file-based storage
-    secret_from_file(&secrets_path(), name)
+    secret_from_file(&secrets_path()?, name)
 }
 
 /// Read one secret out of a `secrets.toml` table.

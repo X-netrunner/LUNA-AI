@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use std::process::Command;
 use std::time::Duration;
 
+const SUDO_PASS_ENV: &str = "LUNA_SUDO_PASS";
+
 pub struct ShellOutput {
     pub stdout: String,
     pub stderr: String,
@@ -10,14 +12,16 @@ pub struct ShellOutput {
 
 pub async fn run_command(command: &str, sudo_pass: Option<&str>) -> Result<ShellOutput> {
     let final_cmd = inject_sudo_password(command, sudo_pass);
+    let pass = sudo_pass.map(str::to_string);
     tracing::debug!("Running: {}", command); // log original, never log password
 
     let output = tokio::task::spawn_blocking(move || {
-        Command::new("bash")
-            .arg("-c")
-            .arg(&final_cmd)
-            .output()
-            .context("Failed to spawn bash")
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c").arg(&final_cmd);
+        if let Some(pass) = pass {
+            cmd.env(SUDO_PASS_ENV, pass);
+        }
+        cmd.output().context("Failed to spawn bash")
     })
     .await
     .context("spawn_blocking panicked")??;
@@ -186,13 +190,10 @@ pub fn inject_sudo_password(cmd: &str, sudo_pass: Option<&str>) -> String {
     }
 
     match sudo_pass {
-        Some(pass) => {
-            let safe_pass = pass.replace('\'', "'\\''");
-            format!(
-                "sudo() {{ echo '{}' | command sudo -S -p '' \"$@\"; }}; {}",
-                safe_pass, cmd
-            )
-        }
+        Some(_) => format!(
+            "sudo() {{ printf '%s\\n' \"${SUDO_PASS_ENV}\" | command sudo -S -p '' \"$@\"; }}; {}",
+            cmd
+        ),
         None => {
             // No password stored — strip sudo entirely.
             // Command will fail with a permission error, which is far better
@@ -212,5 +213,31 @@ fn truncate(s: &str, max_chars: usize) -> String {
             t,
             s.chars().count() - max_chars
         )
+    }
+}
+
+#[cfg(test)]
+mod sudo_tests {
+    use super::*;
+
+    #[test]
+    fn the_password_never_appears_in_the_command_line() {
+        let script = inject_sudo_password("sudo pacman -Syu", Some("hunter2's"));
+        assert!(!script.contains("hunter2"), "{script}");
+        assert!(script.contains(SUDO_PASS_ENV));
+    }
+
+    #[tokio::test]
+    async fn the_password_still_reaches_sudo_on_stdin() {
+        let dir = std::env::temp_dir().join(format!("luna-sudo-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        let stub = dir.join("sudo");
+        std::fs::write(&stub, "#!/bin/sh\ncat\n").expect("stub");
+        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
+        let cmd = format!("PATH={}:$PATH; sudo true", dir.display());
+        let out = run_command(&cmd, Some("hunter2")).await.expect("run");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(out.stdout.trim(), "hunter2");
     }
 }
