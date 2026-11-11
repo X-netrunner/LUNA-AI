@@ -620,11 +620,7 @@ fn site_search_url(current: &str, query: &str) -> Option<String> {
         "/s?k="
     } else if host.contains("ebay.") {
         "/sch/i.html?_nkw="
-    } else if host.contains("flipkart.") {
-        "/search?q="
-    } else if host.contains("etsy.") {
-        "/search?q="
-    } else if host.contains("walmart.") {
+    } else if host.contains("flipkart.") || host.contains("etsy.") || host.contains("walmart.") {
         "/search?q="
     } else if host.contains("bestbuy.") {
         "/site/searchpage.jsp?st="

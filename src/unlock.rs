@@ -82,7 +82,7 @@ const CHALLENGE: &[u8] = b"luna/security-tier/unrestricted/v1";
 /// decision to revisit, and the separate challenge is the right shape then. The
 /// user has already said so: approval-based access without shipping the source,
 /// rather than trying to make this code tamper-proof.
-
+///
 /// Ed25519 sizes. `ring` will not hand back a wrong-length key, so these are
 /// checked before anything else touches the bytes.
 const SEED_LEN: usize = 32;

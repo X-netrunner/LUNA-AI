@@ -153,9 +153,12 @@ mod tests {
     fn cpu_only_ollama_dir_is_flagged() {
         let d = tmpdir("cpu");
         std::fs::write(d.join("libggml-cpu-haswell.so"), b"").unwrap();
-        assert_eq!(ollama_has_gpu_backend(&[d.clone()]), Some(false));
+        assert_eq!(
+            ollama_has_gpu_backend(std::slice::from_ref(&d)),
+            Some(false)
+        );
         std::fs::create_dir(d.join("cuda_v13")).unwrap();
-        assert_eq!(ollama_has_gpu_backend(&[d.clone()]), Some(true));
+        assert_eq!(ollama_has_gpu_backend(std::slice::from_ref(&d)), Some(true));
         std::fs::remove_dir_all(d).ok();
     }
 

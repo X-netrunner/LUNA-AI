@@ -543,15 +543,17 @@ mod tests {
     #[ignore = "live desktop automation; grabs the mouse and opens real apps"]
     async fn live_desktop_loop() {
         use crate::config::{DesktopConfig, LunaConfig};
-        let mut cfg = LunaConfig::default();
-        cfg.desktop = DesktopConfig {
-            enabled: true,
-            srijan_url: "http://127.0.0.1:8001".into(),
-            server_dir: "/home/netrunner/Projects/sih/Project-Vision/Server[unnati&srijan]".into(),
-            screenshot_cmd: "grim".into(),
-            ydotool_bin: "ydotool".into(),
-            max_steps: 25,
-            timeout_secs: 300,
+        let cfg = LunaConfig {
+            desktop: DesktopConfig {
+                enabled: true,
+                srijan_url: "http://127.0.0.1:8001".into(),
+                server_dir: std::env::var("LUNA_DESKTOP_SERVER_DIR").unwrap_or_default(),
+                screenshot_cmd: "grim".into(),
+                ydotool_bin: "ydotool".into(),
+                max_steps: 25,
+                timeout_secs: 300,
+            },
+            ..Default::default()
         };
         let out =
             crate::tools::desktop::run("Open firefox and go to the Luna project on GitHub", &cfg)

@@ -673,6 +673,12 @@ fn default_exec_max_blocks() -> usize {
     3
 }
 
+fn home_dir_string() -> String {
+    dirs::home_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Default home for security-tier scripts: `~/Documents/luna-scripts`.
 ///
 /// `XDG_DOCUMENTS_DIR` is honoured when set, because on Arch the user may well
@@ -685,7 +691,7 @@ pub fn default_security_scripts_dir() -> String {
             return format!("{}/luna-scripts", docs.trim_end_matches('/'));
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/netrunner".to_string());
+    let home = home_dir_string();
     format!("{}/Documents/luna-scripts", home.trim_end_matches('/'))
 }
 
@@ -1243,7 +1249,7 @@ pub struct SelfPatchConfig {
 
 impl Default for SelfPatchConfig {
     fn default() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/netrunner".into());
+        let home = home_dir_string();
         Self {
             enabled: true,
             source_dir: format!("{home}/Projects/luna-stable"),
@@ -1514,7 +1520,7 @@ pub fn edit_leaf(text: &str, dotted: &str, value: toml_edit::Value) -> Result<St
             .with_context(|| format!("{p} in luna.toml is not a section"))?;
     }
     // keep the old value's surrounding comments ("model = \"a\"  # primary")
-    let mut new = toml_edit::Value::from(value);
+    let mut new = value;
     if let Some(old) = table.get(leaf).and_then(|i| i.as_value()) {
         *new.decor_mut() = old.decor().clone();
     }

@@ -1695,17 +1695,28 @@ pub(crate) fn voice_mode_exit_match(s: &str) -> bool {
 /// Route a single input through the correct model tier and print/speak the
 /// reply. Shared by the text, conversation-window, and voice-mode paths so a
 /// fix to answer quality applies everywhere once.
+struct ReactTiers<'r, 'a> {
+    main: &'r ReactLoop<'a>,
+    fast: Option<&'r ReactLoop<'a>>,
+    deep: Option<&'r ReactLoop<'a>>,
+    security: Option<&'r ReactLoop<'a>>,
+    deep_unrestricted: Option<&'r ReactLoop<'a>>,
+}
+
 async fn answer_input(
     input: &str,
     config: &LunaConfig,
     memory: &mut Memory,
-    react: &ReactLoop<'_>,
-    fast_react: Option<&ReactLoop<'_>>,
-    deep_react: Option<&ReactLoop<'_>>,
-    security_react: Option<&ReactLoop<'_>>,
-    deep_unrestricted_react: Option<&ReactLoop<'_>>,
+    tiers: ReactTiers<'_, '_>,
     system_prompt: &str,
 ) {
+    let ReactTiers {
+        main: react,
+        fast: fast_react,
+        deep: deep_react,
+        security: security_react,
+        deep_unrestricted: deep_unrestricted_react,
+    } = tiers;
     let debug = config.logging.level == "debug";
     let (mut active_react, mut effective_prompt, mut tier): (&ReactLoop, String, Tier) =
         match classify_with_latch(input) {
@@ -2086,11 +2097,13 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                     &input,
                     config,
                     &mut memory,
-                    &react,
-                    fast_react.as_ref(),
-                    deep_react.as_ref(),
-                    security_react.as_ref(),
-                    deep_unrestricted_react.as_ref(),
+                    ReactTiers {
+                        main: &react,
+                        fast: fast_react.as_ref(),
+                        deep: deep_react.as_ref(),
+                        security: security_react.as_ref(),
+                        deep_unrestricted: deep_unrestricted_react.as_ref(),
+                    },
                     &system_prompt,
                 )
                 .await;
@@ -2182,11 +2195,13 @@ async fn run_hybrid(config: &LunaConfig) -> Result<()> {
                     &input,
                     config,
                     &mut memory,
-                    &react,
-                    fast_react.as_ref(),
-                    deep_react.as_ref(),
-                    security_react.as_ref(),
-                    deep_unrestricted_react.as_ref(),
+                    ReactTiers {
+                        main: &react,
+                        fast: fast_react.as_ref(),
+                        deep: deep_react.as_ref(),
+                        security: security_react.as_ref(),
+                        deep_unrestricted: deep_unrestricted_react.as_ref(),
+                    },
                     &system_prompt,
                 )
                 .await;
@@ -3056,8 +3071,10 @@ mod tests {
     /// variable is still a broken gate.
     #[test]
     fn the_config_flag_alone_cannot_reach_the_unrestricted_prompt() {
-        let mut cfg = crate::config::LlmConfig::default();
-        cfg.security_unrestricted = true;
+        let cfg = crate::config::LlmConfig {
+            security_unrestricted: true,
+            ..Default::default()
+        };
         // No developer key at all — the state a user is in before ever running
         // the key generator.
         assert!(cfg.security_dev_public_key.is_empty());
@@ -3099,12 +3116,14 @@ mod tests {
     /// nothing.
     #[test]
     fn a_configured_key_without_a_signature_is_still_inert() {
-        let mut cfg = crate::config::LlmConfig::default();
-        cfg.security_unrestricted = true;
         // A well-formed but arbitrary public key. Never unlocked in this test —
         // and the receipt path is whatever the process has, which for a unit
         // test is not a real unlock.
-        cfg.security_dev_public_key = "11".repeat(32);
+        let cfg = crate::config::LlmConfig {
+            security_unrestricted: true,
+            security_dev_public_key: "11".repeat(32),
+            ..Default::default()
+        };
 
         assert!(cfg.security_dev_public_key.len() == 64);
         assert!(
@@ -3136,9 +3155,11 @@ mod tests {
             &"0".repeat(65), // one long
             "not a key at all, this is prose someone pasted by mistake",
         ] {
-            let mut cfg = crate::config::LlmConfig::default();
-            cfg.security_unrestricted = true;
-            cfg.security_dev_public_key = bad.to_string();
+            let cfg = crate::config::LlmConfig {
+                security_unrestricted: true,
+                security_dev_public_key: bad.to_string(),
+                ..Default::default()
+            };
             assert!(
                 !cfg.security_unrestricted_active(),
                 "malformed key {bad:?} enabled unrestricted mode"

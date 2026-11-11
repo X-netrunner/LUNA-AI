@@ -3172,9 +3172,11 @@ mod security_gate_tests {
         unlock::unlock(&pk, &sk).unwrap();
 
         // Requested + unlocked → on.
-        let mut cfg = crate::config::LlmConfig::default();
-        cfg.security_unrestricted = true;
-        cfg.security_dev_public_key = pk.clone();
+        let mut cfg = crate::config::LlmConfig {
+            security_unrestricted: true,
+            security_dev_public_key: pk.clone(),
+            ..Default::default()
+        };
         assert!(cfg.security_unrestricted_active());
         assert_eq!(cfg.security_gate_state(), unlock::GateState::Unlocked);
 

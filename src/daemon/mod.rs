@@ -464,7 +464,7 @@ async fn handle_idle(
     // "in order of time" — longest idle first
     targets.sort_by_key(|t| std::cmp::Reverse(t.idle_mins));
 
-    let period = if auto_stop > 0 && auto_stop % 60 == 0 {
+    let period = if auto_stop > 0 && auto_stop.is_multiple_of(60) {
         format!("{}h", auto_stop / 60)
     } else {
         format!("{} min", auto_stop.max(1))

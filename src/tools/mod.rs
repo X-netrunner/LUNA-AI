@@ -3506,9 +3506,11 @@ mod gate_tests {
     fn halcyon_tools_are_gated_even_when_luna_toml_predates_them() {
         // A luna.toml written before these tools existed carries an explicit `gated_tools` and `capability_tools` without them.
         // The tools must be gated by name, not by whatever the file lists.
-        let mut cfg = crate::config::ExternalActionConfig::default();
-        cfg.gated_tools = vec!["whatsapp_send".into()];
-        cfg.capability_tools = vec!["nmap_scan".into()];
+        let cfg = crate::config::ExternalActionConfig {
+            gated_tools: vec!["whatsapp_send".into()],
+            capability_tools: vec!["nmap_scan".into()],
+            ..Default::default()
+        };
         assert!(cfg.is_gated("halcyon_do"));
         assert!(cfg.is_capability_gated("halcyon_security"));
         assert!(!cfg.is_gated("halcyon_info") && !cfg.is_capability_gated("halcyon_info"));

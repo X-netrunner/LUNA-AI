@@ -1537,10 +1537,7 @@ mod tests {
     fn keep_alive_defaults_to_a_working_session_not_ollamas_five_minutes() {
         let c = client_with_keep_alive(DEFAULT_KEEP_ALIVE_MINS);
         assert_eq!(c.keep_alive_value(), "30m");
-        assert!(
-            DEFAULT_KEEP_ALIVE_MINS >= 30,
-            "too short: {DEFAULT_KEEP_ALIVE_MINS}m"
-        );
+        const _: () = assert!(DEFAULT_KEEP_ALIVE_MINS >= 30, "keep-alive too short");
     }
 
     /// Zero is meaningful to Ollama ("unload immediately"), not "unset" — it has

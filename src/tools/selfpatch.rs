@@ -1600,8 +1600,10 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
 
     #[test]
     fn a_filter_narrows_the_listing_without_guessing() {
-        let mut cfg = crate::config::SelfPatchConfig::default();
-        cfg.source_dir = env!("CARGO_MANIFEST_DIR").to_string();
+        let cfg = crate::config::SelfPatchConfig {
+            source_dir: env!("CARGO_MANIFEST_DIR").to_string(),
+            ..Default::default()
+        };
         let root = PathBuf::from(&cfg.source_dir);
         let all = list_source_files(&root, "");
         let only = list_source_files(&root, "selfpatch");
@@ -1685,8 +1687,10 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
 
     #[test]
     fn raw_writes_into_her_own_source_are_refused() {
-        let mut cfg = crate::config::SelfPatchConfig::default();
-        cfg.source_dir = env!("CARGO_MANIFEST_DIR").to_string();
+        let cfg = crate::config::SelfPatchConfig {
+            source_dir: env!("CARGO_MANIFEST_DIR").to_string(),
+            ..Default::default()
+        };
         let root = cfg.source_dir.clone();
         // A real source file:
         assert!(blocks_raw_write(&cfg, &format!("{root}/src/tools/pkgupdate.rs")).is_some());

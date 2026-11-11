@@ -36,7 +36,7 @@ pub async fn read_file(path: &str, offset: Option<usize>, limit: Option<usize>) 
             let is_dir = meta.map(|m| m.is_dir()).unwrap_or(false);
             items.push((when, e.file_name().to_string_lossy().to_string(), is_dir));
         }
-        items.sort_by(|a, b| b.0.cmp(&a.0));
+        items.sort_by_key(|x| std::cmp::Reverse(x.0));
         let list: Vec<String> = items
             .iter()
             .take(200)
@@ -273,7 +273,7 @@ mod tests {
         // dumped whole, and the note points at the next page.
         let head = read_file(path_str, None, None).await.unwrap();
         assert!(
-            head.contains(&format!("of 3000")),
+            head.contains(&"of 3000".to_string()),
             "reports total: {}",
             &head[..80]
         );

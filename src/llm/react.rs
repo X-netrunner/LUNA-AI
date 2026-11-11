@@ -220,7 +220,7 @@ impl<'a> ReactLoop<'a> {
         user_input: &str,
         memory: &mut Memory,
         system_prompt: &str,
-        mut turn_messages: &mut Vec<Message>,
+        turn_messages: &mut Vec<Message>,
     ) -> Result<(String, Option<String>, bool)> {
         memory.push(Message::user(user_input));
 
@@ -311,7 +311,7 @@ impl<'a> ReactLoop<'a> {
             iteration += 1;
             if iteration > self.max_iterations {
                 tracing::warn!("ReAct max iterations ({}) reached", self.max_iterations);
-                let fallback = self.synthesize_answer(&turn_messages);
+                let fallback = self.synthesize_answer(turn_messages);
                 memory.push(Message::assistant(&fallback));
                 let think_opt = if accumulated_thinking.trim().is_empty() {
                     None
@@ -322,7 +322,7 @@ impl<'a> ReactLoop<'a> {
             }
 
             let mut context = memory.build_context(system_prompt);
-            context.extend_from_slice(&turn_messages);
+            context.extend_from_slice(turn_messages);
 
             tracing::debug!("ReAct iteration {}, context: {}", iteration, context.len());
             // Announced before the `await`, because this is the long silent part:
@@ -375,7 +375,7 @@ impl<'a> ReactLoop<'a> {
                             tracing::debug!(
                                 "Empty content after tool result — synthesizing answer"
                             );
-                            let fallback = self.synthesize_answer(&turn_messages);
+                            let fallback = self.synthesize_answer(turn_messages);
                             memory.push(Message::assistant(&fallback));
                             let think_opt = if accumulated_thinking.trim().is_empty() {
                                 None
@@ -390,7 +390,7 @@ impl<'a> ReactLoop<'a> {
                             // report what they actually returned rather than
                             // pretending the turn produced nothing.
                             let fallback = if turn_messages.iter().any(|m| m.role == "tool") {
-                                self.synthesize_answer(&turn_messages)
+                                self.synthesize_answer(turn_messages)
                             } else {
                                 "I couldn't generate a response — the model returned \
                                  nothing three times in a row. Try rephrasing, or ask me \
@@ -497,11 +497,11 @@ impl<'a> ReactLoop<'a> {
                                 &used_calls,
                                 &text,
                                 &mut write_retries,
-                                &mut turn_messages,
+                                turn_messages,
                             ) {
                                 continue;
                             }
-                            let fallback = self.synthesize_answer(&turn_messages);
+                            let fallback = self.synthesize_answer(turn_messages);
                             memory.push(Message::assistant(&fallback));
                             let think_opt = if accumulated_thinking.trim().is_empty() {
                                 None
@@ -580,7 +580,7 @@ impl<'a> ReactLoop<'a> {
                             &tool_name,
                             &tool_result,
                             &mut edit_retried,
-                            &mut turn_messages,
+                            turn_messages,
                         ) {
                             continue;
                         }
@@ -594,7 +594,7 @@ impl<'a> ReactLoop<'a> {
                                 &tool_name,
                                 &tool_result,
                                 &mut validation_retries,
-                                &mut turn_messages,
+                                turn_messages,
                             )
                         {
                             continue;
@@ -604,7 +604,7 @@ impl<'a> ReactLoop<'a> {
                                 "Stopping turn: '{}' failed after an earlier success",
                                 tool_name
                             );
-                            let fallback = self.synthesize_answer(&turn_messages);
+                            let fallback = self.synthesize_answer(turn_messages);
                             memory.push(Message::assistant(&fallback));
                             let think_opt = if accumulated_thinking.trim().is_empty() {
                                 None
@@ -699,7 +699,7 @@ impl<'a> ReactLoop<'a> {
                         &used_calls,
                         &text,
                         &mut write_retries,
-                        &mut turn_messages,
+                        turn_messages,
                     ) {
                         continue;
                     }
@@ -951,11 +951,11 @@ impl<'a> ReactLoop<'a> {
                                     &used_calls,
                                     "",
                                     &mut write_retries,
-                                    &mut turn_messages,
+                                    turn_messages,
                                 ) {
                                     continue 'react;
                                 }
-                                let fallback = self.synthesize_answer(&turn_messages);
+                                let fallback = self.synthesize_answer(turn_messages);
                                 memory.push(Message::assistant(&fallback));
                                 let think_opt = if accumulated_thinking.trim().is_empty() {
                                     None
@@ -1052,7 +1052,7 @@ impl<'a> ReactLoop<'a> {
                             &tool_name,
                             &tool_result,
                             &mut edit_retried,
-                            &mut turn_messages,
+                            turn_messages,
                         ) {
                             continue 'react;
                         }
@@ -1067,7 +1067,7 @@ impl<'a> ReactLoop<'a> {
                                 &tool_name,
                                 &tool_result,
                                 &mut validation_retries,
-                                &mut turn_messages,
+                                turn_messages,
                             )
                         {
                             continue 'react;
@@ -1077,7 +1077,7 @@ impl<'a> ReactLoop<'a> {
                                 "Stopping turn: '{}' failed after an earlier success",
                                 tool_name
                             );
-                            let fallback = self.synthesize_answer(&turn_messages);
+                            let fallback = self.synthesize_answer(turn_messages);
                             memory.push(Message::assistant(&fallback));
                             let think_opt = if accumulated_thinking.trim().is_empty() {
                                 None
@@ -2619,7 +2619,7 @@ fn looks_like_command_line(line: &str) -> bool {
 /// output leaves a fabricated credential in front of the user. False positives
 /// are bounded — a wasted iteration — so the hedge list below is deliberately
 /// generous.
-
+///
 /// One tool call that actually happened this turn, and what it returned.
 #[derive(Clone, Debug)]
 pub(crate) struct Receipt {
