@@ -267,7 +267,10 @@ mod tests {
     #[test]
     fn the_offensive_request_that_started_this_is_recon_worthy() {
         clean(|| {
-            assert!(should_recon("i want you to try to attack my laptop", &cfg()));
+            assert!(should_recon(
+                "i want you to try to attack my laptop",
+                &cfg()
+            ));
         });
     }
 
@@ -333,7 +336,10 @@ mod tests {
                     extra += 1;
                 }
             }
-            assert!(extra < LATCH_TURNS, "latch never expired ({extra} extra turns)");
+            assert!(
+                extra < LATCH_TURNS,
+                "latch never expired ({extra} extra turns)"
+            );
             assert!(!task_active(), "latch still armed after the window");
         });
     }
@@ -388,7 +394,10 @@ mod tests {
     fn a_failed_scan_is_reported_as_a_failure_and_forbids_invention() {
         let block = injection_block("attack my laptop", &Err("capability gate closed".into()));
         assert!(block.contains("FAILED"), "failure not marked: {block}");
-        assert!(block.contains("capability gate closed"), "cause lost: {block}");
+        assert!(
+            block.contains("capability gate closed"),
+            "cause lost: {block}"
+        );
         assert!(
             block.contains("Do NOT answer with a port list"),
             "invention not forbidden: {block}"
@@ -404,11 +413,18 @@ mod tests {
             &Ok("22/tcp open ssh\n80/tcp open http".into()),
         );
         assert!(block.contains("22/tcp open ssh"), "output missing: {block}");
-        assert!(block.contains("already performed"), "reads as pending: {block}");
-        assert!(block.contains("It has happened."), "not marked done: {block}");
+        assert!(
+            block.contains("already performed"),
+            "reads as pending: {block}"
+        );
+        assert!(
+            block.contains("It has happened."),
+            "not marked done: {block}"
+        );
         assert!(block.contains(RECON_TARGET), "address missing: {block}");
         assert!(
-            !block.contains("your_laptop_ip"), "reintroduced the placeholder"
+            !block.contains("your_laptop_ip"),
+            "reintroduced the placeholder"
         );
     }
 
@@ -417,6 +433,9 @@ mod tests {
     #[test]
     fn the_request_is_carried_into_the_block() {
         let block = injection_block("find the web server", &Ok("x".into()));
-        assert!(block.contains("find the web server"), "request lost: {block}");
+        assert!(
+            block.contains("find the web server"),
+            "request lost: {block}"
+        );
     }
 }

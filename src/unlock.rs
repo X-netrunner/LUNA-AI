@@ -153,9 +153,7 @@ pub(crate) struct TestReceipt {
 
 #[cfg(test)]
 pub(crate) fn test_receipt(path: PathBuf) -> TestReceipt {
-    let guard = TEST_RECEIPT_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let guard = TEST_RECEIPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("scratch receipt dir");
     }
@@ -181,7 +179,12 @@ pub(crate) fn scratch_receipt(label: &str) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir()
-        .join(format!("luna_receipt_{}_{}_{}", std::process::id(), label, n))
+        .join(format!(
+            "luna_receipt_{}_{}_{}",
+            std::process::id(),
+            label,
+            n
+        ))
         .join("security-unlock.sig")
 }
 
@@ -371,11 +374,7 @@ pub fn unlock(public_key: &str, private_key: &str) -> Result<()> {
         );
     }
     let configured = parse_hex(public_key, PUBKEY_LEN, "developer public key")?;
-    let seed = parse_hex(
-        private_key,
-        SEED_LEN,
-        "developer key",
-    )?;
+    let seed = parse_hex(private_key, SEED_LEN, "developer key")?;
 
     // Ring takes the seed, not a PKCS#8 wrapper, which is why a 64-character hex
     // string is the whole credential. `from_seed_unchecked` is deliberate: the
@@ -706,8 +705,8 @@ mod tests {
             " ",
             "zz",
             "not hex at all",
-            &"0".repeat(63),  // one short
-            &"0".repeat(65),  // one long
+            &"0".repeat(63),   // one short
+            &"0".repeat(65),   // one long
             &"0".repeat(4096), // far too long
             "../../etc/passwd",
         ] {

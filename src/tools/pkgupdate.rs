@@ -60,7 +60,12 @@ pub fn parse_line(line: &str) -> Option<Pending> {
         // side of flagging it so a human looks.
         _ => old != new,
     };
-    Some(Pending { name, old, new, breaking })
+    Some(Pending {
+        name,
+        old,
+        new,
+        breaking,
+    })
 }
 
 /// Parse a whole `checkupdates` output block.
@@ -95,7 +100,10 @@ fn sudo_shim(sudo_pass: Option<&str>) -> String {
     match sudo_pass {
         Some(p) => {
             let safe = p.replace('\'', "'\\''");
-            format!("sudo() {{ echo '{}' | command sudo -S -p '' \"$@\"; }};", safe)
+            format!(
+                "sudo() {{ echo '{}' | command sudo -S -p '' \"$@\"; }};",
+                safe
+            )
         }
         None => String::new(),
     }
@@ -200,7 +208,11 @@ pub async fn apply(sudo_pass: Option<&str>, allow_apply: bool) -> Result<String>
 
     let shim = sudo_shim(sudo_pass);
     let helper = if has_aur_helper().await {
-        if which("yay").is_some() { "yay" } else { "paru" }
+        if which("yay").is_some() {
+            "yay"
+        } else {
+            "paru"
+        }
     } else {
         "pacman"
     };

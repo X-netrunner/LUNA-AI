@@ -104,10 +104,7 @@ pub async fn scan_processes(
             Some((prev, at)) => {
                 let elapsed = now.duration_since(at).as_secs_f64();
                 if elapsed > 0.0 && total_jiffies >= prev {
-                    Some(
-                        ((total_jiffies - prev) as f64 / (elapsed * CLK_TCK) * 100.0)
-                            as f32,
-                    )
+                    Some(((total_jiffies - prev) as f64 / (elapsed * CLK_TCK) * 100.0) as f32)
                 } else {
                     None
                 }

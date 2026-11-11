@@ -18,24 +18,30 @@ pub async fn status() -> Result<String> {
     let mounted = mountpoint(MNT).await;
 
     if !dev_exists {
-        out.push_str(&format!("Drive {} not connected (plug it in to back up).", DEV));
+        out.push_str(&format!(
+            "Drive {} not connected (plug it in to back up).",
+            DEV
+        ));
         return Ok(out);
     }
     if mounted {
         out.push_str(&format!("Drive {} mounted at {}.\n", DEV, MNT));
     } else {
-        out.push_str(&format!("Drive {} present but not mounted at {}.\n", DEV, MNT));
+        out.push_str(&format!(
+            "Drive {} present but not mounted at {}.\n",
+            DEV, MNT
+        ));
     }
 
-    let blkid = crate::tools::shell::run_command(
-        &format!("lsblk -n -o UUID {}", DEV),
-        None,
-    ).await;
+    let blkid = crate::tools::shell::run_command(&format!("lsblk -n -o UUID {}", DEV), None).await;
     if let Ok(o) = blkid {
         let id = o.stdout.trim();
         if !id.is_empty() {
-            out.push_str(&format!("UUID: {}{}\n", id,
-                if id == UUID { " ✓" } else { " (unexpected)" }));
+            out.push_str(&format!(
+                "UUID: {}{}\n",
+                id,
+                if id == UUID { " ✓" } else { " (unexpected)" }
+            ));
         }
     }
 
@@ -61,22 +67,22 @@ pub async fn run(sudo_pass: Option<&str>) -> Result<String> {
 }
 
 async fn mountpoint(path: &str) -> bool {
-    crate::tools::shell::run_command(
-        &format!("mountpoint -q {} && echo YES", path),
-        None,
-    ).await
+    crate::tools::shell::run_command(&format!("mountpoint -q {} && echo YES", path), None)
+        .await
         .map(|o| o.stdout.trim().eq_ignore_ascii_case("YES"))
         .unwrap_or(false)
 }
 
 async fn latest_snapshot() -> Option<String> {
     let root = format!("{}/arch-backup", MNT);
-    let out = crate::tools::shell::run_command(
-        &format!("ls -1dt {}/ 2>/dev/null | head -1", root),
-        None,
-    ).await.ok()?;
+    let out =
+        crate::tools::shell::run_command(&format!("ls -1dt {}/ 2>/dev/null | head -1", root), None)
+            .await
+            .ok()?;
     let name = out.stdout.trim();
-    if name.is_empty() { return None; }
+    if name.is_empty() {
+        return None;
+    }
     // date_YYYY-MM-DD_HHMM / latest symlink — resolve to base name
     let base = std::path::Path::new(name)
         .file_name()
@@ -84,10 +90,12 @@ async fn latest_snapshot() -> Option<String> {
         .unwrap_or_else(|| name.to_string());
     // If latest symlink, point to actual dir name
     let dir = if base == "latest" {
-        crate::tools::shell::run_command(
-            &format!("basename $(readlink -f {}/latest)", root),
-            None,
-        ).await.ok()?.stdout.trim().to_string()
+        crate::tools::shell::run_command(&format!("basename $(readlink -f {}/latest)", root), None)
+            .await
+            .ok()?
+            .stdout
+            .trim()
+            .to_string()
     } else {
         base
     };
@@ -95,19 +103,29 @@ async fn latest_snapshot() -> Option<String> {
 }
 
 async fn dir_size(path: &str) -> Option<String> {
-    let out = crate::tools::shell::run_command(
-        &format!("du -sh {} 2>/dev/null | cut -f1", path),
-        None,
-    ).await.ok()?;
+    let out =
+        crate::tools::shell::run_command(&format!("du -sh {} 2>/dev/null | cut -f1", path), None)
+            .await
+            .ok()?;
     let s = out.stdout.trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 async fn free_space(path: &str) -> Option<String> {
     let out = crate::tools::shell::run_command(
         &format!("df -h {} | tail -1 | awk '{{print $4}}'", path),
         None,
-    ).await.ok()?;
+    )
+    .await
+    .ok()?;
     let s = out.stdout.trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }

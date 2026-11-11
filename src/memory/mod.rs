@@ -65,7 +65,10 @@ impl Memory {
     pub fn last_exchange(&self) -> Option<(String, String)> {
         let a = self.messages.iter().rposition(|m| m.role == "assistant")?;
         let u = self.messages[..a].iter().rposition(|m| m.role == "user")?;
-        Some((self.messages[u].content.clone(), self.messages[a].content.clone()))
+        Some((
+            self.messages[u].content.clone(),
+            self.messages[a].content.clone(),
+        ))
     }
 
     /// Build context for LLM — filters out tool call artifacts that

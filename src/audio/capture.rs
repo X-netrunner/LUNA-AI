@@ -155,9 +155,10 @@ pub fn strip_wake_word(text: &str, wake_aliases: &[String]) -> Option<String> {
                     return Some(words[i + 1..].join(" "));
                 }
             } else if i + alias_words.len() <= words.len()
-                && alias_words.iter().enumerate().all(|(j, aw)| {
-                    words[i + j].trim_matches(|c: char| !c.is_alphanumeric()) == *aw
-                })
+                && alias_words
+                    .iter()
+                    .enumerate()
+                    .all(|(j, aw)| words[i + j].trim_matches(|c: char| !c.is_alphanumeric()) == *aw)
             {
                 return Some(words[i + alias_words.len()..].join(" "));
             }
@@ -439,9 +440,6 @@ mod tests {
             Some("what time is it".to_string())
         );
         assert_eq!(strip_wake_word("luna", &a), Some(String::new()));
-        assert_eq!(
-            strip_wake_word("no wake word here", &a),
-            None
-        );
+        assert_eq!(strip_wake_word("no wake word here", &a), None);
     }
 }

@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use chromiumoxide::page::ScreenshotParams;
-use chromiumoxide::{Browser, BrowserConfig, browser::HeadlessMode};
+use chromiumoxide::{browser::HeadlessMode, Browser, BrowserConfig};
 use chromiumoxide_cdp::cdp::browser_protocol::page::NavigateParams;
 use futures::StreamExt;
 use serde_json::Value;
@@ -42,7 +42,12 @@ fn process_uses_profile(profile: &std::path::Path) -> bool {
         return false;
     };
     for entry in entries.flatten() {
-        if !entry.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit()) {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .chars()
+            .all(|c| c.is_ascii_digit())
+        {
             continue;
         }
         let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else {
@@ -312,8 +317,12 @@ impl CdpBrowser {
     /// Navigate to a URL and wait for load
     pub async fn navigate(&self, url: &str) -> Result<()> {
         let page = self.current_page().await?;
-        page.goto(NavigateParams::new(url)).await.context("navigate")?;
-        page.wait_for_navigation().await.context("wait for navigation")?;
+        page.goto(NavigateParams::new(url))
+            .await
+            .context("navigate")?;
+        page.wait_for_navigation()
+            .await
+            .context("wait for navigation")?;
         Ok(())
     }
 
@@ -375,7 +384,7 @@ impl CdpBrowser {
         .any(|k| m.contains(k))
     }
 
-/// The URL the page is actually on right now.
+    /// The URL the page is actually on right now.
     ///
     /// Needed because a navigate can fail to arrive: a login wall, a redirect,
     /// or a stale tab, and every one of those still leaves a page to report
@@ -392,10 +401,7 @@ impl CdpBrowser {
     /// Evaluate JavaScript in the page context
     pub async fn eval(&self, expression: &str) -> Result<Value> {
         let page = self.current_page().await?;
-        let result = page
-            .evaluate(expression)
-            .await
-            .context("evaluate js")?;
+        let result = page.evaluate(expression).await.context("evaluate js")?;
         Ok(result.object().value.clone().unwrap_or(Value::Null))
     }
 
@@ -424,8 +430,15 @@ impl CdpBrowser {
         if let Ok(Some(url)) = page.url().await {
             let lower = url.to_lowercase();
             let login_paths = [
-                "/login", "/login?", "/accounts/login", "/account/login", "/signin",
-                "/sign-in", "/sign_in", "/ap/signin", "/identity/login",
+                "/login",
+                "/login?",
+                "/accounts/login",
+                "/account/login",
+                "/signin",
+                "/sign-in",
+                "/sign_in",
+                "/ap/signin",
+                "/identity/login",
             ];
             if login_paths.iter().any(|p| lower.contains(p)) {
                 return Some(format!(
@@ -611,7 +624,10 @@ pub async fn ensure_browser(config: &crate::config::BrowserConfig) -> Result<Cdp
 
     // No healthy instance — clear stale processes/locks, then launch fresh.
     kill_leftovers(config).await;
-    tracing::info!("launching isolated Chromium on port {} for automation", config.cdp_port);
+    tracing::info!(
+        "launching isolated Chromium on port {} for automation",
+        config.cdp_port
+    );
     CdpBrowser::new(config).await
 }
 
@@ -623,16 +639,18 @@ mod tests {
     /// `click: Add to Cart` immediately after `pick_best` had done its job.
     #[test]
     fn a_navigation_is_recognised_as_a_navigation_not_a_failure() {
-        let lost = anyhow::anyhow!(
-            "evaluate js: Error -32000: Cannot find context with specified id"
-        );
+        let lost =
+            anyhow::anyhow!("evaluate js: Error -32000: Cannot find context with specified id");
         assert!(CdpBrowser::is_context_lost(&lost));
         for text in [
             "Execution context was destroyed",
             "No execution context",
             "Inspected target navigated or closed",
         ] {
-            assert!(CdpBrowser::is_context_lost(&anyhow::anyhow!(text)), "{text}");
+            assert!(
+                CdpBrowser::is_context_lost(&anyhow::anyhow!(text)),
+                "{text}"
+            );
         }
     }
 
@@ -645,9 +663,12 @@ mod tests {
             "SyntaxError: Unexpected token",
             "navigate: net::ERR_NAME_NOT_RESOLVED",
         ] {
-            assert!(!CdpBrowser::is_context_lost(&anyhow::anyhow!(text)), "{text}");
+            assert!(
+                !CdpBrowser::is_context_lost(&anyhow::anyhow!(text)),
+                "{text}"
+            );
         }
     }
-    
+
     // Tests require a running Chromium — skipped by default
 }

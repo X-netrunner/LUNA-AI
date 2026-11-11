@@ -16,12 +16,33 @@ pub struct ActionResult {
 
 impl ActionResult {
     pub fn fail(action: String, step_index: u64, tab_id: u64, error: String) -> Self {
-        Self { success: false, action, step_index, tab_id, error: Some(error), note: None }
+        Self {
+            success: false,
+            action,
+            step_index,
+            tab_id,
+            error: Some(error),
+            note: None,
+        }
     }
     pub fn ok(action: String, step_index: u64, tab_id: u64) -> Self {
-        Self { success: true, action, step_index, tab_id, error: None, note: None }
+        Self {
+            success: true,
+            action,
+            step_index,
+            tab_id,
+            error: None,
+            note: None,
+        }
     }
     pub fn ok_note(action: String, step_index: u64, tab_id: u64, note: String) -> Self {
-        Self { success: true, action, step_index, tab_id, error: None, note: Some(note) }
+        Self {
+            success: true,
+            action,
+            step_index,
+            tab_id,
+            error: None,
+            note: Some(note),
+        }
     }
 }

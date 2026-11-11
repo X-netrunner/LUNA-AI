@@ -28,9 +28,12 @@ pub(crate) async fn disk_cycle(
 
     // Auto mode: actually clean when / crosses the proactive threshold.
     // One-hour cooldown between runs.
-    if config.daemon.cleanup_mode == "auto" && usage.used_pct >= config.proactive.disk_full_threshold
+    if config.daemon.cleanup_mode == "auto"
+        && usage.used_pct >= config.proactive.disk_full_threshold
     {
-        let cooled = last_cleanup.map(|t| t.elapsed() > Duration::from_secs(3600)).unwrap_or(true);
+        let cooled = last_cleanup
+            .map(|t| t.elapsed() > Duration::from_secs(3600))
+            .unwrap_or(true);
         if cooled {
             // ANNOUNCE BEFORE ACTING — one message listing what's about to
             // happen, then clean, then the after-summary below.
@@ -120,7 +123,10 @@ struct CleanupResult {
 
 /// Actually delete things — only ever touches the four safe locations.
 async fn run_cleanup(config: &LunaConfig, sudo: Option<&str>) -> CleanupResult {
-    let mut result = CleanupResult { reclaimed_mb: 0, actions: Vec::new() };
+    let mut result = CleanupResult {
+        reclaimed_mb: 0,
+        actions: Vec::new(),
+    };
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
 
     let before_pacman = size_of("/var/cache/pacman/pkg").await;
@@ -138,10 +144,9 @@ async fn run_cleanup(config: &LunaConfig, sudo: Option<&str>) -> CleanupResult {
         if sh(&cmd).await.is_ok() {
             let after = size_of("/var/cache/pacman/pkg").await;
             if before_pacman > after {
-                result.actions.push(format!(
-                    "pacman cache: {} MiB freed",
-                    before_pacman - after
-                ));
+                result
+                    .actions
+                    .push(format!("pacman cache: {} MiB freed", before_pacman - after));
                 result.reclaimed_mb += before_pacman - after;
             }
         }
@@ -176,10 +181,9 @@ async fn run_cleanup(config: &LunaConfig, sudo: Option<&str>) -> CleanupResult {
     .await;
     let after_trash = size_of(&format!("{}/.local/share/Trash", home)).await;
     if before_trash > after_trash {
-        result.actions.push(format!(
-            "trash: {} MiB freed",
-            before_trash - after_trash
-        ));
+        result
+            .actions
+            .push(format!("trash: {} MiB freed", before_trash - after_trash));
         result.reclaimed_mb += before_trash - after_trash;
     }
 
@@ -280,70 +284,63 @@ pub(crate) async fn orphans_cycle(config: &LunaConfig) -> Result<()> {
         Some(age) if (age as u32) < grace => {
             // Still inside the grace window — wait.
         }
-        Some(_) => {
-            match config.agent.sudo_password.as_deref() {
-                Some(pass) => {
-                    let safe = pass.replace('\'', "'\\''");
-                    let cmd = format!(
-                        "echo '{}' | sudo -S pacman -Rns --noconfirm {} >/dev/null 2>&1; echo RC=$?",
-                        safe,
-                        list(&orphans)
-                    );
-                    match sh(&cmd).await {
-                        Ok(out) if out.trim().ends_with("RC=0") => {
-                            super::job_forget("orphans");
-                            super::notify(
-                                "Luna daemon",
-                                &format!(
-                                    "Auto-removed {} orphaned package(s): {}",
-                                    n,
-                                    list(&orphans)
-                                ),
-                            )
-                            .await;
-                        }
-                        Ok(out) => {
-                            let rc = out.trim().rsplit("RC=").next().unwrap_or("?");
-                            super::notify(
-                                "Luna daemon",
-                                &format!(
-                                    "Tried to auto-remove {} orphaned package(s) but pacman \
+        Some(_) => match config.agent.sudo_password.as_deref() {
+            Some(pass) => {
+                let safe = pass.replace('\'', "'\\''");
+                let cmd = format!(
+                    "echo '{}' | sudo -S pacman -Rns --noconfirm {} >/dev/null 2>&1; echo RC=$?",
+                    safe,
+                    list(&orphans)
+                );
+                match sh(&cmd).await {
+                    Ok(out) if out.trim().ends_with("RC=0") => {
+                        super::job_forget("orphans");
+                        super::notify(
+                            "Luna daemon",
+                            &format!("Auto-removed {} orphaned package(s): {}", n, list(&orphans)),
+                        )
+                        .await;
+                    }
+                    Ok(out) => {
+                        let rc = out.trim().rsplit("RC=").next().unwrap_or("?");
+                        super::notify(
+                            "Luna daemon",
+                            &format!(
+                                "Tried to auto-remove {} orphaned package(s) but pacman \
                                      exited with status {rc} — check manually.\n{}",
-                                    n,
-                                    prompt(&orphans)
-                                ),
-                            )
-                            .await;
-                        }
-                        Err(e) => {
-                            super::notify(
-                                "Luna daemon",
-                                &format!(
-                                    "Tried to auto-remove {} orphaned package(s) but the \
+                                n,
+                                prompt(&orphans)
+                            ),
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        super::notify(
+                            "Luna daemon",
+                            &format!(
+                                "Tried to auto-remove {} orphaned package(s) but the \
                                      removal command failed: {}",
-                                    n,
-                                    e
-                                ),
-                            )
-                            .await;
-                        }
+                                n, e
+                            ),
+                        )
+                        .await;
                     }
                 }
-                None => {
-                    super::notify(
-                        "Luna daemon",
-                        &format!(
-                            "{} orphaned package(s) are due for automatic removal, but no sudo \
+            }
+            None => {
+                super::notify(
+                    "Luna daemon",
+                    &format!(
+                        "{} orphaned package(s) are due for automatic removal, but no sudo \
                              password is configured. Add [agent] sudo_password to luna.toml \
                              (ironically the same requirement as the WhatsApp bridge).\n{}",
-                            n,
-                            prompt(&orphans)
-                        ),
-                    )
-                    .await;
-                }
+                        n,
+                        prompt(&orphans)
+                    ),
+                )
+                .await;
             }
-        }
+        },
     }
 
     Ok(())

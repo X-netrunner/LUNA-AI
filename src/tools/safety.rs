@@ -45,13 +45,17 @@ fn newest_log() -> Option<std::path::PathBuf> {
     for dir in log_dirs() {
         if let Ok(rd) = std::fs::read_dir(&dir) {
             logs.extend(
-                rd.filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("log")),
+                rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| {
+                    p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("log")
+                }),
             );
         }
     }
-    logs.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH));
+    logs.sort_by_key(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
     logs.pop()
 }
 
@@ -68,13 +72,19 @@ pub fn report() -> String {
         Err(e) => return format!("Could not read {}: {}", log.display(), e),
     };
     let lines: Vec<&str> = raw.lines().collect();
-    let start = lines.iter().rposition(|l| l.contains("Safety Check started")).unwrap_or(0);
+    let start = lines
+        .iter()
+        .rposition(|l| l.contains("Safety Check started"))
+        .unwrap_or(0);
     let run = lines[start..].join("\n");
     const MAX: usize = 6000;
     let total = run.chars().count();
     let body = if total > MAX {
         let tail: String = run.chars().skip(total - MAX).collect();
-        format!("[the start of this run is cut; showing the last {} characters]\n{}", MAX, tail)
+        format!(
+            "[the start of this run is cut; showing the last {} characters]\n{}",
+            MAX, tail
+        )
     } else {
         run
     };
@@ -91,7 +101,11 @@ pub async fn run(mode: &str, sudo_pass: Option<&str>, fallback: bool) -> Result<
         );
     };
 
-    let mode = match mode { "full" => "full", "backup" => "backup", _ => "light" };
+    let mode = match mode {
+        "full" => "full",
+        "backup" => "backup",
+        _ => "light",
+    };
     let fallback_arg = if fallback { " --fallback" } else { "" };
 
     // Source the script into the same bash that owns the sudo shim — that way
@@ -100,7 +114,10 @@ pub async fn run(mode: &str, sudo_pass: Option<&str>, fallback: bool) -> Result<
     let shim = match sudo_pass {
         Some(pass) => {
             let safe = pass.replace('\'', "'\\''");
-            format!("sudo() {{ echo '{}' | command sudo -S -p '' \"$@\"; }};", safe)
+            format!(
+                "sudo() {{ echo '{}' | command sudo -S -p '' \"$@\"; }};",
+                safe
+            )
         }
         None => String::new(),
     };
@@ -113,7 +130,8 @@ pub async fn run(mode: &str, sudo_pass: Option<&str>, fallback: bool) -> Result<
         fallback_arg
     );
 
-    let output = crate::tools::shell::run_command(&cmd, sudo_pass).await
+    let output = crate::tools::shell::run_command(&cmd, sudo_pass)
+        .await
         .context("Failed to run safety check")?;
     if output.exit_code != 0 {
         tracing::warn!("safety_check exited {}{}", output.exit_code, output.stderr);
@@ -151,14 +169,21 @@ fn summarize_latest() -> Option<String> {
     let mut lines: Vec<&str> = raw.lines().rev().take(12).collect();
     lines.reverse();
 
-    let issues = raw.lines().filter(|l| l.contains("⚠ WARNING") || l.contains("issue(s) found")).count();
+    let issues = raw
+        .lines()
+        .filter(|l| l.contains("⚠ WARNING") || l.contains("issue(s) found"))
+        .count();
     let mut body = String::new();
     for l in lines {
         body.push_str(l);
         body.push('\n');
     }
 
-    let status = if issues == 0 { "all good" } else { "attention needed" };
+    let status = if issues == 0 {
+        "all good"
+    } else {
+        "attention needed"
+    };
     Some(format!(
         "Safety check → {}\nLatest log: {}\n{}{}",
         status,

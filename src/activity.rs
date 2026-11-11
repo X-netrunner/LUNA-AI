@@ -53,7 +53,11 @@ pub enum Event {
     ToolStart { name: String, summary: String },
     /// A tool finished. `ok` distinguishes success from a refusal or error, which
     /// matters because a refusal is the user seeing the gate do its job.
-    ToolEnd { name: String, ok: bool, elapsed: Instant },
+    ToolEnd {
+        name: String,
+        ok: bool,
+        elapsed: Instant,
+    },
     /// A chunk of the model's reasoning, as it streams. Published only when the
     /// client is not printing to the terminal itself (TUI mode): the CLI already
     /// streams thinking straight to stdout. Subscribers accumulate the deltas to
@@ -100,7 +104,10 @@ where
     subscribers()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .push(Registration { id, sink: Box::new(f) });
+        .push(Registration {
+            id,
+            sink: Box::new(f),
+        });
     Subscription(id)
 }
 
@@ -124,7 +131,9 @@ pub fn publish(event: Event) {
 pub fn summarise(name: &str, args: &serde_json::Value) -> String {
     let str_field = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
 
-    let full = str_field("command").or_else(|| str_field("query")).or_else(|| str_field("text"));
+    let full = str_field("command")
+        .or_else(|| str_field("query"))
+        .or_else(|| str_field("text"));
 
     if let Some(s) = full {
         let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -168,7 +177,12 @@ mod tests {
     fn counter() -> (Subscription, Arc<AtomicUsize>) {
         let n = Arc::new(AtomicUsize::new(0));
         let c = n.clone();
-        (subscribe(move |_| { c.fetch_add(1, Ordering::SeqCst); }), n)
+        (
+            subscribe(move |_| {
+                c.fetch_add(1, Ordering::SeqCst);
+            }),
+            n,
+        )
     }
 
     use std::sync::Arc;
@@ -199,7 +213,11 @@ mod tests {
         let long = format!("echo {}", "a".repeat(400));
         let args = serde_json::json!({ "command": long });
         let s = summarise("run_shell", &args);
-        assert!(s.chars().count() <= 88, "not clipped: {} chars", s.chars().count());
+        assert!(
+            s.chars().count() <= 88,
+            "not clipped: {} chars",
+            s.chars().count()
+        );
         assert!(s.ends_with('…'), "clipping should be visible: {s}");
     }
 
@@ -208,7 +226,10 @@ mod tests {
     #[test]
     fn a_multiline_script_collapses_to_one_line() {
         let args = serde_json::json!({"command": "line one\nline two\n\nline three"});
-        assert_eq!(summarise("run_shell", &args), "line one line two line three");
+        assert_eq!(
+            summarise("run_shell", &args),
+            "line one line two line three"
+        );
     }
 
     #[test]
@@ -218,7 +239,10 @@ mod tests {
             "/tmp/x.rs"
         );
         assert_eq!(
-            summarise("fetch_page", &serde_json::json!({"url": "https://example.com"})),
+            summarise(
+                "fetch_page",
+                &serde_json::json!({"url": "https://example.com"})
+            ),
             "https://example.com"
         );
     }
@@ -227,7 +251,10 @@ mod tests {
     /// user sees the tool ran on something rather than nothing.
     #[test]
     fn an_unrecognised_argument_set_falls_back_to_its_keys() {
-        let s = summarise("todoist_add", &serde_json::json!({"content": "x", "due": "y"}));
+        let s = summarise(
+            "todoist_add",
+            &serde_json::json!({"content": "x", "due": "y"}),
+        );
         assert!(s.starts_with("todoist_add("), "got {s}");
         assert!(s.contains("content") && s.contains("due"), "got {s}");
     }

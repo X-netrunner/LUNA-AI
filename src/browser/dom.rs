@@ -350,6 +350,14 @@ pub fn dom_extract_text_expr(selector: &str) -> String {
 pub fn result_from(v: Value, action: String, step_index: u64, tab_id: u64) -> ActionResult {
     match v.get("ok").and_then(Value::as_bool) {
         Some(true) => ActionResult::ok(action, step_index, tab_id),
-        _ => ActionResult::fail(action, step_index, tab_id, v.get("error").and_then(Value::as_str).unwrap_or("page script failed").to_string()),
+        _ => ActionResult::fail(
+            action,
+            step_index,
+            tab_id,
+            v.get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("page script failed")
+                .to_string(),
+        ),
     }
 }

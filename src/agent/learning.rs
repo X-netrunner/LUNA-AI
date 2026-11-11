@@ -256,7 +256,9 @@ pub fn profile_block() -> String {
         return String::new();
     }
     let rows = personal
-        .iter().rev().take(12)
+        .iter()
+        .rev()
+        .take(12)
         .map(|f| format!("- {}", crate::util::truncate(&f.content, 240)))
         .collect::<Vec<_>>()
         .join("\n");

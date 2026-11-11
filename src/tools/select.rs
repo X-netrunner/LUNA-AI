@@ -89,8 +89,16 @@ fn triggers(name: &str) -> &'static [&'static str] {
     match name {
         // ── Offensive / cyber-sec ──────────────────────────────────────
         "nmap_scan" => &[
-            "nmap", "port scan", "portscan", "ports", "port", "open ports",
-            "scan the network", "recon", "scan localhost", "scan the host",
+            "nmap",
+            "port scan",
+            "portscan",
+            "ports",
+            "port",
+            "open ports",
+            "scan the network",
+            "recon",
+            "scan localhost",
+            "scan the host",
             // Asking to be attacked. Measured 2026-10-01: "i want you to try to
             // attack my laptop" matched none of the above, so `nmap_scan` was
             // never offered, and the reply was a caution lecture followed by a
@@ -101,38 +109,123 @@ fn triggers(name: &str) -> &'static [&'static str] {
             // "attack" alone: "attack" appears in games, arguments and essays,
             // and handing out a port scanner for those is how an offensive tool
             // ends up in an unrelated prompt.
-            "attack my laptop", "attack my computer", "attack my machine",
-            "attack my pc", "attack my host", "attack my server",
-            "attack my system", "attack my network", "attack my box",
-            "simulate an attack", "simulating an attack",
-            "simulate the attack", "pretend to be an attacker",
-            "act as an attacker", "as an external attacker",
-            "external attacker", "penetration test", "pentest",
-            "test my defenses", "test my defence", "test my security",
-            "honeypot", "vulnerabilities on my", "find vulnerabilities",
+            "attack my laptop",
+            "attack my computer",
+            "attack my machine",
+            "attack my pc",
+            "attack my host",
+            "attack my server",
+            "attack my system",
+            "attack my network",
+            "attack my box",
+            "simulate an attack",
+            "simulating an attack",
+            "simulate the attack",
+            "pretend to be an attacker",
+            "act as an attacker",
+            "as an external attacker",
+            "external attacker",
+            "penetration test",
+            "pentest",
+            "test my defenses",
+            "test my defence",
+            "test my security",
+            "honeypot",
+            "vulnerabilities on my",
+            "find vulnerabilities",
         ],
-        "analyze_pcap" => &["pcap", "packet capture", "tshark", "wireshark", "capture file"],
-        "decode_payload" => &["decode", "payload", "shellcode", "exploit", "reverse engineer", "base64"],
-        "hash_file" => &["hash", "sha256", "sha1", "md5", "checksum", "file integrity"],
+        "analyze_pcap" => &[
+            "pcap",
+            "packet capture",
+            "tshark",
+            "wireshark",
+            "capture file",
+        ],
+        "decode_payload" => &[
+            "decode",
+            "payload",
+            "shellcode",
+            "exploit",
+            "reverse engineer",
+            "base64",
+        ],
+        "hash_file" => &[
+            "hash",
+            "sha256",
+            "sha1",
+            "md5",
+            "checksum",
+            "file integrity",
+        ],
         "dns_lookup" => &["dns", "nameserver", "mx record", "resolve domain", "whois"],
-        "inspect_cert" => &["certificate", "cert", "ssl", "tls", "x509", "https cert", "expire", "issuer"],
-        "inspect_headers" => &["headers", "security headers", "hsts", "csp", "cors", "http header", "cookie security"],
+        "inspect_cert" => &[
+            "certificate",
+            "cert",
+            "ssl",
+            "tls",
+            "x509",
+            "https cert",
+            "expire",
+            "issuer",
+        ],
+        "inspect_headers" => &[
+            "headers",
+            "security headers",
+            "hsts",
+            "csp",
+            "cors",
+            "http header",
+            "cookie security",
+        ],
         // Availability before install. Measured 2026-10-02: asked to exploit SSH
         // she cited `hydra` and a rockyou path, and neither exists here. The
         // trigger includes ordinary "is X installed" phrasings so this is
         // reachable without offensive vocabulary, which is the point.
         "tool_check" => &[
-            "is it installed", "installed", "available", "do you have",
-            "which tool", "what tools", "check for", "check if", "not found",
-            "command not found", "alternatively", "alternative", "instead of",
-            "hydra", "ncrack", "medusa", "nikto", "sqlmap", "gobuster",
-            "ffuf", "whatweb", "socat", "wordlist", "wordlists", "exists",
-            "can you use", "do we have", "is there a tool",
+            "is it installed",
+            "installed",
+            "available",
+            "do you have",
+            "which tool",
+            "what tools",
+            "check for",
+            "check if",
+            "not found",
+            "command not found",
+            "alternatively",
+            "alternative",
+            "instead of",
+            "hydra",
+            "ncrack",
+            "medusa",
+            "nikto",
+            "sqlmap",
+            "gobuster",
+            "ffuf",
+            "whatweb",
+            "socat",
+            "wordlist",
+            "wordlists",
+            "exists",
+            "can you use",
+            "do we have",
+            "is there a tool",
         ],
         "pkg_install" => &[
-            "install", "install it", "install the tool", "not installed",
-            "missing tool", "pacman", "apt", "apt-get", "dnf", "apk", "brew",
-            "package manager", "add the package", "get the package",
+            "install",
+            "install it",
+            "install the tool",
+            "not installed",
+            "missing tool",
+            "pacman",
+            "apt",
+            "apt-get",
+            "dnf",
+            "apk",
+            "brew",
+            "package manager",
+            "add the package",
+            "get the package",
         ],
 
         // ── Gated, but only offered when actually asked for ─────────────
@@ -157,8 +250,14 @@ fn triggers(name: &str) -> &'static [&'static str] {
         // passes `allow_external_actions` and `browser_do`'s own planner.
         "browser_do" => &[
             // Explicit browser intent, whatever the reason for it.
-            "in the browser", "in chromium", "in chrome", "use the browser",
-            "use chromium", "open chromium", "open the browser", "open a browser",
+            "in the browser",
+            "in chromium",
+            "in chrome",
+            "use the browser",
+            "use chromium",
+            "open chromium",
+            "open the browser",
+            "open a browser",
             "browse to",
             // Cart and checkout.
             //
@@ -167,67 +266,217 @@ fn triggers(name: &str) -> &'static [&'static str] {
             // and "add ps5 controller to my cart" — three ways to say it, none
             // containing "add to cart". Keying on the noun is what survives a
             // user naming the product between the verb and the destination.
-            "to cart", "to basket", "my cart", "the cart", "my basket", "the basket",
+            "to cart",
+            "to basket",
+            "my cart",
+            "the cart",
+            "my basket",
+            "the basket",
             "checkout",
-            "buy it", "buy this", "buy that", "order it", "order this",
-            "place the order", "proceed to checkout", "complete the checkout",
+            "buy it",
+            "buy this",
+            "buy that",
+            "order it",
+            "order this",
+            "place the order",
+            "proceed to checkout",
+            "complete the checkout",
             // Session and forms. Nothing but a real browser can do these, which
             // is the other half of why it exists. "this form" is in the corpus,
             // not "the form".
-            "sign in to", "log in to", "login to", "sign up for", "sign up on",
-            "fill in this form", "fill out this form", "fill this form",
-            "submit this form", "fill in the form", "fill the form",
-            "fill out the form", "submit the form",
-            "enter my details", "enter my address", "enter my credit card",
-            "add my address", "add my card",
+            "sign in to",
+            "log in to",
+            "login to",
+            "sign up for",
+            "sign up on",
+            "fill in this form",
+            "fill out this form",
+            "fill this form",
+            "submit this form",
+            "fill in the form",
+            "fill the form",
+            "fill out the form",
+            "submit the form",
+            "enter my details",
+            "enter my address",
+            "enter my credit card",
+            "add my address",
+            "add my card",
             // A named click, where the page is the thing being acted on.
-            "click on", "click the", "press the button",
+            "click on",
+            "click the",
+            "press the button",
         ],
         "desktop_do" => &["desktop", "open the app", "my screen", "screenshot"],
-        "sysmode" => &["sysmode", "stealth", "lockdown", "honeypot", "harden", "security mode", "firewall"],
+        "sysmode" => &[
+            "sysmode",
+            "stealth",
+            "lockdown",
+            "honeypot",
+            "harden",
+            "security mode",
+            "firewall",
+        ],
         // ── Halcyon, the desktop she lives in ─────────────────────────────
         // Three small schemas. They are offered when the request is about Halcyon or one of its parts; without a trigger the model
         // reads about them in its instructions and then describes the call instead of making it (measured 2026-10-26, qwen3:8b).
         "halcyon_info" => &[
-            "halcyon", "island", "my desktop", "the desktop", "firewall", "antivirus", "anti-virus", "clamav", "ai-firewall",
-            "ai-antivirus", "wallpaper", "lock screen", "settings", "setting", "gaming mode", "do not disturb", "dnd", "my notes",
-            "calendar", "launcher", "the bar", "status of my", "overview", "what is running", "is my",
-            "learn my system", "learn the system", "my system", "system rating", "security rating", "system-profile",
-            "system profile", "default apps", "my habits", "command habits", "audit my system", "test my system", "test the system",
-            "test system", "test-system", "system-test", "test firewall", "test antivirus", "test performance", "diagnose system",
-            "system diagnostics", "system bugs", "optimizations",
+            "halcyon",
+            "island",
+            "my desktop",
+            "the desktop",
+            "firewall",
+            "antivirus",
+            "anti-virus",
+            "clamav",
+            "ai-firewall",
+            "ai-antivirus",
+            "wallpaper",
+            "lock screen",
+            "settings",
+            "setting",
+            "gaming mode",
+            "do not disturb",
+            "dnd",
+            "my notes",
+            "calendar",
+            "launcher",
+            "the bar",
+            "status of my",
+            "overview",
+            "what is running",
+            "is my",
+            "learn my system",
+            "learn the system",
+            "my system",
+            "system rating",
+            "security rating",
+            "system-profile",
+            "system profile",
+            "default apps",
+            "my habits",
+            "command habits",
+            "audit my system",
+            "test my system",
+            "test the system",
+            "test system",
+            "test-system",
+            "system-test",
+            "test firewall",
+            "test antivirus",
+            "test performance",
+            "diagnose system",
+            "system diagnostics",
+            "system bugs",
+            "optimizations",
         ],
         "halcyon_do" => &[
-            "halcyon", "island", "my desktop", "the desktop", "wallpaper", "lock screen", "settings", "setting", "gaming mode",
-            "do not disturb", "dnd", "add a note", "new note", "my notes", "calendar", "launcher", "theme", "profile", "the bar",
-            "open the", "turn on", "turn off", "switch to", "ui style",
+            "halcyon",
+            "island",
+            "my desktop",
+            "the desktop",
+            "wallpaper",
+            "lock screen",
+            "settings",
+            "setting",
+            "gaming mode",
+            "do not disturb",
+            "dnd",
+            "add a note",
+            "new note",
+            "my notes",
+            "calendar",
+            "launcher",
+            "theme",
+            "profile",
+            "the bar",
+            "open the",
+            "turn on",
+            "turn off",
+            "switch to",
+            "ui style",
         ],
         "halcyon_security" => &[
-            "firewall", "antivirus", "anti-virus", "clamav", "ai-firewall", "ai-antivirus", "ban", "unban", "block ip",
-            "open port", "close port", "exception", "false positive", "quarantine", "scan my", "scan this", "scan the folder",
+            "firewall",
+            "antivirus",
+            "anti-virus",
+            "clamav",
+            "ai-firewall",
+            "ai-antivirus",
+            "ban",
+            "unban",
+            "block ip",
+            "open port",
+            "close port",
+            "exception",
+            "false positive",
+            "quarantine",
+            "scan my",
+            "scan this",
+            "scan the folder",
         ],
         "whatsapp_send" => &["whatsapp", "send a message", "text them", "message my"],
         "spotify" => &["spotify", "music", "song", "playlist", "play some"],
         "todoist_list" => &["todoist", "todo", "my tasks", "task list"],
         "todoist_add" => &["todoist", "todo", "add a task", "my tasks", "task list"],
-        "todoist_complete" => &["todoist", "todo", "complete a task", "mark done", "my tasks", "task list"],
-        "create_skill" => &["learn a skill", "teach yourself", "new skill", "save a skill"],
+        "todoist_complete" => &[
+            "todoist",
+            "todo",
+            "complete a task",
+            "mark done",
+            "my tasks",
+            "task list",
+        ],
+        "create_skill" => &[
+            "learn a skill",
+            "teach yourself",
+            "new skill",
+            "save a skill",
+        ],
         "forget_skill" => &["forget skill", "delete skill", "remove skill"],
 
         // ── Luna's own source, and system maintenance ───────────────────
         "self_patch" => &[
-            "self patch", "self-patch", "selfpatch", "your own source", "your own code",
-            "patch yourself", "patch the source", "edit the source", "src", ".rs",
-            "add a test", "add a function", "add a method", "add a struct",
+            "self patch",
+            "self-patch",
+            "selfpatch",
+            "your own source",
+            "your own code",
+            "patch yourself",
+            "patch the source",
+            "edit the source",
+            "src",
+            ".rs",
+            "add a test",
+            "add a function",
+            "add a method",
+            "add a struct",
         ],
-        "system_update" => &["system update", "update the system", "upgrade the system", "update packages"],
+        "system_update" => &[
+            "system update",
+            "update the system",
+            "upgrade the system",
+            "update packages",
+        ],
         "backup" => &["backup", "back up", "snapshot"],
-        "run_safety_check" => &["safety check", "safety_check", "safety log", "health check", "are you ok", "self check"],
+        "run_safety_check" => &[
+            "safety check",
+            "safety_check",
+            "safety log",
+            "health check",
+            "are you ok",
+            "self check",
+        ],
         "index_system" => &["index my", "index the system", "build an index"],
         "learn_topic" => &["learn about", "study up on", "teach yourself about"],
         "set_debug" => &["debug mode", "turn on debug", "turn off debug"],
         "allow_autokill" => &["autokill", "auto-kill", "allow killing", "let you kill"],
-        "deny_autokill" => &["autokill", "auto-kill", "stop killing", "stop killing processes"],
+        "deny_autokill" => &[
+            "autokill",
+            "auto-kill",
+            "stop killing",
+            "stop killing processes",
+        ],
         _ => &[],
     }
 }
@@ -428,10 +677,7 @@ mod tests {
             "is this bank security system safe to use",
             "review this security advisory for my project",
         ] {
-            assert!(
-                !has(q, "nmap_scan"),
-                "{q:?} wrongly unlocked nmap_scan"
-            );
+            assert!(!has(q, "nmap_scan"), "{q:?} wrongly unlocked nmap_scan");
         }
     }
 
@@ -456,7 +702,10 @@ mod tests {
             "search for ps5 controller on amazon.com and add the first result to cart",
             "Luna: \"add ps5 controller to cart on amazon\"",
         ] {
-            assert!(has(q, "browser_do"), "browser withheld from a real purchase: {q:?}");
+            assert!(
+                has(q, "browser_do"),
+                "browser withheld from a real purchase: {q:?}"
+            );
         }
         // Real research prompts: a site is named, no cart action. These must not
         // reach Chromium — the CLI answers them, and Chromium is what made
@@ -504,7 +753,10 @@ mod tests {
             "log in to my bank account",
             "submit this form",
         ] {
-            assert!(has(q, "browser_do"), "browser withheld from a real session: {q:?}");
+            assert!(
+                has(q, "browser_do"),
+                "browser withheld from a real session: {q:?}"
+            );
         }
     }
 
@@ -537,7 +789,10 @@ mod tests {
         assert!(signal_present("add to cart now", "to cart"));
         assert!(!signal_present("a bug report for my team", "port"));
         assert!(!signal_present("this is important", "port"));
-        assert!(!signal_present("clear it", "cart"), "substring match leaked");
+        assert!(
+            !signal_present("clear it", "cart"),
+            "substring match leaked"
+        );
         assert!(!signal_present("add to cartoon now", "to cart"));
     }
 
@@ -566,12 +821,20 @@ mod tests {
     /// regression that brings back silent no-op turns.
     #[test]
     fn halcyon_tools_are_offered_when_the_request_is_about_halcyon() {
-        for q in ["is my firewall running?", "give me an overview of my Halcyon desktop", "what is in my notes", "turn on gaming mode"] {
+        for q in [
+            "is my firewall running?",
+            "give me an overview of my Halcyon desktop",
+            "what is in my notes",
+            "turn on gaming mode",
+        ] {
             assert!(has(q, "halcyon_info"), "halcyon_info missing for {q:?}");
         }
         assert!(has("turn on gaming mode", "halcyon_do"));
         assert!(has("ban 203.0.113.9 in the firewall", "halcyon_security"));
-        assert!(has("add an exception for this false positive", "halcyon_security"));
+        assert!(has(
+            "add an exception for this false positive",
+            "halcyon_security"
+        ));
         for q in ["hello there", "what is 2+2", "write me a haiku"] {
             for t in ["halcyon_info", "halcyon_do", "halcyon_security"] {
                 assert!(!has(q, t), "{t} leaked into {q:?}");
@@ -589,7 +852,11 @@ mod tests {
             worst.len()
         );
         let plain = names("hello there");
-        assert!(plain.len() <= 26, "plain prompt offered {} tools", plain.len());
+        assert!(
+            plain.len() <= 26,
+            "plain prompt offered {} tools",
+            plain.len()
+        );
     }
 
     #[test]

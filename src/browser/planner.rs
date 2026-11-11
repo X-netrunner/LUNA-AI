@@ -8,9 +8,9 @@ use serde_json::{json, Value};
 /// A single planner step in our internal format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
-    pub action: String,           // "navigate" | "click" | "type" | "press" | "scroll" | "search"
-    pub target: Option<String>,   // URL for navigate, selector/text for click/type, key for press, direction for scroll, query for search
-    pub value: Option<String>,    // Additional value (e.g., text to type)
+    pub action: String, // "navigate" | "click" | "type" | "press" | "scroll" | "search"
+    pub target: Option<String>, // URL for navigate, selector/text for click/type, key for press, direction for scroll, query for search
+    pub value: Option<String>,  // Additional value (e.g., text to type)
     pub is_last: bool,
 }
 
@@ -167,7 +167,7 @@ fn is_specific_url(url: &str) -> bool {
         return false;
     };
     match rest.find('/') {
-        None => false,          // "example.com"
+        None => false,                // "example.com"
         Some(i) => &rest[i..] != "/", // "example.com/" is still the homepage
     }
 }
@@ -234,7 +234,11 @@ impl Planner {
             } else if step.action == "click" {
                 let target = step.target.as_deref().unwrap_or("").to_lowercase();
                 // Skip product selection clicks if we have pick_best
-                if pick_best_seen || target.contains("first product") || target.contains("product result") || target.contains("product card") {
+                if pick_best_seen
+                    || target.contains("first product")
+                    || target.contains("product result")
+                    || target.contains("product card")
+                {
                     continue; // skip this step
                 }
                 fixed.push(step);
@@ -281,14 +285,39 @@ impl Planner {
     /// When unsure, do nothing.
     fn wants_best_product(goal: &str) -> bool {
         const PURCHASE: &[&str] = &[
-            "cart", "buy", "purchase", "order", "checkout", "price", "cost",
-            "deal", "cheapest", "budget",
+            "cart", "buy", "purchase", "order", "checkout", "price", "cost", "deal", "cheapest",
+            "budget",
         ];
         const BUYABLE: &[&str] = &[
-            "laptop", "phone", "tablet", "monitor", "headphone", "keyboard", "mouse",
-            "camera", "watch", "tv", "console", "gpu", "ssd", "product", "value",
-            "deal", "option", "choice", "book", "router", "printer", "speaker",
-            "vacuum", "fridge", "oven", "laptop", "smartwatch", "earbuds", "tablet",
+            "laptop",
+            "phone",
+            "tablet",
+            "monitor",
+            "headphone",
+            "keyboard",
+            "mouse",
+            "camera",
+            "watch",
+            "tv",
+            "console",
+            "gpu",
+            "ssd",
+            "product",
+            "value",
+            "deal",
+            "option",
+            "choice",
+            "book",
+            "router",
+            "printer",
+            "speaker",
+            "vacuum",
+            "fridge",
+            "oven",
+            "laptop",
+            "smartwatch",
+            "earbuds",
+            "tablet",
         ];
         let g = goal.to_lowercase();
         let bytes = g.as_bytes();
@@ -299,8 +328,7 @@ impl Planner {
             // superlative.
             let before_ok = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
             let after = at + 4;
-            let after_ok =
-                after >= bytes.len() || !bytes[after].is_ascii_alphanumeric();
+            let after_ok = after >= bytes.len() || !bytes[after].is_ascii_alphanumeric();
             if before_ok && after_ok {
                 // Four words is enough for "best rated 27 inch monitor" and
                 // short enough to exclude "best way to clean a keyboard".
@@ -352,7 +380,12 @@ impl Planner {
         match first_nav {
             // Replace only if the planner navigated somewhere else first.
             Some(i) => {
-                if steps[i].target.as_deref().map(|t| same_destination(t, &url)).unwrap_or(false) {
+                if steps[i]
+                    .target
+                    .as_deref()
+                    .map(|t| same_destination(t, &url))
+                    .unwrap_or(false)
+                {
                     return steps;
                 }
                 let mut fixed = steps;
@@ -507,7 +540,9 @@ Output ONLY a JSON object:
 
         let mut steps = Vec::new();
         for (i, step_val) in steps_arr.iter().enumerate() {
-            let step_str = step_val.as_str().ok_or_else(|| anyhow!("step not a string"))?;
+            let step_str = step_val
+                .as_str()
+                .ok_or_else(|| anyhow!("step not a string"))?;
             let step = self.parse_step(step_str)?;
             // Mark the last step
             let mut step = step;
@@ -520,38 +555,65 @@ Output ONLY a JSON object:
     fn parse_step(&self, step: &str) -> Result<Step> {
         let step = step.trim();
 
-        if let Some(rest) = step.strip_prefix("navigate:").or_else(|| step.strip_prefix("navigate ")) {
+        if let Some(rest) = step
+            .strip_prefix("navigate:")
+            .or_else(|| step.strip_prefix("navigate "))
+        {
             return Ok(Step::navigate(rest.trim()));
         }
-        if let Some(rest) = step.strip_prefix("click:").or_else(|| step.strip_prefix("click ")) {
+        if let Some(rest) = step
+            .strip_prefix("click:")
+            .or_else(|| step.strip_prefix("click "))
+        {
             return Ok(Step::click(rest.trim()));
         }
-        if let Some(rest) = step.strip_prefix("type:").or_else(|| step.strip_prefix("type ")) {
+        if let Some(rest) = step
+            .strip_prefix("type:")
+            .or_else(|| step.strip_prefix("type "))
+        {
             return Ok(Step::type_text(rest.trim()));
         }
-        if let Some(rest) = step.strip_prefix("press:").or_else(|| step.strip_prefix("press ")) {
+        if let Some(rest) = step
+            .strip_prefix("press:")
+            .or_else(|| step.strip_prefix("press "))
+        {
             return Ok(Step::press(rest.trim()));
         }
-        if let Some(rest) = step.strip_prefix("scroll:").or_else(|| step.strip_prefix("scroll ")) {
+        if let Some(rest) = step
+            .strip_prefix("scroll:")
+            .or_else(|| step.strip_prefix("scroll "))
+        {
             let parts: Vec<&str> = rest.split_whitespace().collect();
             let dir = parts.first().copied().unwrap_or("down");
             let amt = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(500);
             return Ok(Step::scroll(dir, amt));
         }
-        if let Some(rest) = step.strip_prefix("search:").or_else(|| step.strip_prefix("search ")) {
+        if let Some(rest) = step
+            .strip_prefix("search:")
+            .or_else(|| step.strip_prefix("search "))
+        {
             return Ok(Step::search(rest.trim()));
         }
-        if let Some(rest) = step.strip_prefix("fillform:").or_else(|| step.strip_prefix("fillform ")) {
+        if let Some(rest) = step
+            .strip_prefix("fillform:")
+            .or_else(|| step.strip_prefix("fillform "))
+        {
             return Ok(Step::fill_form(rest.trim()));
         }
         if step == "pick_best:" || step == "pick_best" {
             return Ok(Step::pick_best());
         }
-        if let Some(rest) = step.strip_prefix("wait:").or_else(|| step.strip_prefix("wait ")) {
+        if let Some(rest) = step
+            .strip_prefix("wait:")
+            .or_else(|| step.strip_prefix("wait "))
+        {
             let ms = rest.trim().parse::<u64>().unwrap_or(2000);
             return Ok(Step::wait(ms));
         }
-        if let Some(rest) = step.strip_prefix("extract:").or_else(|| step.strip_prefix("extract ")) {
+        if let Some(rest) = step
+            .strip_prefix("extract:")
+            .or_else(|| step.strip_prefix("extract "))
+        {
             return Ok(Step::extract(rest.trim()));
         }
         if step == "back:" || step == "back" {
@@ -581,7 +643,8 @@ For each field, choose a value based on its kind and question:
 - kind "select": provide "value" matching one of the options
 
 Output ONLY JSON: {{"values":[{{"index":0,"value":"..."}}, {{"index":3,"choose":"Option 1"}}, {{"index":5,"choose":["Option 1","Option 2"]}}]}}"#,
-            goal, serde_json::to_string_pretty(schema).unwrap_or_default()
+            goal,
+            serde_json::to_string_pretty(schema).unwrap_or_default()
         );
 
         let resp = self
@@ -598,7 +661,10 @@ Output ONLY JSON: {{"values":[{{"index":0,"value":"..."}}, {{"index":3,"choose":
             .await
             .context("call ollama for form values")?;
 
-        let body: Value = resp.json().await.context("parse ollama form values response")?;
+        let body: Value = resp
+            .json()
+            .await
+            .context("parse ollama form values response")?;
         let text = body["response"]
             .as_str()
             .ok_or_else(|| anyhow!("no response from ollama for form values"))?
@@ -625,8 +691,12 @@ mod tests {
     /// `click: the first product result` step in place.
     #[test]
     fn the_best_laptop_counts_as_a_best_product_goal() {
-        assert!(Planner::wants_best_product("open amazon and add the best laptop to my cart"));
-        assert!(Planner::wants_best_product("add the best value tablet to cart"));
+        assert!(Planner::wants_best_product(
+            "open amazon and add the best laptop to my cart"
+        ));
+        assert!(Planner::wants_best_product(
+            "add the best value tablet to cart"
+        ));
         assert!(Planner::wants_best_product("buy the best rated monitor"));
     }
 
@@ -635,14 +705,20 @@ mod tests {
     /// or pick_best gets inserted into a plan that has nothing to pick.
     #[test]
     fn best_without_a_product_is_not_a_purchase() {
-        assert!(!Planner::wants_best_product("what's the best way to clean a keyboard"));
-        assert!(!Planner::wants_best_product("find the best keyboard shortcuts"));
+        assert!(!Planner::wants_best_product(
+            "what's the best way to clean a keyboard"
+        ));
+        assert!(!Planner::wants_best_product(
+            "find the best keyboard shortcuts"
+        ));
         assert!(!Planner::wants_best_product("tell me a joke"));
         // The case that forced the purchase requirement. "best keyboard" is a
         // purchase; "best keyboard shortcuts" is a lookup, and the two differ
         // only in the words after the noun. Proximity to "best" cannot tell
         // them apart, so the buying verb is what decides.
-        assert!(!Planner::wants_best_product("find the best keyboard shortcuts for vscode"));
+        assert!(!Planner::wants_best_product(
+            "find the best keyboard shortcuts for vscode"
+        ));
         assert!(
             Planner::wants_best_product("find the best keyboard and buy it"),
             "a purchase verb anywhere in the goal is enough"
@@ -660,16 +736,19 @@ mod tests {
             Step::click("Add to Cart"),
         ];
         // The goal string exactly as Luna passed it in the 2026-10-03 log.
-        let fixed = Planner::fix_best_product_plan(
-            "open amazon and add the best laptop to cart",
-            steps,
-        );
+        let fixed =
+            Planner::fix_best_product_plan("open amazon and add the best laptop to cart", steps);
         assert!(
             !fixed.iter().any(|s| {
-                s.target.as_deref().is_some_and(|t| t.contains("first product"))
+                s.target
+                    .as_deref()
+                    .is_some_and(|t| t.contains("first product"))
             }),
             "the product-click step rule 11 forbids survived: {:?}",
-            fixed.iter().map(|s| (&s.action, &s.target)).collect::<Vec<_>>()
+            fixed
+                .iter()
+                .map(|s| (&s.action, &s.target))
+                .collect::<Vec<_>>()
         );
         assert!(fixed.iter().any(|s| s.action == "pick_best"));
     }
@@ -679,7 +758,8 @@ mod tests {
     /// was asked for, which is what read as "wrong url".
     #[test]
     fn a_query_string_url_in_the_goal_survives_the_planner() {
-        let goal = "check https://duckduckgo.com/?q=best+laptop+2026&ia=chat and tell me the answer";
+        let goal =
+            "check https://duckduckgo.com/?q=best+laptop+2026&ia=chat and tell me the answer";
         let steps = vec![
             Step::navigate("duckduckgo.com"),
             Step::search("best laptop 2026"),
@@ -700,7 +780,10 @@ mod tests {
     /// those, and hijacking them would break ordinary searches.
     #[test]
     fn a_bare_domain_is_left_to_the_planner() {
-        let steps = vec![Step::navigate("duckduckgo.com"), Step::search("best laptop")];
+        let steps = vec![
+            Step::navigate("duckduckgo.com"),
+            Step::search("best laptop"),
+        ];
         let fixed = Planner::enforce_goal_url("search on duckduckgo.com for a laptop", steps);
         assert_eq!(
             fixed[0].target.as_deref(),
@@ -752,13 +835,22 @@ mod tests {
     #[test]
     fn parse_step_variants() {
         let p = Planner::new("http://localhost", "test");
-        assert_eq!(p.parse_step("navigate: https://amazon.com").unwrap().action, "navigate");
-        assert_eq!(p.parse_step("navigate https://google.com").unwrap().action, "navigate");
+        assert_eq!(
+            p.parse_step("navigate: https://amazon.com").unwrap().action,
+            "navigate"
+        );
+        assert_eq!(
+            p.parse_step("navigate https://google.com").unwrap().action,
+            "navigate"
+        );
         assert_eq!(p.parse_step("click: search bar").unwrap().action, "click");
         assert_eq!(p.parse_step("click search bar").unwrap().action, "click");
         assert_eq!(p.parse_step("type: hello world").unwrap().action, "type");
         assert_eq!(p.parse_step("press: Enter").unwrap().action, "press");
         assert_eq!(p.parse_step("scroll: down 300").unwrap().action, "scroll");
-        assert_eq!(p.parse_step("search: ps5 controller").unwrap().action, "search");
+        assert_eq!(
+            p.parse_step("search: ps5 controller").unwrap().action,
+            "search"
+        );
     }
 }

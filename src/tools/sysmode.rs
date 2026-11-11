@@ -10,8 +10,8 @@
 //!
 //! Config: [sysmode] enabled (bool) + bin (default `sysmode`).
 
-use anyhow::{bail, Result};
 use crate::config::SysmodeConfig;
+use anyhow::{bail, Result};
 
 const ALLOWED_MODES: &[&str] = &["secure", "cyber", "stealth", "lockdown"];
 const DECOY_PORTS: &[u16] = &[21, 22, 23, 80, 445, 3306, 3389, 8080];
@@ -20,7 +20,11 @@ const DECOY_PORTS: &[u16] = &[21, 22, 23, 80, 445, 3306, 3389, 8080];
 
 fn bin_name(cfg: &SysmodeConfig) -> String {
     let b = cfg.bin.trim();
-    if b.is_empty() { "sysmode".into() } else { b.to_string() }
+    if b.is_empty() {
+        "sysmode".into()
+    } else {
+        b.to_string()
+    }
 }
 
 async fn run(cmd: &str, sudo_pass: Option<&str>) -> Result<String> {
@@ -85,9 +89,7 @@ pub async fn switch_mode(
 ) -> Result<String> {
     let m = mode.trim().to_lowercase();
     if !ALLOWED_MODES.contains(&m.as_str()) {
-        bail!(
-            "Unknown sysmode profile '{mode}' — choose one of: secure, cyber, stealth, lockdown"
-        );
+        bail!("Unknown sysmode profile '{mode}' — choose one of: secure, cyber, stealth, lockdown");
     }
     if sudo_pass.is_none() {
         bail!(
@@ -174,10 +176,7 @@ pub async fn health_check(cfg: &SysmodeConfig) -> Result<String> {
         "docker inspect -f '{{.State.Running}}' cowrie 2>/dev/null | grep -qx true 2>/dev/null",
     )
     .await;
-    out.push(run_mode_relevant(
-        cowrie_ok,
-        "Cowrie SSH honeypot",
-    ));
+    out.push(run_mode_relevant(cowrie_ok, "Cowrie SSH honeypot"));
 
     // tcpdump MAC scanner
     let tcpdump_ok = probe(
@@ -208,7 +207,10 @@ pub async fn health_check(cfg: &SysmodeConfig) -> Result<String> {
     ));
 
     // SSH access state
-    let ssh_masked = probe("systemctl is-enabled sshd >/dev/null 2>&1 && ! systemctl is-active sshd >/dev/null 2>&1").await;
+    let ssh_masked = probe(
+        "systemctl is-enabled sshd >/dev/null 2>&1 && ! systemctl is-active sshd >/dev/null 2>&1",
+    )
+    .await;
     let ssh_active = probe("systemctl is-active sshd >/dev/null 2>&1").await;
     let ssh_state = if ssh_active {
         "active"
@@ -220,7 +222,12 @@ pub async fn health_check(cfg: &SysmodeConfig) -> Result<String> {
     out.push(format!("  SSH (sshd): {ssh_state}"));
 
     // 3. Decoy listening ports
-    let ss_out = run("ss -tlnH 2>/dev/null | awk '{print $4}' | sed -E 's/.*://;s/\\[.*\\]//' | sort -nu", None).await.unwrap_or_default();
+    let ss_out = run(
+        "ss -tlnH 2>/dev/null | awk '{print $4}' | sed -E 's/.*://;s/\\[.*\\]//' | sort -nu",
+        None,
+    )
+    .await
+    .unwrap_or_default();
     let listening: Vec<u16> = ss_out
         .lines()
         .filter_map(|l| l.trim().parse().ok())
@@ -295,7 +302,9 @@ pub async fn health_check(cfg: &SysmodeConfig) -> Result<String> {
     out.push(format!("  cowrie.json: {cowrie_fresh}"));
 
     out.push(String::new());
-    out.push("Everything looks good — ask for 'sysmode logs' for the full attack/IDS report.".into());
+    out.push(
+        "Everything looks good — ask for 'sysmode logs' for the full attack/IDS report.".into(),
+    );
 
     Ok(out.join("\n"))
 }

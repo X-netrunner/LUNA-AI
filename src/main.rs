@@ -162,7 +162,14 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if let Some(w) = args.forget_lesson.as_deref() {
-        let n = if w == "all" { None } else { Some(w.parse::<usize>().map_err(|_| anyhow::anyhow!("--forget-lesson takes a number or all"))?) };
+        let n = if w == "all" {
+            None
+        } else {
+            Some(
+                w.parse::<usize>()
+                    .map_err(|_| anyhow::anyhow!("--forget-lesson takes a number or all"))?,
+            )
+        };
         crate::agent::lessons::forget(n).map_err(|e| anyhow::anyhow!(e))?;
         println!("{}", crate::agent::lessons::list());
         return Ok(());
@@ -203,10 +210,8 @@ async fn main() -> Result<()> {
         Some(log)
     } else {
         let file = crate::tui::log::FileLog::new(session_log_path());
-        let writer = crate::tui::log::TeeWriter::new(
-            crate::tui::log::Shared::new(io::stderr()),
-            file,
-        );
+        let writer =
+            crate::tui::log::TeeWriter::new(crate::tui::log::Shared::new(io::stderr()), file);
         tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::new(filter))
             .with_target(false)
@@ -306,19 +311,34 @@ async fn main() -> Result<()> {
     if args.security_status {
         let st = config.llm.security_gate_state();
         println!("Security tier — No-Refusal Mode: {}", st.as_str());
-        println!("  requested in config : {}", config.llm.security_unrestricted);
+        println!(
+            "  requested in config : {}",
+            config.llm.security_unrestricted
+        );
         println!(
             "  developer key set   : {}",
             crate::unlock::has_public_key(&config.llm.security_dev_public_key)
         );
-        println!("  receipt path        : {}", crate::unlock::receipt_path_display());
-        println!("  effective           : {}", config.llm.security_unrestricted_active());
+        println!(
+            "  receipt path        : {}",
+            crate::unlock::receipt_path_display()
+        );
+        println!(
+            "  effective           : {}",
+            config.llm.security_unrestricted_active()
+        );
 
         // Both switches share the one signature, so they are reported together
         // here rather than behind a second flag that would suggest a second key.
         println!();
-        println!("Capability actions — tools that act on the machine: {}", st.as_str());
-        println!("  requested in config : {}", config.external.allow_capability_actions);
+        println!(
+            "Capability actions — tools that act on the machine: {}",
+            st.as_str()
+        );
+        println!(
+            "  requested in config : {}",
+            config.external.allow_capability_actions
+        );
         println!(
             "  effective           : {}",
             crate::unlock::capabilities_active(
@@ -326,7 +346,10 @@ async fn main() -> Result<()> {
                 &config.llm.security_dev_public_key
             )
         );
-        println!("  covers              : {}", config.external.capability_tools.join(", "));
+        println!(
+            "  covers              : {}",
+            config.external.capability_tools.join(", ")
+        );
 
         if !crate::unlock::has_public_key(&config.llm.security_dev_public_key) {
             println!("\nNo developer key is configured, so neither can ever be enabled.");
@@ -385,8 +408,7 @@ async fn main() -> Result<()> {
             Some(v) if !v.trim().is_empty() => v,
             _ => {
                 let prompt = format!("Secret for luna/{}: ", name);
-                rpassword::prompt_password(prompt)
-                    .context("Failed to read secret from terminal")?
+                rpassword::prompt_password(prompt).context("Failed to read secret from terminal")?
             }
         };
         if secret.is_empty() {
@@ -414,17 +436,13 @@ async fn main() -> Result<()> {
 
     // ── One-time Spotify OAuth (exits after authorizing) ─────────────────────
     if args.spotify_auth {
-        let client_id = config
-            .spotify
-            .client_id
-            .as_deref()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "[spotify] client_id not set — store it first:\n  \
+        let client_id = config.spotify.client_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "[spotify] client_id not set — store it first:\n  \
                      luna --set-key spotify_id\n  \
                      then add a [spotify] section to luna.toml."
-                )
-            })?;
+            )
+        })?;
 
         tracing::info!("Starting Spotify PKCE authorization flow");
         // The token is stored in the keyring inside authorize().
@@ -433,7 +451,9 @@ async fn main() -> Result<()> {
         // Point luna.toml at the stored keyring token and persist it.
         config.spotify.refresh_token = Some("keyring:spotify_refresh".to_string());
         config.save()?;
-        println!("\nSpotify authorized. You can now say things like \"luna, play my liked songs\".");
+        println!(
+            "\nSpotify authorized. You can now say things like \"luna, play my liked songs\"."
+        );
         return Ok(());
     }
 
@@ -528,7 +548,7 @@ async fn main() -> Result<()> {
         }
     }
 
-        if args.tui {
+    if args.tui {
         tracing::info!("TUI mode — using Ratatui interface");
         config.audio.input_mode = crate::config::InputMode::Tui;
         if let Some(log) = tui_log {
@@ -554,7 +574,10 @@ async fn main() -> Result<()> {
 fn prompt_sudo_password() -> anyhow::Result<String> {
     use std::io::{self, Write};
     // Open /dev/tty directly — this is the actual terminal even when stdin is piped
-    let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")?;
     let tty_clone = tty.try_clone()?;
     let mut tty_out = io::BufWriter::new(&tty);
     write!(tty_out, "  [Luna] sudo password (leave blank to skip): ")?;

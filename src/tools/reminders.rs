@@ -57,13 +57,23 @@ pub fn add_at(hhmm: &str, text: &str) -> Result<Reminder> {
     anyhow::ensure!(parts.len() == 2, "time must be HH:MM");
     let h: i64 = parts[0].parse().context("bad hour")?;
     let m: i64 = parts[1].parse().context("bad minute")?;
-    anyhow::ensure!((0..24).contains(&h) && (0..60).contains(&m), "time out of range");
+    anyhow::ensure!(
+        (0..24).contains(&h) && (0..60).contains(&m),
+        "time out of range"
+    );
 
     use chrono::{Datelike, TimeZone};
     let local = chrono::Local;
     let today_naive = chrono::Local::now().date_naive();
     let mut target = local
-        .with_ymd_and_hms(today_naive.year(), today_naive.month(), today_naive.day(), h as u32, m as u32, 0)
+        .with_ymd_and_hms(
+            today_naive.year(),
+            today_naive.month(),
+            today_naive.day(),
+            h as u32,
+            m as u32,
+            0,
+        )
         .single()
         .context("invalid time")?;
     if target.timestamp() <= now() as i64 {

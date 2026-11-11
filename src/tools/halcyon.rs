@@ -87,7 +87,11 @@ pub async fn call(tier: &'static str, args: &Value, sudo_password: Option<&str>)
     }
     let rest = split_args(&args["args"]);
     let mut cmd = tokio::process::Command::new("python3");
-    cmd.arg(&script).arg(tier).arg(&action).args(&rest).kill_on_drop(true);
+    cmd.arg(&script)
+        .arg(tier)
+        .arg(&action)
+        .args(&rest)
+        .kill_on_drop(true);
     cmd.stdin(std::process::Stdio::null());
     if tier == "security" {
         if let Some(pw) = sudo_password {
@@ -108,7 +112,14 @@ pub async fn call(tier: &'static str, args: &Value, sudo_password: Option<&str>)
     match out.status.code() {
         Some(0) => Ok(if text.is_empty() { "done".into() } else { text }),
         Some(3) => bail!("Refused by Halcyon: {text}"),
-        _ => bail!("{}", if text.is_empty() { "the action failed" } else { &text }),
+        _ => bail!(
+            "{}",
+            if text.is_empty() {
+                "the action failed"
+            } else {
+                &text
+            }
+        ),
     }
 }
 
@@ -165,8 +176,14 @@ mod tests {
 
     #[test]
     fn args_arrive_as_separate_words() {
-        assert_eq!(split_args(&json!(["add", "buy milk", 3])), vec!["add", "buy milk", "3"]);
-        assert_eq!(split_args(&json!("add 'buy milk' now")), vec!["add", "buy milk", "now"]);
+        assert_eq!(
+            split_args(&json!(["add", "buy milk", 3])),
+            vec!["add", "buy milk", "3"]
+        );
+        assert_eq!(
+            split_args(&json!("add 'buy milk' now")),
+            vec!["add", "buy milk", "now"]
+        );
         assert_eq!(split_args(&json!("a \"b  c\"")), vec!["a", "b  c"]);
         assert_eq!(split_args(&json!("")), Vec::<String>::new());
         assert_eq!(split_args(&json!(null)), Vec::<String>::new());
@@ -175,7 +192,10 @@ mod tests {
     #[test]
     fn shell_syntax_stays_a_plain_word() {
         // nothing here ever reaches a shell: `;`, `$()` and backticks are just characters in a word
-        assert_eq!(split_args(&json!("fw-ban 1.2.3.4;reboot")), vec!["fw-ban", "1.2.3.4;reboot"]);
+        assert_eq!(
+            split_args(&json!("fw-ban 1.2.3.4;reboot")),
+            vec!["fw-ban", "1.2.3.4;reboot"]
+        );
         assert_eq!(split_args(&json!("$(id) `id`")), vec!["$(id)", "`id`"]);
     }
 
@@ -189,7 +209,13 @@ mod tests {
 
     #[tokio::test]
     async fn an_option_is_not_an_action() {
-        let e = call("info", &json!({"action": "--help"}), None).await.unwrap_err().to_string();
-        assert!(e.contains("Not an action") || e.contains("not installed"), "{e}");
+        let e = call("info", &json!({"action": "--help"}), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("Not an action") || e.contains("not installed"),
+            "{e}"
+        );
     }
 }

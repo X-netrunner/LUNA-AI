@@ -99,7 +99,12 @@ impl<'a> ChatHistory<'a> {
         focused: bool,
         live_thinking: Option<&'a str>,
     ) -> Self {
-        Self { messages, scroll_from_bottom, focused, live_thinking }
+        Self {
+            messages,
+            scroll_from_bottom,
+            focused,
+            live_thinking,
+        }
     }
 
     fn build_lines(&self, width: usize) -> Vec<Line<'static>> {
@@ -193,7 +198,10 @@ impl<'a> Widget for ChatHistory<'a> {
         let total = lines.len();
         let view_h = inner.height.max(1) as usize;
         let offset = scroll_top(total, view_h, self.scroll_from_bottom);
-        Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((offset, 0)).render(inner, buf);
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((offset, 0))
+            .render(inner, buf);
     }
 }
 
@@ -206,7 +214,10 @@ pub struct InputLine<'a> {
 
 impl<'a> InputLine<'a> {
     pub fn new(input: &'a str) -> Self {
-        Self { input, cursor: input.len() }
+        Self {
+            input,
+            cursor: input.len(),
+        }
     }
 
     pub fn with_cursor(mut self, cursor: usize) -> Self {
@@ -216,26 +227,35 @@ impl<'a> InputLine<'a> {
 
     fn viewport(input: &str, cursor: usize, width: usize) -> (String, usize) {
         let cursor = cursor.min(input.len());
-        let before: String = input.char_indices().take_while(|(i, _)| *i < cursor)
-            .map(|(_, c)| c).collect();
+        let before: String = input
+            .char_indices()
+            .take_while(|(i, _)| *i < cursor)
+            .map(|(_, c)| c)
+            .collect();
         let column = Line::from(before.as_str()).width();
         let skip = column.saturating_sub(width.saturating_sub(1));
         let mut removed = 0;
-        let visible: String = input.chars().skip_while(|c| {
-            if removed < skip {
-                removed += Span::raw(c.to_string()).width();
-                true
-            } else { false }
-        }).collect();
+        let visible: String = input
+            .chars()
+            .skip_while(|c| {
+                if removed < skip {
+                    removed += Span::raw(c.to_string()).width();
+                    true
+                } else {
+                    false
+                }
+            })
+            .collect();
         (visible, column.saturating_sub(removed))
     }
 
     pub fn cursor_area(area: Rect, cursor_pos: usize, input: &str) -> Option<(u16, u16)> {
-        if area.width < 3 || area.height < 3 { return None; }
+        if area.width < 3 || area.height < 3 {
+            return None;
+        }
         let (_, column) = Self::viewport(input, cursor_pos, usize::from(area.width - 2));
         Some((area.x + 1 + column as u16, area.y + 1))
     }
-
 }
 
 impl<'a> Widget for InputLine<'a> {
@@ -250,13 +270,14 @@ impl<'a> Widget for InputLine<'a> {
         block.render(area, buf);
 
         if self.input.is_empty() {
-            let placeholder = Paragraph::new("Ask anything…  Enter send · F1 help · :config settings")
-                .style(Style::default().fg(Color::Rgb(166, 173, 200)));
+            let placeholder =
+                Paragraph::new("Ask anything…  Enter send · F1 help · :config settings")
+                    .style(Style::default().fg(Color::Rgb(166, 173, 200)));
             placeholder.render(inner, buf);
         } else {
             let (visible, _) = Self::viewport(self.input, self.cursor, inner.width as usize);
-            let paragraph = Paragraph::new(visible)
-                .style(Style::default().fg(Color::Rgb(205, 214, 244)));
+            let paragraph =
+                Paragraph::new(visible).style(Style::default().fg(Color::Rgb(205, 214, 244)));
             paragraph.render(inner, buf);
         }
     }
@@ -272,7 +293,11 @@ pub struct DebugPanel<'a> {
 
 impl<'a> DebugPanel<'a> {
     pub fn new(logs: &'a [String], scroll_from_bottom: usize, focused: bool) -> Self {
-        Self { logs, scroll_from_bottom, focused }
+        Self {
+            logs,
+            scroll_from_bottom,
+            focused,
+        }
     }
 
     fn build_lines(&self, width: usize) -> Vec<Line<'static>> {
@@ -291,13 +316,15 @@ impl<'a> DebugPanel<'a> {
             };
             let compact: String = log.chars().take(215).collect();
             let content_color = debug_content_color(&compact, color);
-            let badge_span =
-                Span::styled(badge, Style::default().fg(color).add_modifier(Modifier::BOLD));
+            let badge_span = Span::styled(
+                badge,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            );
             for chunk in wrap_text(&compact, width.saturating_sub(4).max(4)) {
-                lines.push(Line::from(vec![badge_span.clone(), Span::styled(
-                    format!(" {}", chunk),
-                    Style::default().fg(content_color),
-                )]));
+                lines.push(Line::from(vec![
+                    badge_span.clone(),
+                    Span::styled(format!(" {}", chunk), Style::default().fg(content_color)),
+                ]));
             }
         }
         lines
@@ -322,7 +349,8 @@ impl<'a> Widget for DebugPanel<'a> {
         if self.logs.is_empty() {
             let empty = Paragraph::new("No system logs.")
                 .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Center).wrap(Wrap { trim: false });
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: false });
             empty.render(inner, buf);
             return;
         }
@@ -331,7 +359,10 @@ impl<'a> Widget for DebugPanel<'a> {
         let total = lines.len();
         let view_h = inner.height.max(1) as usize;
         let offset = scroll_top(total, view_h, self.scroll_from_bottom);
-        Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((offset, 0)).render(inner, buf);
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((offset, 0))
+            .render(inner, buf);
     }
 }
 
@@ -355,7 +386,14 @@ impl<'a> StatusBar<'a> {
         status: &'a str,
         thinking: bool,
     ) -> Self {
-        Self { model, gpu, cpu, latency, status, thinking }
+        Self {
+            model,
+            gpu,
+            cpu,
+            latency,
+            status,
+            thinking,
+        }
     }
 }
 
@@ -371,25 +409,26 @@ impl<'a> Widget for StatusBar<'a> {
         let latency_ms = self.latency.as_millis();
         let think = if self.thinking { "ON" } else { "OFF" };
         let text = vec![Line::from(vec![
-            Span::styled(" ✦ Luna", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ✦ Luna",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  •  ", Style::default().fg(Color::DarkGray)),
             Span::styled("Model: ", Style::default().fg(Color::Rgb(140, 140, 140))),
             Span::styled(
                 self.model,
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("  •  ", Style::default().fg(Color::DarkGray)),
             Span::styled("GPU: ", Style::default().fg(Color::Rgb(140, 140, 140))),
-            Span::styled(
-                self.gpu,
-                Style::default().fg(Color::Magenta),
-            ),
+            Span::styled(self.gpu, Style::default().fg(Color::Magenta)),
             Span::styled("  •  ", Style::default().fg(Color::DarkGray)),
             Span::styled("CPU: ", Style::default().fg(Color::Rgb(140, 140, 140))),
-            Span::styled(
-                self.cpu,
-                Style::default().fg(Color::Green),
-            ),
+            Span::styled(self.cpu, Style::default().fg(Color::Green)),
             Span::styled("  •  ", Style::default().fg(Color::DarkGray)),
             Span::styled("Latency: ", Style::default().fg(Color::Rgb(140, 140, 140))),
             Span::styled(
@@ -400,13 +439,19 @@ impl<'a> Widget for StatusBar<'a> {
             Span::styled("Think: ", Style::default().fg(Color::Rgb(140, 140, 140))),
             Span::styled(
                 think,
-                Style::default().fg(if self.thinking { Color::Green } else { Color::Red }),
+                Style::default().fg(if self.thinking {
+                    Color::Green
+                } else {
+                    Color::Red
+                }),
             ),
             Span::styled("  •  ", Style::default().fg(Color::DarkGray)),
             Span::styled(self.status, Style::default().fg(Color::Rgb(180, 180, 255))),
         ])];
 
-        let paragraph = Paragraph::new(text).style(Style::default()).alignment(Alignment::Left);
+        let paragraph = Paragraph::new(text)
+            .style(Style::default())
+            .alignment(Alignment::Left);
         paragraph.render(inner, buf);
     }
 }
@@ -418,17 +463,51 @@ pub struct ShortcutsBar;
 impl Widget for ShortcutsBar {
     fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let spans = vec![
-            Span::styled(" [F2] ", Style::default().fg(Color::Rgb(166, 227, 161)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " [F2] ",
+                Style::default()
+                    .fg(Color::Rgb(166, 227, 161))
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Config  ", Style::default().fg(Color::Rgb(160, 160, 160))),
-            Span::styled(" [Tab] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled("Switch Focus  ", Style::default().fg(Color::Rgb(160, 160, 160))),
-            Span::styled(" [↑↓] ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " [Tab] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Switch Focus  ",
+                Style::default().fg(Color::Rgb(160, 160, 160)),
+            ),
+            Span::styled(
+                " [↑↓] ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Scroll  ", Style::default().fg(Color::Rgb(160, 160, 160))),
-            Span::styled(" [F1/?] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled("Shortcuts  ", Style::default().fg(Color::Rgb(160, 160, 160))),
-            Span::styled(" [Esc] ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " [F1/?] ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Shortcuts  ",
+                Style::default().fg(Color::Rgb(160, 160, 160)),
+            ),
+            Span::styled(
+                " [Esc] ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Reset  ", Style::default().fg(Color::Rgb(160, 160, 160))),
-            Span::styled(" [Ctrl+C] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " [Ctrl+C] ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Quit", Style::default().fg(Color::Rgb(160, 160, 160))),
         ];
         let paragraph = Paragraph::new(Line::from(spans)).alignment(Alignment::Center);
@@ -447,96 +526,277 @@ impl Widget for ShortcutsModal {
             .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            .border_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            );
 
         let inner = block.inner(area);
         block.render(area, buf);
 
         let lines = vec![
-            Line::from(Span::styled("Navigation & Panel Focus:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(
+                "Navigation & Panel Focus:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
             Line::from(vec![
-                Span::styled("  Tab            ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Toggle focus between Chat and Debug panel", Style::default().fg(Color::White)),
+                Span::styled(
+                    "  Tab            ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Toggle focus between Chat and Debug panel",
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  ↑ / ↓          ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Scroll focused panel history up / down", Style::default().fg(Color::White)),
+                Span::styled(
+                    "  ↑ / ↓          ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Scroll focused panel history up / down",
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  Esc            ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Reset scroll offset & focus Chat input", Style::default().fg(Color::White)),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled("Configuration & Settings:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
-            Line::from(vec![
-                Span::styled("  F2 / :config   ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Open interactive luna.toml Config Editor modal", Style::default().fg(Color::White)),
-            ]),
-            Line::from(vec![
-                Span::styled("  Ctrl + S       ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Save & reload luna.toml (inside Config Editor)", Style::default().fg(Color::White)),
-            ]),
-            Line::from(vec![
-                Span::styled("  Ctrl + E       ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Launch external $EDITOR (nano/nvim/micro) on luna.toml", Style::default().fg(Color::White)),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled("Input Editing:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
-            Line::from(vec![
-                Span::styled("  Ctrl + U       ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Clear the entire input line", Style::default().fg(Color::White)),
-            ]),
-            Line::from(vec![
-                Span::styled("  Ctrl + W       ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Delete the word behind cursor", Style::default().fg(Color::White)),
-            ]),
-            Line::from(vec![
-                Span::styled("  Ctrl + A / E   ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Move cursor to start (Home) or end (End) of line", Style::default().fg(Color::White)),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled("General & System:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
-            Line::from(vec![
-                Span::styled("  ? / F1         ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Toggle this Keyboard Shortcuts help dialog", Style::default().fg(Color::White)),
-            ]),
-            Line::from(vec![
-                Span::styled("  Ctrl + B       ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Toggle bottom keybindings shortcuts bar visibility", Style::default().fg(Color::White)),
-            ]),
-            Line::from(vec![
-                Span::styled("  Ctrl + C       ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Clear input line (or exit Luna if input is empty)", Style::default().fg(Color::White)),
-            ]),
-            Line::from(vec![
-                Span::styled("  Ctrl + D       ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Exit Luna session immediately", Style::default().fg(Color::White)),
+                Span::styled(
+                    "  Esc            ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Reset scroll offset & focus Chat input",
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(""),
-            Line::from(Span::styled("Debug & Diagnostics Commands:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(
+                "Configuration & Settings:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
             Line::from(vec![
-                Span::styled("  /debug [all]   ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Run full system diagnostic & stream logs to Debug Panel", Style::default().fg(Color::White)),
+                Span::styled(
+                    "  F2 / :config   ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Open interactive luna.toml Config Editor modal",
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  /test-voice    ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Test Piper TTS, RVC python environment & audio playback", Style::default().fg(Color::White)),
+                Span::styled(
+                    "  Ctrl + S       ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Save & reload luna.toml (inside Config Editor)",
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  /test-model    ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Test Ollama LLM endpoint connectivity & model status", Style::default().fg(Color::White)),
+                Span::styled(
+                    "  Ctrl + E       ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Launch external $EDITOR (nano/nvim/micro) on luna.toml",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Input Editing:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    "  Ctrl + U       ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Clear the entire input line",
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  /test-stt      ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Test Whisper STT model & audio recording devices", Style::default().fg(Color::White)),
+                Span::styled(
+                    "  Ctrl + W       ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Delete the word behind cursor",
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  /test-memory   ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Test conversation memory & permanent vector storage", Style::default().fg(Color::White)),
+                Span::styled(
+                    "  Ctrl + A / E   ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Move cursor to start (Home) or end (End) of line",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "General & System:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    "  ? / F1         ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Toggle this Keyboard Shortcuts help dialog",
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  /log <message> ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("Write custom test message directly into Debug Panel", Style::default().fg(Color::White)),
+                Span::styled(
+                    "  Ctrl + B       ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Toggle bottom keybindings shortcuts bar visibility",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  Ctrl + C       ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Clear input line (or exit Luna if input is empty)",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  Ctrl + D       ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Exit Luna session immediately",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Debug & Diagnostics Commands:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    "  /debug [all]   ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Run full system diagnostic & stream logs to Debug Panel",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  /test-voice    ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Test Piper TTS, RVC python environment & audio playback",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  /test-model    ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Test Ollama LLM endpoint connectivity & model status",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  /test-stt      ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Test Whisper STT model & audio recording devices",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  /test-memory   ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Test conversation memory & permanent vector storage",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "  /log <message> ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Write custom test message directly into Debug Panel",
+                    Style::default().fg(Color::White),
+                ),
             ]),
         ];
 
@@ -555,14 +815,22 @@ impl<'a> Widget for ConfigEditorModal<'a> {
     fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let title = format!(
             " ⚙ Config Editor: ~/.config/luna/luna.toml {} ",
-            if self.state.modified { "[Modified]" } else { "[Saved]" }
+            if self.state.modified {
+                "[Modified]"
+            } else {
+                "[Saved]"
+            }
         );
         let block = Block::default()
             .title(title)
             .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Rgb(166, 227, 161)).add_modifier(Modifier::BOLD));
+            .border_style(
+                Style::default()
+                    .fg(Color::Rgb(166, 227, 161))
+                    .add_modifier(Modifier::BOLD),
+            );
 
         let inner = block.inner(area);
         block.render(area, buf);
@@ -576,13 +844,22 @@ impl<'a> Widget for ConfigEditorModal<'a> {
         }
 
         let mut lines = Vec::new();
-        for (idx, line_str) in self.state.lines.iter().enumerate().skip(scroll).take(view_height) {
+        for (idx, line_str) in self
+            .state
+            .lines
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(view_height)
+        {
             let is_cursor_line = idx == self.state.cursor_row;
             let line_num = format!("{:>3} │ ", idx + 1);
             let num_span = Span::styled(
                 line_num,
                 if is_cursor_line {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 },
@@ -590,7 +867,9 @@ impl<'a> Widget for ConfigEditorModal<'a> {
             let content_span = Span::styled(
                 line_str.clone(),
                 if is_cursor_line {
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Rgb(180, 180, 180))
                 },
@@ -603,7 +882,9 @@ impl<'a> Widget for ConfigEditorModal<'a> {
         lines.push(Line::from(Span::styled(
             &self.state.status,
             if self.state.status.starts_with('✓') {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
             } else if self.state.status.starts_with('✗') {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             } else {
@@ -662,9 +943,13 @@ impl<'a> Widget for SlashCommandMenu<'a> {
             let is_selected = idx == self.selected;
             let prefix = if is_selected { " ▶ " } else { "   " };
             let cmd_style = if is_selected {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
             };
             let desc_style = if is_selected {
                 Style::default().fg(Color::White)
@@ -693,14 +978,22 @@ impl<'a> Widget for SettingsMenuModal<'a> {
     fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let title = format!(
             " ⚙ Settings & Controls {} ",
-            if self.state.modified { "[Modified]" } else { "[Saved]" }
+            if self.state.modified {
+                "[Modified]"
+            } else {
+                "[Saved]"
+            }
         );
         let block = Block::default()
             .title(title)
             .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Rgb(166, 227, 161)).add_modifier(Modifier::BOLD));
+            .border_style(
+                Style::default()
+                    .fg(Color::Rgb(166, 227, 161))
+                    .add_modifier(Modifier::BOLD),
+            );
 
         let inner = block.inner(area);
         block.render(area, buf);
@@ -715,7 +1008,10 @@ impl<'a> Widget for SettingsMenuModal<'a> {
             if is_active {
                 cat_spans.push(Span::styled(
                     format!(" [ {} ] ", cat.name),
-                    Style::default().fg(Color::Yellow).bg(Color::Rgb(40, 40, 60)).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .bg(Color::Rgb(40, 40, 60))
+                        .add_modifier(Modifier::BOLD),
                 ));
             } else {
                 cat_spans.push(Span::styled(
@@ -736,18 +1032,28 @@ impl<'a> Widget for SettingsMenuModal<'a> {
                 let val_span = match &item.setting_type {
                     crate::tui::app::SettingType::Toggle(b) => {
                         if *b {
-                            Span::styled("[ ON ] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                            Span::styled(
+                                "[ ON ] ",
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            )
                         } else {
                             Span::styled("[OFF] ", Style::default().fg(Color::Red))
                         }
                     }
-                    crate::tui::app::SettingType::Value(val) => {
-                        Span::styled(format!("[ {} ] ", val), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-                    }
+                    crate::tui::app::SettingType::Value(val) => Span::styled(
+                        format!("[ {} ] ", val),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 };
 
                 let label_style = if is_selected {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
                 };
@@ -768,7 +1074,9 @@ impl<'a> Widget for SettingsMenuModal<'a> {
         lines.push(Line::from(Span::styled(
             &self.state.status,
             if self.state.status.starts_with('✓') {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
             } else if self.state.status.starts_with('✗') {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             } else {
@@ -776,15 +1084,46 @@ impl<'a> Widget for SettingsMenuModal<'a> {
             },
         )));
         lines.push(Line::from(vec![
-            Span::styled(" [Space/Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::styled("Toggle/Cycle  ", Style::default().fg(Color::Rgb(150, 150, 150))),
-            Span::styled(" [Tab] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " [Space/Enter] ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Toggle/Cycle  ",
+                Style::default().fg(Color::Rgb(150, 150, 150)),
+            ),
+            Span::styled(
+                " [Tab] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Category  ", Style::default().fg(Color::Rgb(150, 150, 150))),
-            Span::styled(" [S] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled("Save & Restart Daemons  ", Style::default().fg(Color::Rgb(150, 150, 150))),
-            Span::styled(" [T] ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " [S] ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Save & Restart Daemons  ",
+                Style::default().fg(Color::Rgb(150, 150, 150)),
+            ),
+            Span::styled(
+                " [T] ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Raw TOML  ", Style::default().fg(Color::Rgb(150, 150, 150))),
-            Span::styled(" [Esc] ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " [Esc] ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Close", Style::default().fg(Color::Rgb(150, 150, 150))),
         ]));
 

@@ -52,10 +52,14 @@ async fn search_tavily(query: &str, api_key: Option<&str>) -> Result<String> {
         std::process::Command::new("curl")
             .args([
                 "-s",
-                "--max-time", "15",
-                "-H", "Content-Type: application/json",
-                "-H", &auth_header,
-                "-d", &body_str,
+                "--max-time",
+                "15",
+                "-H",
+                "Content-Type: application/json",
+                "-H",
+                &auth_header,
+                "-d",
+                &body_str,
                 "https://api.tavily.com/search",
             ])
             .output()
@@ -114,10 +118,7 @@ async fn search_tavily(query: &str, api_key: Option<&str>) -> Result<String> {
 // ── Gemini (knowledge only, no grounding) ─────────────────────────────────────
 
 async fn search_gemini(query: &str, api_key: &str) -> Result<String> {
-    let prompt = format!(
-        "Answer this question concisely in 2-3 sentences: {}",
-        query
-    );
+    let prompt = format!("Answer this question concisely in 2-3 sentences: {}", query);
 
     let body = json!({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -137,9 +138,12 @@ async fn search_gemini(query: &str, api_key: &str) -> Result<String> {
         std::process::Command::new("curl")
             .args([
                 "-s",
-                "--max-time", "15",
-                "-H", "Content-Type: application/json",
-                "-d", &body_str,
+                "--max-time",
+                "15",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &body_str,
                 &url,
             ])
             .output()
@@ -148,9 +152,8 @@ async fn search_gemini(query: &str, api_key: &str) -> Result<String> {
     .await
     .context("spawn_blocking panicked")??;
 
-    let resp: serde_json::Value =
-        serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
-            .context("Failed to parse Gemini response")?;
+    let resp: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
+        .context("Failed to parse Gemini response")?;
 
     if let Some(err) = resp.get("error") {
         let msg = err["message"].as_str().unwrap_or("unknown error");
@@ -187,8 +190,10 @@ async fn search_ddg(query: &str) -> Result<String> {
         std::process::Command::new("curl")
             .args([
                 "-s",
-                "--max-time", "10",
-                "--user-agent", "luna-assistant/1.0",
+                "--max-time",
+                "10",
+                "--user-agent",
+                "luna-assistant/1.0",
                 &url,
             ])
             .output()
@@ -206,7 +211,8 @@ async fn search_ddg(query: &str) -> Result<String> {
 }
 
 fn parse_ddg_response(body: &str, query: &str) -> Result<String> {
-    let v: serde_json::Value = serde_json::from_str(body).context("Failed to parse DDG response")?;
+    let v: serde_json::Value =
+        serde_json::from_str(body).context("Failed to parse DDG response")?;
 
     let mut parts: Vec<String> = Vec::new();
 

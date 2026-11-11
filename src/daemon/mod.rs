@@ -107,22 +107,17 @@ pub async fn run(config: LunaConfig) -> Result<()> {
 
         // ── 3. Resource offenders (with dynamic ignore) ──────────────────
         for p in &procs {
-            let over =
-                p.rss_mb >= config.daemon.ram_threshold_mb
-                    || p.cpu_percent
-                        .map(|c| c >= config.daemon.cpu_threshold_percent)
-                        .unwrap_or(false);
+            let over = p.rss_mb >= config.daemon.ram_threshold_mb
+                || p.cpu_percent
+                    .map(|c| c >= config.daemon.cpu_threshold_percent)
+                    .unwrap_or(false);
             if !over {
                 continue;
             }
             // Daily-use apps never nag — this is the learned ignore list
             if learning
                 && tracker
-                    .classify_daily_use(
-                        &p.name,
-                        config.daemon.daily_use_days_per_week,
-                        3,
-                    )
+                    .classify_daily_use(&p.name, config.daemon.daily_use_days_per_week, 3)
                     .unwrap_or(false)
             {
                 continue;
@@ -151,8 +146,15 @@ pub async fn run(config: LunaConfig) -> Result<()> {
 
         // ── 4. Idle process policy ───────────────────────────────────────
         if learning {
-            autokills +=
-                handle_idle(&config, &procs, &by_name, &mut tracker, &mut term_killed, &mut last_suggest).await;
+            autokills += handle_idle(
+                &config,
+                &procs,
+                &by_name,
+                &mut tracker,
+                &mut term_killed,
+                &mut last_suggest,
+            )
+            .await;
         }
 
         // ── 5. Disk hygiene ──────────────────────────────────────────────
@@ -163,7 +165,7 @@ pub async fn run(config: LunaConfig) -> Result<()> {
                 tracing::warn!("Disk cycle failed: {}", e);
             }
         }
-// ── 6. Orphaned packages (grace-period auto-removal) ─────────────
+        // ── 6. Orphaned packages (grace-period auto-removal) ─────────────
         if let Err(e) = cleanup::orphans_cycle(&config).await {
             tracing::warn!("Orphaned-package check failed: {}", e);
         }
@@ -255,7 +257,8 @@ pub async fn run(config: LunaConfig) -> Result<()> {
 
         // ── Periodic "I'm alive" notification (notify_hours, 0 = off) ────
         if config.daemon.notify_hours > 0
-            && last_heartbeat.elapsed() >= Duration::from_secs(config.daemon.notify_hours as u64 * 3600)
+            && last_heartbeat.elapsed()
+                >= Duration::from_secs(config.daemon.notify_hours as u64 * 3600)
         {
             last_heartbeat = Instant::now();
             let facts = crate::memory::permanent::PermanentMemory::load()
@@ -266,7 +269,9 @@ pub async fn run(config: LunaConfig) -> Result<()> {
             let mut todoist_line = String::new();
             if let Some(token) = &config.todoist.api_token {
                 if !token.is_empty() {
-                    if let Ok(Some(summary)) = crate::tools::todoist::proactive_task_summary(token).await {
+                    if let Ok(Some(summary)) =
+                        crate::tools::todoist::proactive_task_summary(token).await
+                    {
                         todoist_line = format!(" · {}", summary);
                     }
                 }
@@ -361,11 +366,7 @@ async fn enforce_notif_cap(cap: u32) {
 /// protect them and they will be idle-killed. Any config for a protected app
 /// must byte-match the kernel comm (see the README Operating Notes).
 fn is_protected(config: &LunaConfig, name: &str) -> bool {
-    config
-        .daemon
-        .protected_processes
-        .iter()
-        .any(|p| p == name)
+    config.daemon.protected_processes.iter().any(|p| p == name)
 }
 
 /// Any non-protected, non-important, non-daily-use process idle past

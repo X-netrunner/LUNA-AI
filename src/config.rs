@@ -243,9 +243,7 @@ impl ExternalActionConfig {
         let mut out: Vec<&'static str> = READ_ONLY_TOOLS
             .iter()
             .copied()
-            .filter(|cand| {
-                cand.split('_').any(|w| w.len() > 2 && stem.contains(&w))
-            })
+            .filter(|cand| cand.split('_').any(|w| w.len() > 2 && stem.contains(&w)))
             .collect();
         out.sort_unstable();
         out.dedup();
@@ -264,17 +262,16 @@ impl ExternalActionConfig {
 /// does not scale, so every tool must now appear in exactly one of the two
 /// lists, and a test fails the build if a new tool is added to neither.
 pub const READ_ONLY_TOOLS: &[&str] = &[
-    "project_context", // reads source and updates Luna's own cache
+    "project_context",  // reads source and updates Luna's own cache
     "remember_project", // local project notes
-    "verify_project", // same execution policy as run_shell; executes repository tests
-
+    "verify_project",   // same execution policy as run_shell; executes repository tests
     // Halcyon status, docs, settings, notes, calendar, firewall and antivirus reads. The script refuses anything else under this tier.
     "halcyon_info",
     "read_file",
     "find_file",
-    "write_file",   // local files only; her own source is blocked separately
-    "edit_file",    // ditto — opens a visible editor, i.e. user-mediated
-    "run_shell",    // see README: this is the known escape hatch, by design
+    "write_file", // local files only; her own source is blocked separately
+    "edit_file",  // ditto — opens a visible editor, i.e. user-mediated
+    "run_shell",  // see README: this is the known escape hatch, by design
     "web_search",
     "fetch_page",
     "dns_lookup",
@@ -312,7 +309,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "allow_autokill",
     "deny_autokill",
     "todoist_list",
-    "self_patch", // read actions only; `apply` has its own separate gate
+    "self_patch",    // read actions only; `apply` has its own separate gate
     "system_update", // `check` only; `apply` has its own separate gate
 ];
 
@@ -641,7 +638,9 @@ fn default_num_ctx() -> u32 {
     16384
 }
 
-fn default_deep_temperature() -> f32 { 0.2 }
+fn default_deep_temperature() -> f32 {
+    0.2
+}
 
 fn default_deep_num_ctx() -> u32 {
     16384
@@ -1215,7 +1214,10 @@ pub struct UpdatesConfig {
 
 impl Default for UpdatesConfig {
     fn default() -> Self {
-        Self { enabled: true, allow_apply: false }
+        Self {
+            enabled: true,
+            allow_apply: false,
+        }
     }
 }
 
@@ -1453,7 +1455,8 @@ impl LunaConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("Failed to create config directory")?;
         }
-        std::fs::write(&path, out).with_context(|| format!("Failed to write config to {:?}", path))?;
+        std::fs::write(&path, out)
+            .with_context(|| format!("Failed to write config to {:?}", path))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1497,13 +1500,18 @@ impl LunaConfig {
 pub fn edit_leaf(text: &str, dotted: &str, value: toml_edit::Value) -> Result<String> {
     let mut doc: toml_edit::DocumentMut = text.parse().unwrap_or_default();
     let mut parts: Vec<&str> = dotted.split('.').collect();
-    let leaf = parts.pop().filter(|l| !l.is_empty()).context("empty setting name")?;
+    let leaf = parts
+        .pop()
+        .filter(|l| !l.is_empty())
+        .context("empty setting name")?;
     let mut table = doc.as_table_mut();
     for p in parts {
         if !table.contains_key(p) {
             table.insert(p, toml_edit::Item::Table(toml_edit::Table::new()));
         }
-        table = table[p].as_table_mut().with_context(|| format!("{p} in luna.toml is not a section"))?;
+        table = table[p]
+            .as_table_mut()
+            .with_context(|| format!("{p} in luna.toml is not a section"))?;
     }
     // keep the old value's surrounding comments ("model = \"a\"  # primary")
     let mut new = toml_edit::Value::from(value);
@@ -1623,8 +1631,7 @@ pub fn keyring_set(name: &str, secret: &str) -> Result<()> {
     // Store secret (plaintext in file — warn user)
     secrets.insert(name.to_string(), toml::Value::String(secret.to_string()));
 
-    let toml_str = toml::to_string_pretty(&secrets)
-        .context("Failed to serialize secrets")?;
+    let toml_str = toml::to_string_pretty(&secrets).context("Failed to serialize secrets")?;
     std::fs::write(&path, toml_str)
         .with_context(|| format!("Failed to write secrets to {:?}", path))?;
 
@@ -1650,13 +1657,16 @@ pub fn keyring_get(name: &str) -> Result<String> {
 /// a real keyring or the user's real config directory.
 fn secret_from_file(path: &std::path::Path, name: &str) -> Result<String> {
     if !path.exists() {
-        anyhow::bail!("No keyring entry 'luna/{}' and no fallback secrets file", name);
+        anyhow::bail!(
+            "No keyring entry 'luna/{}' and no fallback secrets file",
+            name
+        );
     }
 
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read secrets at {:?}", path))?;
-    let secrets: toml::Table = toml::from_str(&raw)
-        .with_context(|| format!("Failed to parse secrets at {:?}", path))?;
+    let secrets: toml::Table =
+        toml::from_str(&raw).with_context(|| format!("Failed to parse secrets at {:?}", path))?;
 
     secrets
         .get(name)
@@ -1729,7 +1739,10 @@ embedding_model = "nomic-embed-text"
 num_ctx = 16384
 "#;
         let cfg: LlmConfig = toml::from_str(src).unwrap();
-        assert_eq!(cfg.security_model.as_deref(), Some("whiterabbitneo-coder-tools"));
+        assert_eq!(
+            cfg.security_model.as_deref(),
+            Some("whiterabbitneo-coder-tools")
+        );
         assert_eq!(cfg.security_num_ctx, 8192);
     }
 
@@ -1747,7 +1760,8 @@ num_ctx = 16384
 "#;
         let cfg: LlmConfig = toml::from_str(base).unwrap();
         assert_eq!(cfg.deep_enable_thinking, None);
-        let cfg: LlmConfig = toml::from_str(&format!("{base}deep_enable_thinking = true\n")).unwrap();
+        let cfg: LlmConfig =
+            toml::from_str(&format!("{base}deep_enable_thinking = true\n")).unwrap();
         assert_eq!(cfg.deep_enable_thinking, Some(true));
         assert!(!cfg.enable_thinking);
     }
@@ -1849,14 +1863,30 @@ mod edit_leaf_tests {
     fn one_value_changes_and_nothing_else() {
         let before = "# my notes\n[llm]\nmodel = \"a\"  # primary\n\n[search]\ntavily_api_key = \"keyring:tavily\"\n";
         let after = edit_leaf(before, "llm.model", toml_edit::Value::from("b")).unwrap();
-        assert!(after.contains("model = \"b\"") && after.contains("# my notes") && after.contains("# primary"), "{after}");
-        assert!(after.contains("tavily_api_key = \"keyring:tavily\""), "a secret reference must stay a reference: {after}");
+        assert!(
+            after.contains("model = \"b\"")
+                && after.contains("# my notes")
+                && after.contains("# primary"),
+            "{after}"
+        );
+        assert!(
+            after.contains("tavily_api_key = \"keyring:tavily\""),
+            "a secret reference must stay a reference: {after}"
+        );
     }
 
     #[test]
     fn a_missing_section_is_made() {
-        let after = edit_leaf("", "external.allow_halcyon_actions", toml_edit::Value::from(true)).unwrap();
-        assert!(after.contains("[external]") && after.contains("allow_halcyon_actions = true"), "{after}");
+        let after = edit_leaf(
+            "",
+            "external.allow_halcyon_actions",
+            toml_edit::Value::from(true),
+        )
+        .unwrap();
+        assert!(
+            after.contains("[external]") && after.contains("allow_halcyon_actions = true"),
+            "{after}"
+        );
     }
 
     #[test]

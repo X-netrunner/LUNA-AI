@@ -218,7 +218,10 @@ fn extract_marked_tool_calls(text: &str) -> Vec<ToolCall> {
                         let args = it.get("arguments").cloned();
                         if let (Some(n), Some(a)) = (name, args) {
                             calls.push(ToolCall {
-                                function: ToolCallFunction { name: n.into(), arguments: a },
+                                function: ToolCallFunction {
+                                    name: n.into(),
+                                    arguments: a,
+                                },
                             });
                         }
                     }
@@ -376,7 +379,8 @@ fn strip_trailing_commas(src: &str) -> String {
             '}' | ']' => {
                 if let Some(i) = pending.take() {
                     // Whitespace between the comma and this closer goes too.
-                    while out.len() > i + 1 && out.chars().next_back().is_some_and(char::is_whitespace)
+                    while out.len() > i + 1
+                        && out.chars().next_back().is_some_and(char::is_whitespace)
                     {
                         out.pop();
                     }
@@ -449,16 +453,19 @@ fn parse_marked_one(inner: &str) -> Option<ToolCall> {
         if !json.is_char_boundary(end) {
             continue;
         }
-        if let Ok(v @ serde_json::Value::Object(_)) = serde_json::from_str::<serde_json::Value>(&json[..end])
+        if let Ok(v @ serde_json::Value::Object(_)) =
+            serde_json::from_str::<serde_json::Value>(&json[..end])
         {
             return Some(ToolCall {
-                function: ToolCallFunction { name: name.to_string(), arguments: v },
+                function: ToolCallFunction {
+                    name: name.to_string(),
+                    arguments: v,
+                },
             });
         }
     }
     None
 }
-
 
 // ── Request shapes ────────────────────────────────────────────────────────────
 
@@ -538,9 +545,8 @@ struct ChatOptions {
 /// Model names include the tag (`qwen2.5:14b`), which is what makes this
 /// correct when one tier runs a thinking model and another does not.
 fn think_rejects() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static R: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashSet<String>>,
-    > = std::sync::OnceLock::new();
+    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
     R.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
@@ -663,7 +669,9 @@ fn thinking_as_answer(thinking: &str) -> String {
     }
     kept.reverse();
 
-    let mut answer = crate::util::strip_emojis(&kept.join(". ")).trim().to_string();
+    let mut answer = crate::util::strip_emojis(&kept.join(". "))
+        .trim()
+        .to_string();
     answer = answer
         .trim_end_matches(|c: char| c == '.' || c.is_whitespace())
         .to_string();
@@ -757,7 +765,11 @@ fn is_meta_sentence(sentence: &str) -> bool {
 pub enum OllamaResponse {
     /// Plain-text reply. `streamed` is true when tokens were already printed
     /// live to stdout, so the caller must not print the text again.
-    Text { text: String, thinking: Option<String>, streamed: bool },
+    Text {
+        text: String,
+        thinking: Option<String>,
+        streamed: bool,
+    },
     /// `thinking` is carried here too, not just on `Text`.
     ///
     /// It used to be dropped on this arm: the tools path returned the calls and
@@ -1079,7 +1091,10 @@ impl OllamaClient {
         if full_text.trim().is_empty() && !thinking_buf.is_empty() {
             let rescued = thinking_as_answer(&thinking_buf);
             if !rescued.is_empty() {
-                tracing::debug!("Rescued answer from thinking ({} chars)", rescued.chars().count());
+                tracing::debug!(
+                    "Rescued answer from thinking ({} chars)",
+                    rescued.chars().count()
+                );
                 full_text = rescued;
             }
         }
@@ -1154,8 +1169,16 @@ impl OllamaClient {
 
         Ok(FullResponse {
             message: FullMessage {
-                content: if content.is_empty() { None } else { Some(content) },
-                thinking: if thinking_buf.is_empty() { None } else { Some(thinking_buf) },
+                content: if content.is_empty() {
+                    None
+                } else {
+                    Some(content)
+                },
+                thinking: if thinking_buf.is_empty() {
+                    None
+                } else {
+                    Some(thinking_buf)
+                },
                 tool_calls,
             },
             eval_count,
@@ -1294,7 +1317,10 @@ impl OllamaClient {
                 if let Some(think) = parsed.message.thinking.as_deref() {
                     let rescued = thinking_as_answer(think);
                     if !rescued.is_empty() {
-                        tracing::debug!("Rescued answer from thinking ({} chars)", rescued.chars().count());
+                        tracing::debug!(
+                            "Rescued answer from thinking ({} chars)",
+                            rescued.chars().count()
+                        );
                         text = rescued;
                     }
                 }
@@ -1449,7 +1475,10 @@ mod tests {
         assert_eq!(present_thinking(None), None);
         assert_eq!(present_thinking(Some(String::new())), None);
         assert_eq!(present_thinking(Some("   \n\t ".into())), None);
-        assert_eq!(present_thinking(Some("reasoned".into())), Some("reasoned".into()));
+        assert_eq!(
+            present_thinking(Some("reasoned".into())),
+            Some("reasoned".into())
+        );
     }
 
     /// The tool arm must be able to carry reasoning.
@@ -1480,7 +1509,10 @@ mod tests {
 
         // A turn that acted without reasoning must still read as None, or the
         // TUI shows an empty panel on every ordinary tool call.
-        let plain = OllamaResponse::ToolUse { calls: vec![call], thinking: None };
+        let plain = OllamaResponse::ToolUse {
+            calls: vec![call],
+            thinking: None,
+        };
         let OllamaResponse::ToolUse { thinking, .. } = &plain else {
             panic!("the tool arm changed shape again")
         };
@@ -1545,7 +1577,11 @@ mod tests {
             think: Some(false),
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
-        assert_eq!(v["think"], serde_json::json!(false), "top-level think missing");
+        assert_eq!(
+            v["think"],
+            serde_json::json!(false),
+            "top-level think missing"
+        );
         assert!(
             v["options"].get("think").is_none(),
             "think inside options is accepted and then ignored by Ollama"
@@ -1626,7 +1662,11 @@ mod tests {
             let bad = OllamaClient::new("http://x", "qwen2.5:14b", 0.7, 512);
             let good = OllamaClient::new("http://x", "qwen3:8b", 0.7, 512);
             assert_eq!(bad.think_flag(), None);
-            assert_eq!(good.think_flag(), Some(true), "a different model was silenced");
+            assert_eq!(
+                good.think_flag(),
+                Some(true),
+                "a different model was silenced"
+            );
         });
     }
 
@@ -1662,7 +1702,10 @@ mod tests {
             "context length exceeded",
             "",
         ] {
-            assert!(!rejects_thinking(body), "wrongly read as a thinking refusal: {body:?}");
+            assert!(
+                !rejects_thinking(body),
+                "wrongly read as a thinking refusal: {body:?}"
+            );
         }
     }
 
@@ -1804,7 +1847,9 @@ mod tests {
         match read_envelope(r#"{"tool":"system_info"}"#) {
             EnvelopeRead::Call(c) => {
                 assert_eq!(c.function.name, "system_info");
-                assert!(c.function.arguments.is_null() || c.function.arguments == serde_json::json!({}));
+                assert!(
+                    c.function.arguments.is_null() || c.function.arguments == serde_json::json!({})
+                );
             }
             other => panic!("expected a call, got {other:?}"),
         }
@@ -1857,8 +1902,14 @@ mod tests {
     /// JSON example in prose, or arguments that aren't an object.
     #[test]
     fn fenced_non_tool_json_is_ignored() {
-        assert!(extract_fenced_tool_calls("```json\n{\"city\": \"Ely\", \"pop\": 20000}\n```").is_empty());
-        assert!(extract_fenced_tool_calls("```json\n{\"name\": \"self_patch\", \"arguments\": \"oops\"}\n```").is_empty());
+        assert!(
+            extract_fenced_tool_calls("```json\n{\"city\": \"Ely\", \"pop\": 20000}\n```")
+                .is_empty()
+        );
+        assert!(extract_fenced_tool_calls(
+            "```json\n{\"name\": \"self_patch\", \"arguments\": \"oops\"}\n```"
+        )
+        .is_empty());
         assert!(extract_fenced_tool_calls("```json\n{ this is not valid json }\n```").is_empty());
     }
 
@@ -1900,7 +1951,10 @@ mod tests {
         assert_eq!(calls[0].function.name, "self_patch");
         let le = &calls[0].function.arguments["changes"][0]["line_edits"][0];
         assert_eq!(le["at_line"], 123);
-        assert!(le["replace_with"].as_str().unwrap().contains("Computes a hash"));
+        assert!(le["replace_with"]
+            .as_str()
+            .unwrap()
+            .contains("Computes a hash"));
     }
 
     #[test]
@@ -1923,8 +1977,7 @@ mod tests {
         let calls = extract_marked_tool_calls(text);
         assert_eq!(calls.len(), 1);
         assert_eq!(
-            calls[0].function.arguments["file"],
-            "https://example.com/a//b.rs",
+            calls[0].function.arguments["file"], "https://example.com/a//b.rs",
             "URL must not be truncated at the //"
         );
     }

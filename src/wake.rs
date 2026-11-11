@@ -153,7 +153,9 @@ fn pending_voice_path() -> Option<PathBuf> {
 /// here; the TUI reads and deletes it at startup and processes it as its
 /// first voice utterance.
 fn write_pending_voice(text: &str) {
-    let Some(path) = pending_voice_path() else { return };
+    let Some(path) = pending_voice_path() else {
+        return;
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -204,13 +206,10 @@ fn spawn_terminal(preferred: &str) -> Result<()> {
     let (bin, args) = choice.context(
         "no terminal emulator found — set one with \"terminal_cmd\" in the [wake] section",
     )?;
-    Command::new(&bin).args(&args).spawn().with_context(|| {
-        format!(
-            "failed to spawn terminal {} with {:?}",
-            bin.display(),
-            args
-        )
-    })?;
+    Command::new(&bin)
+        .args(&args)
+        .spawn()
+        .with_context(|| format!("failed to spawn terminal {} with {:?}", bin.display(), args))?;
     tracing::info!("wake: spawned {} {}", bin.display(), args.join(" "));
     Ok(())
 }
@@ -248,11 +247,18 @@ mod tests {
     fn terminal_args_shape() {
         assert_eq!(
             term_args("ghostty", "/home/u/.local/bin/luna"),
-            vec!["-e".to_string(), "/home/u/.local/bin/luna --tui".to_string()]
+            vec![
+                "-e".to_string(),
+                "/home/u/.local/bin/luna --tui".to_string()
+            ]
         );
         assert_eq!(
             term_args("kitty", "/home/u/.local/bin/luna"),
-            vec!["-e".to_string(), "/home/u/.local/bin/luna".to_string(), "--tui".to_string()]
+            vec![
+                "-e".to_string(),
+                "/home/u/.local/bin/luna".to_string(),
+                "--tui".to_string()
+            ]
         );
         assert_eq!(
             term_args("foot", "/home/u/.local/bin/luna"),
@@ -270,10 +276,7 @@ mod tests {
 
     #[test]
     fn pending_voice_roundtrip() {
-        let home = std::env::temp_dir().join(format!(
-            "luna-wake-test-{}",
-            std::process::id()
-        ));
+        let home = std::env::temp_dir().join(format!("luna-wake-test-{}", std::process::id()));
         // Override $HOME so dirs::home_dir() points at a scratch dir.
         std::env::set_var("HOME", &home);
         write_pending_voice("what's the weather");

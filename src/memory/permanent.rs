@@ -30,7 +30,6 @@ impl PermanentMemory {
     }
 
     fn load_path(path: PathBuf) -> Result<Self> {
-
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("Failed to create memory directory")?;
         }
@@ -61,12 +60,22 @@ impl PermanentMemory {
             anyhow::bail!("Unknown memory category: {category}");
         }
         if content.chars().count() > 1000 || content.chars().any(char::is_control) {
-            anyhow::bail!("Memory must be one sentence without control characters, at most 1000 characters");
+            anyhow::bail!(
+                "Memory must be one sentence without control characters, at most 1000 characters"
+            );
         }
         let before = self.facts.clone();
-        let normalized = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-        if let Some(existing) = self.facts.iter_mut().find(|f|
-            f.category == category && normalized(&f.content) == normalized(&content)) {
+        let normalized = |s: &str| {
+            s.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        };
+        if let Some(existing) = self
+            .facts
+            .iter_mut()
+            .find(|f| f.category == category && normalized(&f.content) == normalized(&content))
+        {
             existing.content = content.clone();
             existing.added = Local::now().format("%Y-%m-%d").to_string();
             self.commit(before)?;
@@ -91,7 +100,9 @@ impl PermanentMemory {
     /// Remove a fact by keyword match
     pub fn forget(&mut self, keyword: &str) -> Result<String> {
         let keyword = keyword.trim().to_lowercase();
-        if keyword.is_empty() { anyhow::bail!("Specify a nonempty keyword to forget"); }
+        if keyword.is_empty() {
+            anyhow::bail!("Specify a nonempty keyword to forget");
+        }
         let previous = self.facts.clone();
         let before = self.facts.len();
         self.facts
@@ -113,7 +124,8 @@ impl PermanentMemory {
         &self.facts
     }
 
-    pub fn list(&self) -> String {        if self.facts.is_empty() {
+    pub fn list(&self) -> String {
+        if self.facts.is_empty() {
             return "No permanent memories stored.".to_string();
         }
         self.facts
@@ -152,16 +164,23 @@ impl PermanentMemory {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let json = serde_json::to_vec_pretty(&self.facts)?;
-        let tmp = self.path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let tmp = self
+            .path
+            .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
         let result = (|| -> Result<()> {
-            let mut f = std::fs::OpenOptions::new().write(true).create_new(true)
-                .mode(0o600).open(&tmp)?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
             f.write_all(&json)?;
             f.sync_all()?;
             std::fs::rename(&tmp, &self.path)?;
             Ok(())
         })();
-        if result.is_err() { let _ = std::fs::remove_file(&tmp); }
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
         result.context("Failed to save permanent memory")
     }
 
@@ -181,24 +200,47 @@ mod tests {
         let dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("memory.json");
-        assert!(PermanentMemory::load_path(path.clone()).unwrap().all_facts().is_empty());
+        assert!(PermanentMemory::load_path(path.clone())
+            .unwrap()
+            .all_facts()
+            .is_empty());
         assert!(!path.exists(), "loading must not rewrite memory");
         std::fs::write(&path, "broken").unwrap();
         assert!(PermanentMemory::load_path(path.clone()).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken");
         std::fs::remove_file(&path).unwrap();
-        let mut memory = PermanentMemory { facts: vec![], path };
-        memory.remember("User prefers the following tools for coding: Rust", "preference").unwrap();
-        memory.remember("User prefers the following tools for coding: Python", "preference").unwrap();
+        let mut memory = PermanentMemory {
+            facts: vec![],
+            path,
+        };
+        memory
+            .remember(
+                "User prefers the following tools for coding: Rust",
+                "preference",
+            )
+            .unwrap();
+        memory
+            .remember(
+                "User prefers the following tools for coding: Python",
+                "preference",
+            )
+            .unwrap();
         assert_eq!(memory.all_facts().len(), 2);
         assert!(memory.forget(" ").is_err());
         assert_eq!(memory.all_facts().len(), 2);
         assert!(memory.remember("abc", "invalid").is_err());
         let original = memory.path.clone();
         memory.path = dir.join("missing").join("memory.json");
-        assert!(memory.remember("User likes short answers", "preference").is_err());
+        assert!(memory
+            .remember("User likes short answers", "preference")
+            .is_err());
         assert_eq!(memory.all_facts().len(), 2);
-        assert_eq!(serde_json::from_str::<Vec<Fact>>(&std::fs::read_to_string(original).unwrap()).unwrap().len(), 2);
+        assert_eq!(
+            serde_json::from_str::<Vec<Fact>>(&std::fs::read_to_string(original).unwrap())
+                .unwrap()
+                .len(),
+            2
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

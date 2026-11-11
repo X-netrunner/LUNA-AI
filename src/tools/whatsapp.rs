@@ -125,7 +125,10 @@ fn load_cache() -> HashMap<String, CacheEntry> {
 
 /// Save the contacts cache.
 fn save_cache(cache: &HashMap<String, CacheEntry>) {
-    let _ = std::fs::write(cache_path(), serde_json::to_string_pretty(cache).unwrap_or_default());
+    let _ = std::fs::write(
+        cache_path(),
+        serde_json::to_string_pretty(cache).unwrap_or_default(),
+    );
 }
 
 pub fn data_dir() -> PathBuf {
@@ -148,8 +151,7 @@ pub fn missing_reason() -> Option<String> {
 
 fn read_config() -> Result<Value> {
     let cfg = data_dir().join("config.json");
-    let raw =
-        std::fs::read_to_string(&cfg).context("read ~/.local/share/whapp/config.json")?;
+    let raw = std::fs::read_to_string(&cfg).context("read ~/.local/share/whapp/config.json")?;
     let v: Value = serde_json::from_str(&raw).context("parse whapp config.json")?;
     if v["token"].as_str().is_none() {
         return Err(anyhow!("no token in {}", cfg.display()));
@@ -174,10 +176,7 @@ fn my_phone() -> Option<String> {
 }
 
 fn base_url(explicit: Option<&str>) -> String {
-    explicit
-        .unwrap_or("")
-        .trim_end_matches('/')
-        .to_string()
+    explicit.unwrap_or("").trim_end_matches('/').to_string()
 }
 fn resolved_base(explicit: Option<&str>) -> String {
     if base_url(explicit).is_empty() {
@@ -210,11 +209,7 @@ impl ResolvedRecipient {
     }
 }
 
-async fn resolve_recipient(
-    to: &str,
-    base: &str,
-    token: &str,
-) -> Result<ResolvedRecipient> {
+async fn resolve_recipient(to: &str, base: &str, token: &str) -> Result<ResolvedRecipient> {
     let t = to.trim().to_string();
     let low = t.to_lowercase();
 
@@ -301,7 +296,10 @@ pub async fn lookup(name: &str, explicit_base: Option<&str>) -> Result<String> {
                     format!("- {n}: +{p}")
                 })
                 .collect();
-            return Ok(format!("Contacts matching \"{name}\":\n{}", lines.join("\n")));
+            return Ok(format!(
+                "Contacts matching \"{name}\":\n{}",
+                lines.join("\n")
+            ));
         }
     }
     let err = v["error"].as_str().unwrap_or("no contact found");
@@ -388,8 +386,10 @@ fn render_contacts(v: &Value, show_all: bool) -> String {
     let total = lines.len();
     let lines_to_show = if show_all { total } else { total.min(15) };
     let preview: Vec<String> = lines.iter().take(lines_to_show).cloned().collect();
-    let mut out = format!("WhatsApp contact book ({total} entries{}):\n",
-        if show_all { "" } else { ", showing first 15" });
+    let mut out = format!(
+        "WhatsApp contact book ({total} entries{}):\n",
+        if show_all { "" } else { ", showing first 15" }
+    );
     out.push_str(&preview.join("\n"));
     if !show_all && total > 15 {
         out.push_str(&format!("\n... and {} more. Use action=contacts with show_all=true to see all, or q=<name> to filter.", total - 15));
@@ -403,11 +403,17 @@ fn render_contacts(v: &Value, show_all: bool) -> String {
 /// linked, falls back to the on-disk contact book the bridge itself maintains.
 /// Also updates a local cache for fast offline name→phone resolution.
 /// If `show_all` is true, returns the complete list; otherwise a preview (first 15).
-pub async fn contacts(query: Option<&str>, show_all: bool, explicit_base: Option<&str>) -> Result<String> {
+pub async fn contacts(
+    query: Option<&str>,
+    show_all: bool,
+    explicit_base: Option<&str>,
+) -> Result<String> {
     ensure_cache_initialized();
     sync_bridge();
     if let Some(reason) = missing_reason() {
-        bail!("WhatsApp bridge isn't installed ({reason}). Run `luna --whatsapp-link` to set it up.");
+        bail!(
+            "WhatsApp bridge isn't installed ({reason}). Run `luna --whatsapp-link` to set it up."
+        );
     }
     let q = query.map(str::trim).filter(|s| !s.is_empty());
 
@@ -462,7 +468,8 @@ pub async fn contacts(query: Option<&str>, show_all: bool, explicit_base: Option
                 let mut cache = load_cache();
                 if let Some(arr) = v.as_array() {
                     for c in arr {
-                        if let (Some(name), Some(phone)) = (c["name"].as_str(), c["phone"].as_str()) {
+                        if let (Some(name), Some(phone)) = (c["name"].as_str(), c["phone"].as_str())
+                        {
                             cache.insert(
                                 name.to_lowercase(),
                                 CacheEntry {
@@ -476,13 +483,17 @@ pub async fn contacts(query: Option<&str>, show_all: bool, explicit_base: Option
                 save_cache(&cache);
                 Ok(rendered)
             }
-            _ => Ok("The bridge is offline and I couldn't read the saved contact book. \
+            _ => Ok(
+                "The bridge is offline and I couldn't read the saved contact book. \
                      Start the bridge (luna-whapp.service) and try again."
-                .to_string()),
+                    .to_string(),
+            ),
         },
-        Err(_) => Ok("The WhatsApp bridge is offline and no saved contact book exists yet. \
+        Err(_) => Ok(
+            "The WhatsApp bridge is offline and no saved contact book exists yet. \
                       Make sure luna-whapp.service is running, then try again."
-            .to_string()),
+                .to_string(),
+        ),
     }
 }
 
@@ -518,9 +529,11 @@ pub async fn frequent(explicit_base: Option<&str>) -> Result<String> {
     if v["ok"].as_bool() == Some(true) {
         let total = v["total"].as_i64().unwrap_or(0);
         if total == 0 {
-            return Ok("No contacts have been active in the last ~20 days. The recency map \
+            return Ok(
+                "No contacts have been active in the last ~20 days. The recency map \
                            fills in as messages flow — check again after the next chat."
-                .to_string());
+                    .to_string(),
+            );
         }
         let list = v["contacts"]
             .as_array()
@@ -543,9 +556,11 @@ pub async fn frequent(explicit_base: Option<&str>) -> Result<String> {
             "Frequent contacts (active within ~20 days, most recent first):\n{list}"
         ))
     } else if v.is_null() {
-        Ok("The WhatsApp bridge is offline — can't check frequent contacts. Make sure \
+        Ok(
+            "The WhatsApp bridge is offline — can't check frequent contacts. Make sure \
                       luna-whapp.service is running."
-            .into())
+                .into(),
+        )
     } else {
         Ok("The bridge didn't return frequent contacts. Try again in a moment.".into())
     }

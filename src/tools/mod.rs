@@ -14,8 +14,8 @@ pub mod proactive;
 pub mod project;
 pub mod reminders;
 pub mod safety;
-pub mod select;
 pub mod security;
+pub mod select;
 pub mod selfpatch;
 pub mod shell;
 pub mod spotify;
@@ -1318,12 +1318,24 @@ pub fn fast_tool_definitions() -> Vec<ToolDef> {
 }
 
 /// Keys under which models nest the real argument object inside a wrapper.
-const ENVELOPE_PAYLOAD_KEYS: &[&str] =
-    &["arguments", "args", "parameters", "params", "input", "kwargs"];
+const ENVELOPE_PAYLOAD_KEYS: &[&str] = &[
+    "arguments",
+    "args",
+    "parameters",
+    "params",
+    "input",
+    "kwargs",
+];
 
 /// Keys under which models repeat the tool name inside a wrapper.
-const ENVELOPE_NAME_KEYS: &[&str] =
-    &["name", "tool", "function", "tool_name", "toolName", "tool_call"];
+const ENVELOPE_NAME_KEYS: &[&str] = &[
+    "name",
+    "tool",
+    "function",
+    "tool_name",
+    "toolName",
+    "tool_call",
+];
 
 /// Unwrap the argument envelope, if there is one.
 ///
@@ -1363,10 +1375,9 @@ pub fn normalise_tool_args<'a>(args: &'a serde_json::Value) -> Cow<'a, serde_jso
 
     // Every key must be a wrapper key. `write_file` has `path`/`content`, so a
     // real argument set almost never qualifies; that asymmetry is the guard.
-    if obj
-        .keys()
-        .any(|k| !ENVELOPE_PAYLOAD_KEYS.contains(&k.as_str()) && !ENVELOPE_NAME_KEYS.contains(&k.as_str()))
-    {
+    if obj.keys().any(|k| {
+        !ENVELOPE_PAYLOAD_KEYS.contains(&k.as_str()) && !ENVELOPE_NAME_KEYS.contains(&k.as_str())
+    }) {
         return Cow::Borrowed(args);
     }
 
@@ -1386,7 +1397,9 @@ pub fn normalise_tool_args<'a>(args: &'a serde_json::Value) -> Cow<'a, serde_jso
     for key in ENVELOPE_PAYLOAD_KEYS {
         match obj.get(*key) {
             // The normal wrapped form.
-            Some(inner) if inner.is_object() && !inner.as_object().is_some_and(|o| o.is_empty()) => {
+            Some(inner)
+                if inner.is_object() && !inner.as_object().is_some_and(|o| o.is_empty()) =>
+            {
                 let named = ENVELOPE_NAME_KEYS
                     .iter()
                     .find(|k| obj.contains_key(**k))
@@ -1433,9 +1446,7 @@ pub fn normalise_tool_args<'a>(args: &'a serde_json::Value) -> Cow<'a, serde_jso
 
 /// Is `name` a registered tool?
 fn is_registered_tool(name: &str) -> bool {
-    tool_definitions()
-        .iter()
-        .any(|t| t.function.name == name)
+    tool_definitions().iter().any(|t| t.function.name == name)
 }
 
 /// Run a tool, reporting start and finish to `crate::activity`.
@@ -1532,8 +1543,14 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
     // can forget it and no argument can talk its way past it. Deliberately
     // BEFORE any argument parsing: a gated tool must not so much as look at its
     // arguments, let alone act on them.
-    if config.external.is_gated(name) && !config.external.gate_open_for(name) && name == crate::config::HALCYON_DO {
-        tracing::warn!("Refused '{}': the Halcyon-actions gate is closed (args were not acted on)", name);
+    if config.external.is_gated(name)
+        && !config.external.gate_open_for(name)
+        && name == crate::config::HALCYON_DO
+    {
+        tracing::warn!(
+            "Refused '{}': the Halcyon-actions gate is closed (args were not acted on)",
+            name
+        );
         anyhow::bail!(
             "Refused 'halcyon_do': the user has not switched on 'Control Halcyon' (Halcyon > Luna window > Settings), \
              or set [external] allow_halcyon_actions = true in ~/.config/luna/luna.toml. Nothing was changed. \
@@ -1541,7 +1558,10 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
              work around it with run_shell."
         );
     }
-    if !config.external.allow_external_actions && config.external.is_gated(name) && name != crate::config::HALCYON_DO {
+    if !config.external.allow_external_actions
+        && config.external.is_gated(name)
+        && name != crate::config::HALCYON_DO
+    {
         tracing::warn!(
             "Refused '{}': external-action gate is closed (args were not acted on)",
             name
@@ -1638,8 +1658,7 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             // was the success-shaped string, and that is fixed independently
             // and pinned by `a_missing_required_argument_never_reports_success`.
             // The iteration cap bounds the loop without any of this.
-            let Some(command) = args["command"].as_str().filter(|c| !c.trim().is_empty())
-            else {
+            let Some(command) = args["command"].as_str().filter(|c| !c.trim().is_empty()) else {
                 return Err(anyhow::Error::new(MalformedCall(
                     "run_shell was called with no command. Nothing was executed. \
                      Re-issue the call with an explicit `command` argument."
@@ -1699,38 +1718,39 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
         }
 
         "nmap_scan" => {
-            let target = args["target"].as_str()
+            let target = args["target"]
+                .as_str()
                 .or_else(|| args["host"].as_str())
                 .or_else(|| args["ip"].as_str())
                 .or_else(|| args["hostname"].as_str())
                 .unwrap_or("");
             let scan_type = args["scan_type"].as_str().unwrap_or("quick");
             if target.is_empty() {
-                return Err(anyhow::Error::new(MalformedCall("No target provided for nmap_scan. Pass target=<ip_or_host>".to_string())));
+                return Err(anyhow::Error::new(MalformedCall(
+                    "No target provided for nmap_scan. Pass target=<ip_or_host>".to_string(),
+                )));
             }
-            security::nmap_scan(
-                target,
-                scan_type,
-                sudo_pass,
-                &config.llm.scan_allowlist,
-            )
-            .await
+            security::nmap_scan(target, scan_type, sudo_pass, &config.llm.scan_allowlist).await
         }
 
         "analyze_pcap" => {
-            let path = args["path"].as_str()
+            let path = args["path"]
+                .as_str()
                 .or_else(|| args["file"].as_str())
                 .or_else(|| args["pcap"].as_str())
                 .unwrap_or("");
             let mode = args["mode"].as_str().unwrap_or("summary");
             if path.is_empty() {
-                return Err(anyhow::Error::new(MalformedCall("No path provided for analyze_pcap. Pass path=<pcap_path>".to_string())));
+                return Err(anyhow::Error::new(MalformedCall(
+                    "No path provided for analyze_pcap. Pass path=<pcap_path>".to_string(),
+                )));
             }
             security::analyze_pcap(path, mode, sudo_pass).await
         }
 
         "decode_payload" => {
-            let data = args["data"].as_str()
+            let data = args["data"]
+                .as_str()
                 .or_else(|| args["payload"].as_str())
                 .or_else(|| args["text"].as_str())
                 .unwrap_or("");
@@ -1739,64 +1759,82 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
         }
 
         "hash_file" => {
-            let path = args["path"].as_str()
+            let path = args["path"]
+                .as_str()
                 .or_else(|| args["file"].as_str())
                 .or_else(|| args["filepath"].as_str())
                 .unwrap_or("");
             let algo = args["algo"].as_str().unwrap_or("sha256");
             if path.is_empty() {
-                return Err(anyhow::Error::new(MalformedCall("No path provided for hash_file. Pass path=<file_path>".to_string())));
+                return Err(anyhow::Error::new(MalformedCall(
+                    "No path provided for hash_file. Pass path=<file_path>".to_string(),
+                )));
             }
             security::hash_file(path, algo, sudo_pass).await
         }
 
         "dns_lookup" => {
-            let target = args["target"].as_str()
+            let target = args["target"]
+                .as_str()
                 .or_else(|| args["host"].as_str())
                 .or_else(|| args["domain"].as_str())
                 .unwrap_or("");
             let mode = args["mode"].as_str().unwrap_or("dns");
             if target.is_empty() {
-                return Err(anyhow::Error::new(MalformedCall("No target provided for dns_lookup. Pass target=<domain_or_ip>".to_string())));
+                return Err(anyhow::Error::new(MalformedCall(
+                    "No target provided for dns_lookup. Pass target=<domain_or_ip>".to_string(),
+                )));
             }
             security::dns_lookup(target, mode, sudo_pass).await
         }
 
         "inspect_cert" => {
-            let target = args["target"].as_str()
+            let target = args["target"]
+                .as_str()
                 .or_else(|| args["host"].as_str())
                 .or_else(|| args["domain"].as_str())
                 .unwrap_or("");
             let port = args["port"].as_u64().unwrap_or(443) as u16;
             if target.is_empty() {
-                return Err(anyhow::Error::new(MalformedCall("No target provided for inspect_cert. Pass target=<host>".to_string())));
+                return Err(anyhow::Error::new(MalformedCall(
+                    "No target provided for inspect_cert. Pass target=<host>".to_string(),
+                )));
             }
             security::inspect_cert(target, port, sudo_pass, &config.llm.scan_allowlist).await
         }
 
         "inspect_headers" => {
-            let target = args["target"].as_str()
+            let target = args["target"]
+                .as_str()
                 .or_else(|| args["url"].as_str())
                 .or_else(|| args["host"].as_str())
                 .unwrap_or("");
             if target.is_empty() {
-                return Err(anyhow::Error::new(MalformedCall("No target provided for inspect_headers. Pass target=<url_or_host>".to_string())));
+                return Err(anyhow::Error::new(MalformedCall(
+                    "No target provided for inspect_headers. Pass target=<url_or_host>".to_string(),
+                )));
             }
             security::inspect_headers(target, sudo_pass, &config.llm.scan_allowlist).await
         }
 
         "remember_project" => {
-            let path = args["path"].as_str()
+            let path = args["path"]
+                .as_str()
                 .or_else(|| args["project_path"].as_str())
                 .or_else(|| args["dir"].as_str())
                 .or_else(|| args["directory"].as_str())
                 .or_else(|| args["project_dir"].as_str())
                 .filter(|p| !p.trim().is_empty())
-                .ok_or_else(|| anyhow::Error::new(MalformedCall("Missing project path (pass path=...)".into())))?;
-            let note = args["note"].as_str()
+                .ok_or_else(|| {
+                    anyhow::Error::new(MalformedCall("Missing project path (pass path=...)".into()))
+                })?;
+            let note = args["note"]
+                .as_str()
                 .or_else(|| args["text"].as_str())
                 .filter(|n| !n.trim().is_empty())
-                .ok_or_else(|| anyhow::Error::new(MalformedCall("Missing project note (pass note=...)".into())))?;
+                .ok_or_else(|| {
+                    anyhow::Error::new(MalformedCall("Missing project note (pass note=...)".into()))
+                })?;
             project::remember(path, note)
         }
 
@@ -1811,33 +1849,47 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
                 .ok_or_else(|| anyhow::Error::new(MalformedCall(
                     format!("{name} requires a project path. Pass path=<directory>, e.g. path=/path/to/project")
                 )))?;
-            if name == "project_context" { project::context(path) } else { project::verify(path).await }
+            if name == "project_context" {
+                project::context(path)
+            } else {
+                project::verify(path).await
+            }
         }
 
         "edit_file" => {
-            let path = args["path"].as_str()
+            let path = args["path"]
+                .as_str()
                 .or_else(|| args["file"].as_str())
                 .or_else(|| args["filepath"].as_str())
                 .unwrap_or("");
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
             let open_in_gui = args["open_in_gui"].as_bool().unwrap_or(false);
-            let old_str = args["old_str"].as_str()
+            let old_str = args["old_str"]
+                .as_str()
                 .or_else(|| args["target"].as_str())
                 .or_else(|| args["search"].as_str())
                 .or_else(|| args["find"].as_str())
                 .or_else(|| args["original"].as_str());
-            let new_str = args["new_str"].as_str()
+            let new_str = args["new_str"]
+                .as_str()
                 .or_else(|| args["replacement"].as_str())
                 .or_else(|| args["replace"].as_str());
-            let content = args["content"].as_str()
+            let content = args["content"]
+                .as_str()
                 .or_else(|| args["text"].as_str())
                 .or_else(|| args["code"].as_str());
 
             if open_in_gui || (old_str.is_none() && new_str.is_none() && content.is_none()) {
-                if expanded.trim().is_empty() { anyhow::bail!("edit_file requires a path"); }
-                tokio::process::Command::new("zeditor").arg("--").arg(&expanded)
-                    .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null()).spawn()?;
+                if expanded.trim().is_empty() {
+                    anyhow::bail!("edit_file requires a path");
+                }
+                tokio::process::Command::new("zeditor")
+                    .arg("--")
+                    .arg(&expanded)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()?;
                 Ok("Opened in editor".to_string())
             } else {
                 if let Some(reason) = selfpatch::blocks_raw_write(&config.selfpatch, &expanded) {
@@ -1861,10 +1913,12 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             // Same defect as write_file/run_shell: a missing `path` used to
             // read /dev/null, which is empty, so the model received "" and
             // concluded the file did not exist.
-            let Some(path) = args["path"].as_str()
+            let Some(path) = args["path"]
+                .as_str()
                 .or_else(|| args["file"].as_str())
                 .or_else(|| args["filepath"].as_str())
-                .filter(|p| !p.trim().is_empty()) else {
+                .filter(|p| !p.trim().is_empty())
+            else {
                 return Err(anyhow::Error::new(MalformedCall(
                     "read_file was called with no path. Re-issue with an explicit `path`."
                         .to_string(),
@@ -1884,21 +1938,27 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             // exists to prevent. Observed once in six exploit-authoring turns,
             // where the model omitted `path` and Luna cheerfully reported
             // writing to /dev/null instead of the requested file.
-            let Some(path) = args["path"].as_str()
+            let Some(path) = args["path"]
+                .as_str()
                 .or_else(|| args["file"].as_str())
                 .or_else(|| args["filepath"].as_str())
-                .filter(|p| !p.trim().is_empty()) else {
+                .filter(|p| !p.trim().is_empty())
+            else {
                 return Err(anyhow::Error::new(MalformedCall(
                     "write_file was called with no path. Nothing was written. \
                      Re-issue the call with an explicit `path` argument."
                         .to_string(),
                 )));
             };
-            let content = args["content"].as_str()
+            let content = args["content"]
+                .as_str()
                 .or_else(|| args["text"].as_str())
                 .or_else(|| args["code"].as_str())
-                .ok_or_else(|| anyhow::anyhow!(
-                "write_file requires an explicit content string; nothing was written"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "write_file requires an explicit content string; nothing was written"
+                    )
+                })?;
             let expanded = path.replace('~', &std::env::var("HOME").unwrap_or_default());
             // Her own source must go through the self_patch gate, not a raw write.
             if let Some(reason) = selfpatch::blocks_raw_write(&config.selfpatch, &expanded) {
@@ -1908,38 +1968,41 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             // looks right in a diff and cannot be run. Repaired here rather
             // than after the fact, and only when the repaired form is provably
             // valid — see `tools::verify`.
-            let (content, repair_note) = match verify::check_before_write(&expanded, content) {
-                verify::PreWrite::Clean => (content.to_string(), None),
-                verify::PreWrite::Repaired(fixed) => {
-                    tracing::warn!(
-                        "Repaired double-escaped newlines in {expanded} — the file as written \
+            let (content, repair_note) =
+                match verify::check_before_write(&expanded, content) {
+                    verify::PreWrite::Clean => (content.to_string(), None),
+                    verify::PreWrite::Repaired(fixed) => {
+                        tracing::warn!(
+                            "Repaired double-escaped newlines in {expanded} — the file as written \
                          did not parse"
-                    );
-                    (
+                        );
+                        (
                         fixed,
                         Some("\nNote: the file was written with escaped newlines (`\\n` as text) \
                              and did not parse. Newlines were repaired and the result verified. \
                              If the content looks wrong, ask for it again.".to_string()),
                     )
-                }
-                verify::PreWrite::StillBroken(orig) => {
-                    tracing::warn!(
-                        "{expanded} has escaped newlines and does not parse even after \
+                    }
+                    verify::PreWrite::StillBroken(orig) => {
+                        tracing::warn!(
+                            "{expanded} has escaped newlines and does not parse even after \
                          repairing them — writing it unchanged and saying so"
-                    );
-                    (
-                        orig,
-                        Some(format!(
-                            "\nNote: the file at {expanded} was written with escaped newlines \
+                        );
+                        (
+                            orig,
+                            Some(format!(
+                                "\nNote: the file at {expanded} was written with escaped newlines \
                              and does not parse. It was NOT modified — a guess would be worse \
                              than a file that is visibly broken. Re-ask for the script."
-                        )),
-                    )
-                }
-            };
+                            )),
+                        )
+                    }
+                };
             let check = verify::syntax_check(&expanded, &content);
             if let verify::SyntaxCheck::Failed(error) = &check {
-                anyhow::bail!("File was not written: generated content does not parse; fix it first: {error}");
+                anyhow::bail!(
+                    "File was not written: generated content does not parse; fix it first: {error}"
+                );
             }
             filesystem::write_file(&expanded, &content).await?;
             let syntax = format!("\n{}", check.receipt());
@@ -2210,7 +2273,10 @@ async fn dispatch(tool_call: &ToolCall, config: &crate::config::LunaConfig) -> R
             crate::daemon::tracker::allowlist_remove(name)?;
             // Teach the learner: this app matters to the user, keep it safe.
             crate::daemon::tracker::persist_keep(name)?;
-            tracing::info!("Learned to keep '{}' — never auto-kill or suggest it again", name);
+            tracing::info!(
+                "Learned to keep '{}' — never auto-kill or suggest it again",
+                name
+            );
             Ok(format!(
                 "Understood — '{}' is marked as important. It won't be auto-killed or \
                  kill-suggested again.",
@@ -2417,9 +2483,7 @@ echo "STATUS=$STATUS"
                         for key in ["line_edits", "edits"] {
                             if let Some(arr) = c[key].as_array() {
                                 for e in arr {
-                                    let line = e["at_line"]
-                                        .as_u64()
-                                        .or_else(|| e["line"].as_u64());
+                                    let line = e["at_line"].as_u64().or_else(|| e["line"].as_u64());
                                     let rep = e["replace_with"]
                                         .as_str()
                                         .or_else(|| e["replace"].as_str());
@@ -2487,11 +2551,10 @@ echo "STATUS=$STATUS"
             match action {
                 "apply" => {
                     // The gate is config, not an argument. She cannot pass it.
-                    Ok(crate::tools::pkgupdate::apply(
-                        sudo_pass,
-                        config.updates.allow_apply,
+                    Ok(
+                        crate::tools::pkgupdate::apply(sudo_pass, config.updates.allow_apply)
+                            .await?,
                     )
-                    .await?)
                 }
                 _ => Ok(crate::tools::pkgupdate::check().await?),
             }
@@ -2656,15 +2719,19 @@ echo "STATUS=$STATUS"
 
         "browser_do" => {
             if !config.browser.enabled {
-                Ok("Browser automation is disabled in config ([browser] enabled = false). Tell \
+                Ok(
+                    "Browser automation is disabled in config ([browser] enabled = false). Tell \
                     the user to re-enable it in luna.toml."
-                    .into())
+                        .into(),
+                )
             } else {
                 let task = args["task"].as_str().unwrap_or("").trim();
                 if task.is_empty() {
-                    Ok("The browser task was empty. Ask the user what they want done in the \
+                    Ok(
+                        "The browser task was empty. Ask the user what they want done in the \
                         browser."
-                        .into())
+                            .into(),
+                    )
                 } else {
                     match crate::browser::run(task, config).await {
                         Ok(out) => Ok(out),
@@ -2676,15 +2743,19 @@ echo "STATUS=$STATUS"
 
         "desktop_do" => {
             if !config.desktop.enabled {
-                Ok("Desktop automation is disabled in config ([desktop] enabled = false). Tell \
+                Ok(
+                    "Desktop automation is disabled in config ([desktop] enabled = false). Tell \
                     the user to re-enable it in luna.toml."
-                    .into())
+                        .into(),
+                )
             } else {
                 let task = args["task"].as_str().unwrap_or("").trim();
                 if task.is_empty() {
-                    Ok("The desktop task was empty. Ask the user what they want done on the \
+                    Ok(
+                        "The desktop task was empty. Ask the user what they want done on the \
                         computer."
-                        .into())
+                            .into(),
+                    )
                 } else {
                     match crate::tools::desktop::run(task, config).await {
                         Ok(out) => Ok(out),
@@ -2885,7 +2956,10 @@ mod gate_tests {
             ("allow_autokill", serde_json::json!({"name": "steam"})),
             ("use_skill", serde_json::json!({"name": "wifi-probe"})),
             // A real argument set that also contains `input`.
-            ("mixed", serde_json::json!({"name": "steam", "note": "careful"})),
+            (
+                "mixed",
+                serde_json::json!({"name": "steam", "note": "careful"}),
+            ),
             // Wrapper-shaped but naming a tool that does not exist.
             (
                 "unknown tool",
@@ -2904,8 +2978,7 @@ mod gate_tests {
                 "{label}: a genuine argument set was rewritten to {got}"
             );
             assert_eq!(
-                *got,
-                args,
+                *got, args,
                 "{label}: a genuine argument set was rewritten to {got}"
             );
         }
@@ -2948,7 +3021,10 @@ mod gate_tests {
         );
         let written = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("the file was not written: {e}"));
-        assert_eq!(written, content, "the file body does not match what was asked for");
+        assert_eq!(
+            written, content,
+            "the file body does not match what was asked for"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2968,7 +3044,10 @@ mod gate_tests {
         let config = crate::config::LunaConfig::default();
         for (name, args) in [
             ("write_file", serde_json::json!({"content": "print('x')"})),
-            ("write_file", serde_json::json!({"path": "  ", "content": "x"})),
+            (
+                "write_file",
+                serde_json::json!({"path": "  ", "content": "x"}),
+            ),
             ("read_file", serde_json::json!({})),
             ("read_file", serde_json::json!({"path": ""})),
             ("run_shell", serde_json::json!({})),
@@ -2981,8 +3060,7 @@ mod gate_tests {
             // Match the exact success shapes these tools return, not the word
             // "written" anywhere in the string — "Nothing was written" is an
             // error message that an earlier version of this test flagged.
-            let looks_like_success =
-                out.starts_with("SUCCESS") || out.starts_with("Written to ");
+            let looks_like_success = out.starts_with("SUCCESS") || out.starts_with("Written to ");
             assert!(
                 !looks_like_success,
                 "{name} with {args} reported a success it did not perform: {out:?}"
@@ -2990,8 +3068,7 @@ mod gate_tests {
             // And the wording must name the missing argument, so the model can
             // correct itself on the next iteration.
             assert!(
-                out.to_lowercase().contains("no path")
-                    || out.to_lowercase().contains("no command"),
+                out.to_lowercase().contains("no path") || out.to_lowercase().contains("no command"),
                 "{name} did not say which argument was missing: {out:?}"
             );
         }
@@ -3015,7 +3092,9 @@ mod gate_tests {
         // than a message prefix: anything we do not recognise counts as a real
         // failure, so a gate refusal or a new error type cannot quietly buy
         // extra iterations.
-        assert!(is_tool_failure(&anyhow::anyhow!("refused by the capability gate")));
+        assert!(is_tool_failure(&anyhow::anyhow!(
+            "refused by the capability gate"
+        )));
         assert!(is_tool_failure(&anyhow::anyhow!("no space left on device")));
         assert!(is_tool_failure(&anyhow::anyhow!("self-patch is locked")));
     }
@@ -3088,7 +3167,10 @@ mod gate_tests {
             .map(|d| d.join("luna").join("luna.toml"))
             .filter(|p| p.exists());
         let Some(path) = path else {
-            eprintln!("skipping: no live luna.toml at {}", dirs::config_dir().unwrap_or_default().display());
+            eprintln!(
+                "skipping: no live luna.toml at {}",
+                dirs::config_dir().unwrap_or_default().display()
+            );
             return;
         };
         let text = std::fs::read_to_string(&path)
@@ -3146,10 +3228,24 @@ mod gate_tests {
         .expect("well-formed write_file must succeed");
         assert!(out.contains("Written to"), "{out}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "print('ok')");
-        let missing = execute(&call("write_file", serde_json::json!({"path": path.to_string_lossy()})), &config).await;
+        let missing = execute(
+            &call(
+                "write_file",
+                serde_json::json!({"path": path.to_string_lossy()}),
+            ),
+            &config,
+        )
+        .await;
         assert!(missing.is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "print('ok')");
-        let invalid = execute(&call("write_file", serde_json::json!({"path": path.to_string_lossy(), "content": "def broken("})), &config).await;
+        let invalid = execute(
+            &call(
+                "write_file",
+                serde_json::json!({"path": path.to_string_lossy(), "content": "def broken("}),
+            ),
+            &config,
+        )
+        .await;
         assert!(invalid.is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "print('ok')");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3179,7 +3275,13 @@ mod gate_tests {
     #[test]
     fn capability_gated_tools_are_the_ones_that_act_on_the_machine() {
         let cfg = crate::config::LunaConfig::default();
-        for t in ["nmap_scan", "pkg_install", "sysmode", "self_patch", "system_update"] {
+        for t in [
+            "nmap_scan",
+            "pkg_install",
+            "sysmode",
+            "self_patch",
+            "system_update",
+        ] {
             assert!(
                 cfg.external.is_capability_gated(t),
                 "{t} must be behind the capability gate"
@@ -3188,8 +3290,13 @@ mod gate_tests {
         // Read-only and everyday tools must NOT be swept up, or the gate just
         // makes Luna useless instead of safe.
         for t in [
-            "run_shell", "read_file", "write_file", "edit_file", "system_info",
-            "process_stats", "nmap_scan_no_such_tool",
+            "run_shell",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "system_info",
+            "process_stats",
+            "nmap_scan_no_such_tool",
         ] {
             assert!(
                 !cfg.external.is_capability_gated(t),
@@ -3228,7 +3335,10 @@ mod gate_tests {
             // are very different facts.
             ("pkg_install", serde_json::json!({"package": "hydra"})),
             ("sysmode", serde_json::json!({"action": "status"})),
-            ("self_patch", serde_json::json!({"instruction": "add a test"})),
+            (
+                "self_patch",
+                serde_json::json!({"instruction": "add a test"}),
+            ),
         ] {
             let err = crate::tools::execute(&call(name, args), &cfg)
                 .await
@@ -3246,11 +3356,7 @@ mod gate_tests {
         }
 
         // And an ungated tool is unaffected by the same closed config.
-        let ok = crate::tools::execute(
-            &call("system_info", serde_json::json!({})),
-            &cfg,
-        )
-        .await;
+        let ok = crate::tools::execute(&call("system_info", serde_json::json!({})), &cfg).await;
         assert!(
             ok.is_ok(),
             "an ungated tool must still work with capabilities closed, got: {:?}",
@@ -3290,7 +3396,10 @@ mod gate_tests {
             "todoist_complete refusal must suggest todoist_list, got {alts:?}"
         );
         // And the suggestion must not include gated tools.
-        assert!(!alts.contains(&"todoist_add"), "must not suggest a gated tool");
+        assert!(
+            !alts.contains(&"todoist_add"),
+            "must not suggest a gated tool"
+        );
     }
 
     #[test]
@@ -3343,7 +3452,10 @@ mod gate_tests {
         let err = execute(&call("whatsapp_send", serde_json::json!({})), &cfg)
             .await
             .expect_err("must refuse regardless of args");
-        assert!(err.to_string().contains("allow_external_actions"), "got: {err}");
+        assert!(
+            err.to_string().contains("allow_external_actions"),
+            "got: {err}"
+        );
     }
 
     /// No tool may sit in both gated lists at once.
@@ -3407,25 +3519,40 @@ mod gate_tests {
         let mut cfg = crate::config::ExternalActionConfig::default();
         assert!(!cfg.gate_open_for("halcyon_do"));
         cfg.allow_external_actions = true;
-        assert!(!cfg.gate_open_for("halcyon_do"), "texting contacts must not also unlock the desktop");
+        assert!(
+            !cfg.gate_open_for("halcyon_do"),
+            "texting contacts must not also unlock the desktop"
+        );
         cfg.allow_external_actions = false;
         cfg.allow_halcyon_actions = true;
         assert!(cfg.gate_open_for("halcyon_do"));
-        assert!(!cfg.gate_open_for("whatsapp_send"), "tidying the desktop must not unlock messaging");
+        assert!(
+            !cfg.gate_open_for("whatsapp_send"),
+            "tidying the desktop must not unlock messaging"
+        );
     }
 
     #[tokio::test]
     async fn a_closed_halcyon_gate_refuses_before_looking_at_the_arguments() {
         let cfg = crate::config::LunaConfig::default();
-        let c = call("halcyon_do", serde_json::json!({"action": "gaming", "args": ["on"]}));
+        let c = call(
+            "halcyon_do",
+            serde_json::json!({"action": "gaming", "args": ["on"]}),
+        );
         let e = execute(&c, &cfg).await.unwrap_err().to_string();
-        assert!(e.contains("Control Halcyon") && e.contains("Nothing was changed"), "{e}");
+        assert!(
+            e.contains("Control Halcyon") && e.contains("Nothing was changed"),
+            "{e}"
+        );
     }
 
     #[tokio::test]
     async fn the_security_tool_needs_the_capability_gate() {
         let cfg = crate::config::LunaConfig::default();
-        let c = call("halcyon_security", serde_json::json!({"action": "fw-ban", "args": ["1.2.3.4"]}));
+        let c = call(
+            "halcyon_security",
+            serde_json::json!({"action": "fw-ban", "args": ["1.2.3.4"]}),
+        );
         let e = execute(&c, &cfg).await.unwrap_err().to_string();
         assert!(e.contains("Gate state"), "{e}");
     }
@@ -3516,19 +3643,32 @@ mod gate_tests {
         std::fs::create_dir(&tmp).unwrap();
         std::fs::write(tmp.join("Cargo.toml"), "[package]\nname = \"dummy\"\n").unwrap();
 
-        let c1 = call("project_context", serde_json::json!({"project_path": tmp.to_str().unwrap()}));
+        let c1 = call(
+            "project_context",
+            serde_json::json!({"project_path": tmp.to_str().unwrap()}),
+        );
         let res1 = execute(&c1, &cfg).await;
-        assert!(res1.is_ok(), "project_context should accept project_path: {:?}", res1.err());
+        assert!(
+            res1.is_ok(),
+            "project_context should accept project_path: {:?}",
+            res1.err()
+        );
 
         // remember_project with project_path and text
-        let c2 = call("remember_project", serde_json::json!({
-            "project_path": tmp.to_str().unwrap(),
-            "text": "architecture note"
-        }));
+        let c2 = call(
+            "remember_project",
+            serde_json::json!({
+                "project_path": tmp.to_str().unwrap(),
+                "text": "architecture note"
+            }),
+        );
         let res2 = execute(&c2, &cfg).await;
-        assert!(res2.is_ok(), "remember_project should accept project_path & text: {:?}", res2.err());
+        assert!(
+            res2.is_ok(),
+            "remember_project should accept project_path & text: {:?}",
+            res2.err()
+        );
 
         std::fs::remove_dir_all(tmp).unwrap();
     }
 }
-

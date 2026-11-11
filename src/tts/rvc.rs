@@ -17,7 +17,11 @@ pub async fn convert_and_play(input_wav: &str, config: &crate::config::LunaConfi
     Ok(())
 }
 
-async fn convert(input_wav: &str, output_wav: &str, config: &crate::config::LunaConfig) -> Result<()> {
+async fn convert(
+    input_wav: &str,
+    output_wav: &str,
+    config: &crate::config::LunaConfig,
+) -> Result<()> {
     let rvc_script = config
         .voice
         .rvc_script
@@ -56,7 +60,14 @@ async fn convert(input_wav: &str, output_wav: &str, config: &crate::config::Luna
     tracing::info!("Running RVC conversion: {} → {}", input_wav, output_wav);
 
     let status = tokio::process::Command::new(&python)
-        .args([&rvc_script, input_wav, output_wav, &rvc_model, &rvc_index, "0"])
+        .args([
+            &rvc_script,
+            input_wav,
+            output_wav,
+            &rvc_model,
+            &rvc_index,
+            "0",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .status()

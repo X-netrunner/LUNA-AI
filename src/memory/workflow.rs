@@ -131,8 +131,10 @@ fn learn_once() -> Result<Option<String>> {
         .join(", ");
 
     let mut pm = PermanentMemory::load()?;
-    let cmds_fact =
-        format!("Shell workflow: user's most-used commands are {}", top_commands);
+    let cmds_fact = format!(
+        "Shell workflow: user's most-used commands are {}",
+        top_commands
+    );
     if let Err(e) = pm.remember(&cmds_fact, "workflow") {
         return Err(e.context("failed to store workflow fact"));
     }
@@ -141,7 +143,12 @@ fn learn_once() -> Result<Option<String>> {
     if !packages.is_empty() {
         packages.sort();
         packages.dedup();
-        let pkg_list = packages.iter().take(12).cloned().collect::<Vec<_>>().join(", ");
+        let pkg_list = packages
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         let pkg_fact = format!(
             "Shell workflow: packages managed via pacman/AUR helpers include {}",
             pkg_list
@@ -241,8 +248,8 @@ pub async fn run_index_system(sudo_pass: Option<&str>) -> Result<Vec<String>> {
 
 /// Editors/openers whose file arguments hint at "files Luna works with a lot".
 const EDITORS: &[&str] = &[
-    "nvim", "vim", "vi", "code", "codium", "zed", "zeditor", "nano", "subl",
-    "kate", "kwrite", "gedit", "helix", "micro",
+    "nvim", "vim", "vi", "code", "codium", "zed", "zeditor", "nano", "subl", "kate", "kwrite",
+    "gedit", "helix", "micro",
 ];
 
 /// Distill most-used commands, most-visited cd dirs, and most-referenced
@@ -412,7 +419,7 @@ mod tests {
         let h = hist(&["nvim ~/docs/"]);
         let (_c, _d, files, _n) = analyze_history(&h);
         assert!(files[0].starts_with('/')); // "~/" resolved to an absolute path
-        assert!(!files[0].ends_with('/'));  // trailing slash stripped
+        assert!(!files[0].ends_with('/')); // trailing slash stripped
         assert!(files[0].contains("/docs("));
     }
 }

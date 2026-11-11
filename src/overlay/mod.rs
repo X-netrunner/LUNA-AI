@@ -95,7 +95,9 @@ pub fn socket_path() -> Option<PathBuf> {
 /// wake daemon, or a desktop without a Wayland display.
 pub fn signal(tag: &str) {
     let Some(path) = socket_path() else { return };
-    let Ok(mut sock) = UnixStream::connect(&path) else { return };
+    let Ok(mut sock) = UnixStream::connect(&path) else {
+        return;
+    };
     let _ = sock.write_all(tag.as_bytes());
     let _ = sock.write_all(b"\n");
     let _ = sock.shutdown(std::net::Shutdown::Both);
@@ -110,7 +112,9 @@ pub fn start() -> bool {
         tracing::warn!("overlay: no WAYLAND_DISPLAY — desktop indicator disabled");
         return false;
     }
-    let Some(path) = socket_path() else { return false };
+    let Some(path) = socket_path() else {
+        return false;
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -280,7 +284,10 @@ fn run_wayland(mut rx: mpsc::UnboundedReceiver<State>) {
     let layer_shell = match globals.bind::<ZwlrLayerShellV1, Host, ()>(&qh, 1..=5, ()) {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!("overlay: compositor has no wlr-layer-shell (is Hyprland/sway running?): {}", e);
+            tracing::warn!(
+                "overlay: compositor has no wlr-layer-shell (is Hyprland/sway running?): {}",
+                e
+            );
             return;
         }
     };
@@ -346,15 +353,7 @@ fn run_wayland(mut rx: mpsc::UnboundedReceiver<State>) {
         }
     };
     let pool = shm.create_pool(file.as_fd(), pool_size, &qh, ());
-    let buf_a = pool.create_buffer(
-        0,
-        W as i32,
-        H as i32,
-        STRIDE,
-        Format::Argb8888,
-        &qh,
-        (),
-    );
+    let buf_a = pool.create_buffer(0, W as i32, H as i32, STRIDE, Format::Argb8888, &qh, ());
     let buf_b = pool.create_buffer(
         FRAME_BYTES as i32,
         W as i32,
@@ -431,7 +430,11 @@ fn run_wayland(mut rx: mpsc::UnboundedReceiver<State>) {
             .as_millis();
         draw_frame(&mut mmap, state, now, font.as_ref());
 
-        let buffer = if frame.is_multiple_of(2) { &buf_a } else { &buf_b };
+        let buffer = if frame.is_multiple_of(2) {
+            &buf_a
+        } else {
+            &buf_b
+        };
         surface.attach(Some(buffer), 0, 0);
         surface.damage_buffer(0, 0, W as i32, H as i32);
         surface.commit();
@@ -535,7 +538,13 @@ fn fill_rounded_rect(buf: &mut [u8], x: i32, y: i32, w: i32, h: i32, r: i32, col
                 true
             };
             if inside {
-                blend_pixel(&mut buf[((py * W as i32 + pxx) * 4) as usize..], cr, cg, cb, ca);
+                blend_pixel(
+                    &mut buf[((py * W as i32 + pxx) * 4) as usize..],
+                    cr,
+                    cg,
+                    cb,
+                    ca,
+                );
             }
         }
     }
@@ -560,7 +569,13 @@ fn fill_circle(buf: &mut [u8], cx: f32, cy: f32, rad: f32, color: Rgb, alpha: u8
             let dx = pxx as f32 - cx;
             let dy = py as f32 - cy;
             if dx * dx + dy * dy <= r2 {
-                blend_pixel(&mut buf[((py * W as i32 + pxx) * 4) as usize..], cr, cg, cb, alpha);
+                blend_pixel(
+                    &mut buf[((py * W as i32 + pxx) * 4) as usize..],
+                    cr,
+                    cg,
+                    cb,
+                    alpha,
+                );
             }
         }
     }
@@ -579,7 +594,13 @@ fn draw_ring(buf: &mut [u8], cx: f32, cy: f32, r: f32, thick: f32, color: Rgb, a
             let dy = py as f32 - cy;
             let d = (dx * dx + dy * dy).sqrt();
             if (d - r).abs() <= thick / 2.0 {
-                blend_pixel(&mut buf[((py * W as i32 + pxx) * 4) as usize..], cr, cg, cb, alpha);
+                blend_pixel(
+                    &mut buf[((py * W as i32 + pxx) * 4) as usize..],
+                    cr,
+                    cg,
+                    cb,
+                    alpha,
+                );
             }
         }
     }

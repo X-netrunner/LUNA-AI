@@ -49,7 +49,8 @@ pub fn spawn(config: &LunaConfig) {
 
                     if pct <= battery_threshold && discharging {
                         if !warned_battery {
-                            notify("Luna", &format!("Battery is at {}% — plug in soon.", pct)).await;
+                            notify("Luna", &format!("Battery is at {}% — plug in soon.", pct))
+                                .await;
                             warned_battery = true;
                         }
                     } else if pct > battery_threshold + 10 {

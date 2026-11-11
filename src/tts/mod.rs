@@ -69,15 +69,24 @@ pub fn clean_for_speech(text: &str) -> String {
     }
 
     out = out.replace('`', "");
-    out = out.replace("**", "").replace("__", "").replace('*', "").replace('_', " ");
     out = out
-        .replace("\\[", "").replace("\\]", "")
-        .replace("\\(", "").replace("\\)", "")
+        .replace("**", "")
+        .replace("__", "")
+        .replace('*', "")
+        .replace('_', " ");
+    out = out
+        .replace("\\[", "")
+        .replace("\\]", "")
+        .replace("\\(", "")
+        .replace("\\)", "")
         .replace("\\frac", "fraction")
         .replace("\\int", "integral of")
         .replace("\\,", " ");
 
-    let lines: Vec<&str> = out.lines().map(|l| l.trim_start_matches('#').trim()).collect();
+    let lines: Vec<&str> = out
+        .lines()
+        .map(|l| l.trim_start_matches('#').trim())
+        .collect();
     out = lines.join(". ");
 
     out = out.replace("- ", "").replace("• ", "");

@@ -15,8 +15,8 @@ mod executor;
 mod planner;
 mod types;
 
-use anyhow::{Context, Result};
 use crate::config::LunaConfig;
+use anyhow::{Context, Result};
 
 use crate::browser::executor::execute_plan;
 use crate::browser::planner::Planner;
@@ -26,10 +26,7 @@ pub async fn run(task: &str, config: &LunaConfig) -> Result<String> {
     let bc = &config.browser;
 
     // Initialize the planner (calls Ollama for step generation)
-    let planner = Planner::new(
-        &config.llm.base_url,
-        &config.llm.model,
-    );
+    let planner = Planner::new(&config.llm.base_url, &config.llm.model);
 
     // Connect to or launch Chromium
     let browser = cdp::ensure_browser(bc).await.context("ensure chromium")?;
@@ -94,4 +91,3 @@ pub async fn current_page_png(config: &LunaConfig) -> Result<Vec<u8>> {
 
 // Re-export for tests and internal use
 pub use planner::Step;
-

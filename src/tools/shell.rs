@@ -207,6 +207,10 @@ fn truncate(s: &str, max_chars: usize) -> String {
     if t.len() == s.len() {
         t.to_string()
     } else {
-        format!("{}... [truncated {} chars]", t, s.chars().count() - max_chars)
+        format!(
+            "{}... [truncated {} chars]",
+            t,
+            s.chars().count() - max_chars
+        )
     }
 }

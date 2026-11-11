@@ -18,14 +18,21 @@ const READ_MAX_LINES: usize = 1500;
 pub async fn read_file(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
     // A folder used to fail with "Is a directory", and the model then guessed at file names (or went looking in other places).
     // Now it gets the listing, newest first, and can read the right file next.
-    if tokio::fs::metadata(path).await.map(|m| m.is_dir()).unwrap_or(false) {
+    if tokio::fs::metadata(path)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+    {
         let mut rd = tokio::fs::read_dir(path)
             .await
             .with_context(|| format!("Failed to read folder: {}", path))?;
         let mut items: Vec<(std::time::SystemTime, String, bool)> = Vec::new();
         while let Some(e) = rd.next_entry().await? {
             let meta = tokio::fs::metadata(e.path()).await.ok();
-            let when = meta.as_ref().and_then(|m| m.modified().ok()).unwrap_or(std::time::UNIX_EPOCH);
+            let when = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::UNIX_EPOCH);
             let is_dir = meta.map(|m| m.is_dir()).unwrap_or(false);
             items.push((when, e.file_name().to_string_lossy().to_string(), is_dir));
         }
@@ -64,7 +71,9 @@ pub async fn read_file(path: &str, offset: Option<usize>, limit: Option<usize>) 
     let mut slice = lines[start..end].join("\n");
     if slice.len() > 32_000 {
         let mut cut = 32_000;
-        while !slice.is_char_boundary(cut) { cut -= 1; }
+        while !slice.is_char_boundary(cut) {
+            cut -= 1;
+        }
         slice.truncate(cut);
         slice.push_str("\n[Output truncated at 32000 bytes; use a smaller line range or targeted search. This is not the whole file.]");
     }
@@ -94,12 +103,23 @@ async fn atomic_write(path: &str, content: &str, expected: Option<&str>) -> Resu
         use std::io::Write;
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         let requested = Path::new(&path);
-        let target = if std::fs::symlink_metadata(requested).is_ok() { std::fs::canonicalize(requested)? } else { requested.to_path_buf() };
-        let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let target = if std::fs::symlink_metadata(requested).is_ok() {
+            std::fs::canonicalize(requested)?
+        } else {
+            requested.to_path_buf()
+        };
+        let parent = target
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         let metadata = match std::fs::metadata(&target) {
             Ok(m) => {
-                if !m.is_file() || m.nlink() > 1 { anyhow::bail!("Refusing atomic replacement of a nonregular or hard-linked file: {path}"); }
+                if !m.is_file() || m.nlink() > 1 {
+                    anyhow::bail!(
+                        "Refusing atomic replacement of a nonregular or hard-linked file: {path}"
+                    );
+                }
                 Some(m)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -107,9 +127,15 @@ async fn atomic_write(path: &str, content: &str, expected: Option<&str>) -> Resu
         };
         let tmp = parent.join(format!(".luna-{}.tmp", uuid::Uuid::new_v4()));
         let result = (|| -> Result<()> {
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
             file.write_all(content.as_bytes())?;
-            if let Some(meta) = metadata { file.set_permissions(meta.permissions())?; }
+            if let Some(meta) = metadata {
+                file.set_permissions(meta.permissions())?;
+            }
             file.sync_all()?;
             if let Some(before) = expected {
                 if std::fs::read_to_string(&target)? != before {
@@ -119,9 +145,12 @@ async fn atomic_write(path: &str, content: &str, expected: Option<&str>) -> Resu
             std::fs::rename(&tmp, &target)?;
             Ok(())
         })();
-        if result.is_err() { let _ = std::fs::remove_file(&tmp); }
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
         result
-    }).await?
+    })
+    .await?
 }
 
 pub async fn write_file(path: &str, content: &str) -> Result<()> {
@@ -147,7 +176,9 @@ pub async fn edit_file(
         anyhow::bail!("Targeted edits require both old_str and new_str");
     }
     if let (Some(old), Some(new)) = (old_str, new_str) {
-        if old.is_empty() { anyhow::bail!("old_str must not be empty; read the file and quote a unique fragment"); }
+        if old.is_empty() {
+            anyhow::bail!("old_str must not be empty; read the file and quote a unique fragment");
+        }
         if !Path::new(path).exists() {
             anyhow::bail!("File '{}' does not exist to perform text editing.", path);
         }
@@ -187,7 +218,9 @@ pub async fn edit_file(
         atomic_write(path, &updated, Some(&original)).await?;
         Ok(format!(
             "Successfully edited '{}': replaced {} occurrence(s).\n{}",
-            path, matches_count, check.receipt()
+            path,
+            matches_count,
+            check.receipt()
         ))
     } else if let Some(new_content) = content {
         let check = super::verify::syntax_check(path, new_content);
@@ -195,7 +228,11 @@ pub async fn edit_file(
             anyhow::bail!("Edit was not written: resulting file does not parse: {error}");
         }
         atomic_write(path, new_content, None).await?;
-        Ok(format!("Successfully wrote content to '{}'\n{}", path, check.receipt()))
+        Ok(format!(
+            "Successfully wrote content to '{}'\n{}",
+            path,
+            check.receipt()
+        ))
     } else {
         anyhow::bail!("No edit content or old_str/new_str provided for '{}'", path);
     }
@@ -225,14 +262,21 @@ mod tests {
 
         // Explicit range: lines 10-12, with a locating header.
         let r = read_file(path_str, Some(10), Some(3)).await.unwrap();
-        assert!(r.starts_with(&format!("[{path_str}: lines 10-12 of 3000]")), "header: {r}");
+        assert!(
+            r.starts_with(&format!("[{path_str}: lines 10-12 of 3000]")),
+            "header: {r}"
+        );
         assert!(r.contains("\nL10\nL11\nL12"), "slice body: {r}");
         assert!(!r.contains("L13"), "limit respected");
 
         // Un-ranged read of a big file is capped to the head with a note, not
         // dumped whole, and the note points at the next page.
         let head = read_file(path_str, None, None).await.unwrap();
-        assert!(head.contains(&format!("of 3000")), "reports total: {}", &head[..80]);
+        assert!(
+            head.contains(&format!("of 3000")),
+            "reports total: {}",
+            &head[..80]
+        );
         assert!(head.contains("offset="), "tells how to page");
         assert!(head.lines().count() <= READ_MAX_LINES + 1, "head is capped");
         assert!(!head.contains("L2000"), "tail not included");
@@ -244,10 +288,17 @@ mod tests {
     async fn test_edit_file_replace() {
         let path = std::env::temp_dir().join("luna_test_edit.txt");
         let path_str = path.to_str().unwrap();
-        write_file(path_str, "fn main() {\n    println!(\"foo\");\n}\n").await.unwrap();
-        edit_file(path_str, Some("println!(\"foo\");"), Some("println!(\"bar\");"), None)
+        write_file(path_str, "fn main() {\n    println!(\"foo\");\n}\n")
             .await
             .unwrap();
+        edit_file(
+            path_str,
+            Some("println!(\"foo\");"),
+            Some("println!(\"bar\");"),
+            None,
+        )
+        .await
+        .unwrap();
         let res = read_file(path_str, None, None).await.unwrap();
         assert_eq!(res, "fn main() {\n    println!(\"bar\");\n}\n");
         let _ = tokio::fs::remove_file(path).await;
@@ -259,17 +310,13 @@ mod tests {
     async fn an_ambiguous_edit_is_refused_not_applied_three_times() {
         let path = std::env::temp_dir().join("luna_test_dup.txt");
         let path_str = path.to_str().unwrap();
-        let before = "line one PLACEHOLDER here\nline two PLACEHOLDER here\nline three PLACEHOLDER here\n";
+        let before =
+            "line one PLACEHOLDER here\nline two PLACEHOLDER here\nline three PLACEHOLDER here\n";
         write_file(path_str, before).await.unwrap();
 
-        let err = edit_file(
-            path_str,
-            Some("PLACEHOLDER"),
-            Some("REPLACED"),
-            None,
-        )
-        .await
-        .expect_err("an ambiguous old_str must be refused");
+        let err = edit_file(path_str, Some("PLACEHOLDER"), Some("REPLACED"), None)
+            .await
+            .expect_err("an ambiguous old_str must be refused");
 
         assert!(err.to_string().contains("Ambiguous"), "got: {err}");
         assert!(err.to_string().contains("3 times"), "got: {err}");
@@ -323,7 +370,7 @@ mod integrity_tests {
     use super::*;
     #[tokio::test]
     async fn edits_preserve_permissions_and_symlinks_and_reject_stale_content() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::fs::{symlink, PermissionsExt};
         let dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir(&dir).unwrap();
         let file = dir.join("code.py");
@@ -331,12 +378,28 @@ mod integrity_tests {
         std::fs::write(&file, "print('old')\n").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o750)).unwrap();
         symlink(&file, &link).unwrap();
-        edit_file(link.to_str().unwrap(), Some("'old'"), Some("'new'"), None).await.unwrap();
+        edit_file(link.to_str().unwrap(), Some("'old'"), Some("'new'"), None)
+            .await
+            .unwrap();
         assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
-        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o750);
-        assert!(atomic_write(file.to_str().unwrap(), "oops", Some("stale")).await.is_err());
-        assert!(edit_file(file.to_str().unwrap(), Some("print('new')"), Some("def broken("), None).await.is_err());
-        assert!(edit_file(file.to_str().unwrap(), Some(""), Some("x"), None).await.is_err());
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+        assert!(atomic_write(file.to_str().unwrap(), "oops", Some("stale"))
+            .await
+            .is_err());
+        assert!(edit_file(
+            file.to_str().unwrap(),
+            Some("print('new')"),
+            Some("def broken("),
+            None
+        )
+        .await
+        .is_err());
+        assert!(edit_file(file.to_str().unwrap(), Some(""), Some("x"), None)
+            .await
+            .is_err());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "print('new')\n");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
         std::fs::remove_dir_all(dir).unwrap();

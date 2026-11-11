@@ -1,11 +1,11 @@
 //! Plan executor — runs steps in the browser, handles retries and re-planning.
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::time::timeout;
 
-use crate::browser::{cdp::CdpBrowser, dom, planner::Planner, Step, types::ActionResult};
+use crate::browser::{cdp::CdpBrowser, dom, planner::Planner, types::ActionResult, Step};
 
 const MAX_RETRIES: u32 = 3;
 const STEP_TIMEOUT_SECS: u64 = 30;
@@ -24,7 +24,11 @@ fn pick_best_should_retry(result: &Value) -> bool {
     if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
         return false;
     }
-    result.get("cards_seen").and_then(Value::as_u64).unwrap_or(0) == 0
+    result
+        .get("cards_seen")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        == 0
 }
 
 /// Hard ceiling on steps executed in one plan, replans included.
@@ -59,13 +63,9 @@ impl std::fmt::Display for Stop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Stop::PlanFinished => "the plan finished",
-            Stop::RetriesExhausted => {
-                "a step failed three times in a row and was skipped"
-            }
+            Stop::RetriesExhausted => "a step failed three times in a row and was skipped",
             Stop::ReplansExhausted => "it re-planned six times without converging",
-            Stop::StepBudgetExhausted => {
-                "it ran out of steps before finishing the plan"
-            }
+            Stop::StepBudgetExhausted => "it ran out of steps before finishing the plan",
         };
         f.write_str(s)
     }
@@ -145,7 +145,11 @@ impl LoopControl {
     /// Returns `true` if it was an original-plan step, which is the only thing
     /// permitted to clear the failure count.
     pub fn record_success(&mut self) -> bool {
-        let from_plan = self.steps.get(self.cursor).map(|(_, r)| !r).unwrap_or(false);
+        let from_plan = self
+            .steps
+            .get(self.cursor)
+            .map(|(_, r)| !r)
+            .unwrap_or(false);
         self.executed += 1;
         self.cursor += 1;
         if from_plan {
@@ -218,7 +222,10 @@ impl LoopControl {
     }
 
     pub fn completed_steps(&self) -> Vec<Step> {
-        self.steps[..self.cursor].iter().map(|(s, _)| s.clone()).collect()
+        self.steps[..self.cursor]
+            .iter()
+            .map(|(s, _)| s.clone())
+            .collect()
     }
 
     pub fn remaining_steps(&self) -> Vec<Step> {
@@ -235,14 +242,25 @@ impl LoopControl {
 }
 
 /// Execute a single step in the browser.
-async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step: &Step, step_index: u64) -> Result<ActionResult> {
+async fn execute_step(
+    browser: &CdpBrowser,
+    planner: &Planner,
+    goal: &str,
+    step: &Step,
+    step_index: u64,
+) -> Result<ActionResult> {
     let action_name = step.action.clone();
 
     match step.action.as_str() {
         "navigate" => {
             let url = step.target.as_deref().unwrap_or("");
             if url.is_empty() {
-                return Ok(ActionResult::fail(action_name, step_index, 1, "navigate needs a url".into()));
+                return Ok(ActionResult::fail(
+                    action_name,
+                    step_index,
+                    1,
+                    "navigate needs a url".into(),
+                ));
             }
             browser.navigate(url).await?;
             // `navigate` returning Ok means a request was made, not that we got
@@ -289,12 +307,7 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
                         "purchase blocked — {reason}. Do NOT retry clicking; this site \
                          needs the user logged in. Continue elsewhere or report back."
                     );
-                    return Ok(ActionResult::fail(
-                        action_name,
-                        step_index,
-                        1,
-                        err,
-                    ));
+                    return Ok(ActionResult::fail(action_name, step_index, 1, err));
                 }
             }
             // Say what was clicked, not just that something was clicked. A bare
@@ -303,7 +316,10 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
             if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
                 let clicked = result.get("clicked").and_then(Value::as_str).unwrap_or("");
                 if !clicked.is_empty() {
-                    let exact = result.get("exact").and_then(Value::as_bool).unwrap_or(false);
+                    let exact = result
+                        .get("exact")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
                     let note = if exact {
                         format!("clicked \"{clicked}\"")
                     } else {
@@ -317,7 +333,12 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
         "type" => {
             let text = step.value.as_deref().unwrap_or("");
             if text.is_empty() {
-                return Ok(ActionResult::fail(action_name, step_index, 1, "type needs text".into()));
+                return Ok(ActionResult::fail(
+                    action_name,
+                    step_index,
+                    1,
+                    "type needs text".into(),
+                ));
             }
             let result = browser.eval_resilient(&dom::dom_type_expr(text)).await?;
             Ok(dom::result_from(result, action_name, step_index, 1))
@@ -333,14 +354,25 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
         }
         "scroll" => {
             let direction = step.target.as_deref().unwrap_or("down");
-            let amount = step.value.as_deref().and_then(|s| s.parse().ok()).unwrap_or(500);
-            let result = browser.eval_resilient(&dom::dom_scroll_expr(direction, amount)).await?;
+            let amount = step
+                .value
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(500);
+            let result = browser
+                .eval_resilient(&dom::dom_scroll_expr(direction, amount))
+                .await?;
             Ok(dom::result_from(result, action_name, step_index, 1))
         }
         "search" => {
             let query = step.target.as_deref().unwrap_or("").trim();
             if query.is_empty() {
-                return Ok(ActionResult::fail(action_name, step_index, 1, "search needs a query".into()));
+                return Ok(ActionResult::fail(
+                    action_name,
+                    step_index,
+                    1,
+                    "search needs a query".into(),
+                ));
             }
             // Search the site that is open, not DuckDuckGo. Leaving the site
             // mid-plan is what made a search-results scrape find no products.
@@ -384,7 +416,10 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
             Ok(ActionResult::ok_note(action_name, step_index, 1, note))
         }
         "fillform" => {
-            let _instructions = step.target.as_deref().unwrap_or("use sensible sample values");
+            let _instructions = step
+                .target
+                .as_deref()
+                .unwrap_or("use sensible sample values");
             // 1. Extract form schema
             let schema = browser.eval_resilient(dom::dom_form_schema_expr()).await?;
             let fields = schema.get("fields").cloned().unwrap_or(json!([]));
@@ -395,8 +430,11 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
             let result = browser.eval_resilient(&fill_expr).await?;
             if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
                 let filled = result.get("filled").cloned().unwrap_or(json!([]));
-                let note = format!("filled {} field(s): {}", filled.as_array().map(|a| a.len()).unwrap_or(0),
-                    serde_json::to_string(&filled).unwrap_or_default());
+                let note = format!(
+                    "filled {} field(s): {}",
+                    filled.as_array().map(|a| a.len()).unwrap_or(0),
+                    serde_json::to_string(&filled).unwrap_or_default()
+                );
                 Ok(ActionResult::ok_note(action_name, step_index, 1, note))
             } else {
                 Ok(dom::result_from(result, action_name, step_index, 1))
@@ -418,8 +456,13 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
                     // step starts against a document that does not exist yet.
                     // Wait for the page rather than letting the next click fail
                     // on a dead execution context.
-                    browser.wait_until_ready(Duration::from_millis(8000)).await?;
-                    let note = format!("clicked best product: {}", serde_json::to_string(&clicked).unwrap_or_default());
+                    browser
+                        .wait_until_ready(Duration::from_millis(8000))
+                        .await?;
+                    let note = format!(
+                        "clicked best product: {}",
+                        serde_json::to_string(&clicked).unwrap_or_default()
+                    );
                     return Ok(ActionResult::ok_note(action_name, step_index, 1, note));
                 }
                 let waited = started.elapsed();
@@ -444,7 +487,10 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
             }
         }
         "wait" | "pause" => {
-            let ms = step.value.as_deref().and_then(|s| s.parse::<u64>().ok())
+            let ms = step
+                .value
+                .as_deref()
+                .and_then(|s| s.parse::<u64>().ok())
                 .or_else(|| step.target.as_deref().and_then(|s| s.parse::<u64>().ok()))
                 .unwrap_or(2000);
             tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -463,11 +509,18 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
             }
         }
         "back" => {
-            let result = browser.eval_resilient("(() => { window.history.back(); return { ok: true }; })()").await?;
+            let result = browser
+                .eval_resilient("(() => { window.history.back(); return { ok: true }; })()")
+                .await?;
             tokio::time::sleep(Duration::from_millis(1000)).await;
             Ok(dom::result_from(result, action_name, step_index, 1))
         }
-        other => Ok(ActionResult::fail(action_name, step_index, 1, format!("unsupported action '{other}'"))),
+        other => Ok(ActionResult::fail(
+            action_name,
+            step_index,
+            1,
+            format!("unsupported action '{other}'"),
+        )),
     }
 }
 
@@ -476,8 +529,15 @@ async fn execute_step(browser: &CdpBrowser, planner: &Planner, goal: &str, step:
 fn is_purchase_click(desc: &str) -> bool {
     let lower = desc.to_lowercase();
     [
-        "add to cart", "add to bag", "buy now", "checkout", "place order",
-        "proceed to", "continue to checkout", "add to wishlist", "add to bucket",
+        "add to cart",
+        "add to bag",
+        "buy now",
+        "checkout",
+        "place order",
+        "proceed to",
+        "continue to checkout",
+        "add to wishlist",
+        "add to bucket",
     ]
     .iter()
     .any(|k| lower.contains(k))
@@ -501,12 +561,14 @@ fn is_purchase_click(desc: &str) -> bool {
 /// "first product result" costs a wrong-but-recoverable click; buying the wrong
 /// thing does not come back.
 fn purchase_click_verdict(target: &str, result: &Value) -> Result<(), String> {
-    if !result.get("ok").and_then(Value::as_bool).unwrap_or(false)
-        || !is_purchase_click(target)
-    {
+    if !result.get("ok").and_then(Value::as_bool).unwrap_or(false) || !is_purchase_click(target) {
         return Ok(());
     }
-    if result.get("exact").and_then(Value::as_bool).unwrap_or(false) {
+    if result
+        .get("exact")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return Ok(());
     }
     let missing: Vec<&str> = result
@@ -724,9 +786,12 @@ pub async fn execute_plan(
         let index = plan.cursor_index();
 
         // Execute with timeout
-        let result = timeout(Duration::from_secs(STEP_TIMEOUT_SECS), execute_step(browser, planner, goal, &step, index as u64))
-            .await
-            .context("step timed out")??;
+        let result = timeout(
+            Duration::from_secs(STEP_TIMEOUT_SECS),
+            execute_step(browser, planner, goal, &step, index as u64),
+        )
+        .await
+        .context("step timed out")??;
 
         let desc = describe_step(&step, &result);
         history.push(desc.clone());
@@ -736,12 +801,7 @@ pub async fn execute_plan(
         // from the first repair onwards and the numbering looked broken.
         if result.success {
             let from_plan = plan.record_success();
-            tracing::info!(
-                "Step {}/{}: {}",
-                plan.cursor_index(),
-                plan.len(),
-                desc
-            );
+            tracing::info!("Step {}/{}: {}", plan.cursor_index(), plan.len(), desc);
             if !from_plan {
                 // Worth saying out loud, because it is the whole reason this
                 // loop used to be infinite: the repair running is not recovery.
@@ -770,7 +830,10 @@ pub async fn execute_plan(
 
         let completed = plan.completed_steps();
         let remaining = plan.remaining_steps();
-        match planner.replan(goal, &completed, &step, &error, &remaining).await {
+        match planner
+            .replan(goal, &completed, &step, &error, &remaining)
+            .await
+        {
             Ok(corrective) if !corrective.is_empty() => {
                 tracing::info!(
                     "Replan {}/{}: inserting {} corrective step(s) — {}",
@@ -813,8 +876,6 @@ pub async fn execute_plan(
     Ok(history)
 }
 
-
-
 fn describe_step(step: &Step, result: &ActionResult) -> String {
     let base = match step.action.as_str() {
         "navigate" => format!("open {}", step.target.as_deref().unwrap_or("")),
@@ -845,8 +906,8 @@ fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
     for b in s.bytes() {
         match b {
-            b'!' | b'*' | b'\'' | b'(' | b')' | b';' | b':' | b'@' | b'&' | b'=' | b'+'
-            | b'$' | b',' | b'/' | b'?' | b'#' | b'[' | b']' | b'%' => {
+            b'!' | b'*' | b'\'' | b'(' | b')' | b';' | b':' | b'@' | b'&' | b'=' | b'+' | b'$'
+            | b',' | b'/' | b'?' | b'#' | b'[' | b']' | b'%' => {
                 out.push_str(&format!("%{b:02X}"));
             }
             _ if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' => {
@@ -972,7 +1033,10 @@ mod tests {
                 plan.skip();
             }
         }
-        assert!(plan.current().is_none(), "still running after {n} iterations");
+        assert!(
+            plan.current().is_none(),
+            "still running after {n} iterations"
+        );
         assert!(plan.executed() <= MAX_TOTAL_STEPS + MAX_RETRIES as usize);
         assert!(matches!(
             plan.stop_reason(),
@@ -1012,7 +1076,10 @@ mod tests {
         // Three failures, because MAX_RETRIES is three. One is not a give-up.
         assert!(plan.record_failure());
         assert!(plan.record_failure());
-        assert!(!plan.record_failure(), "the third failure must end the attempts");
+        assert!(
+            !plan.record_failure(),
+            "the third failure must end the attempts"
+        );
         plan.skip();
 
         assert_eq!(
@@ -1033,10 +1100,7 @@ mod tests {
     /// have broken the ordinary retry case it was protecting.
     #[test]
     fn two_real_failures_still_count_as_two() {
-        let mut plan = LoopControl::new(vec![
-            step("click", "a"),
-            step("click", "b"),
-        ]);
+        let mut plan = LoopControl::new(vec![step("click", "a"), step("click", "b")]);
         assert!(plan.record_failure());
         plan.insert_replan(vec![step("wait", "")]);
         // The repair runs and the ORIGINAL step is retried.
@@ -1103,10 +1167,22 @@ mod tests {
     /// search engine is a failure to report rather than a success to claim.
     #[test]
     fn arrival_is_verified_by_host() {
-        assert!(arrived_at("https://amazon.com/s?k=x", "https://www.amazon.com/s?k=x"));
-        assert!(arrived_at("https://amazon.com/s?k=x", "https://amazon.com/other/page"));
-        assert!(!arrived_at("https://amazon.com/s?k=x", "https://duckduckgo.com/?q=x"));
-        assert!(!arrived_at("https://amazon.com/s?k=x", "https://www.amazon.co.uk/s?k=x"));
+        assert!(arrived_at(
+            "https://amazon.com/s?k=x",
+            "https://www.amazon.com/s?k=x"
+        ));
+        assert!(arrived_at(
+            "https://amazon.com/s?k=x",
+            "https://amazon.com/other/page"
+        ));
+        assert!(!arrived_at(
+            "https://amazon.com/s?k=x",
+            "https://duckduckgo.com/?q=x"
+        ));
+        assert!(!arrived_at(
+            "https://amazon.com/s?k=x",
+            "https://www.amazon.co.uk/s?k=x"
+        ));
         assert!(!arrived_at("https://amazon.com/s?k=x", "about:blank"));
     }
 
@@ -1117,8 +1193,14 @@ mod tests {
         let empty = serde_json::json!({"ok": false, "cards_seen": 0});
         let present = serde_json::json!({"ok": false, "cards_seen": 12});
         let ok = serde_json::json!({"ok": true, "clicked": {}});
-        assert!(pick_best_should_retry(&empty), "an empty page may still be rendering");
-        assert!(!pick_best_should_retry(&present), "cards are there; waiting cannot help");
+        assert!(
+            pick_best_should_retry(&empty),
+            "an empty page may still be rendering"
+        );
+        assert!(
+            !pick_best_should_retry(&present),
+            "cards are there; waiting cannot help"
+        );
         assert!(!pick_best_should_retry(&ok));
     }
 
@@ -1141,15 +1223,24 @@ mod tests {
     #[test]
     fn the_click_expression_survives_brace_escaping() {
         let expr = find_and_click_expr("Add to Cart");
-        assert!(!expr.contains("{{"), "unescaped brace leaked into the output");
-        assert!(!expr.contains("}}"), "unescaped brace leaked into the output");
+        assert!(
+            !expr.contains("{{"),
+            "unescaped brace leaked into the output"
+        );
+        assert!(
+            !expr.contains("}}"),
+            "unescaped brace leaked into the output"
+        );
         assert!(expr.contains("const DESC = \"Add to Cart\";"), "{expr}");
         // The three fields Rust reads back to decide what actually happened.
         for field in ["clicked:", "exact:", "missing,", "purchase:"] {
             assert!(expr.contains(field), "result lost `{field}`: {expr}");
         }
         // And the refusal path.
-        assert!(expr.contains("ok: false"), "the refusal path is gone: {expr}");
+        assert!(
+            expr.contains("ok: false"),
+            "the refusal path is gone: {expr}"
+        );
         // The scoring gate: bonuses must rank, never create a match.
         assert!(
             expr.contains("if (!hits.length) continue;"),
@@ -1179,7 +1270,10 @@ mod tests {
             "https://www.amazon.com/errors/validateCaptcha",
             Some("the site served an anti-bot challenge"),
         );
-        assert!(why.contains("validateCaptcha"), "must name where it went: {why}");
+        assert!(
+            why.contains("validateCaptcha"),
+            "must name where it went: {why}"
+        );
         // It must tell the model not to retry, or the re-plan loop will hammer.
         assert!(why.contains("do not navigate again"), "{why}");
         assert!(why.to_lowercase().contains("anti-bot"), "{why}");
@@ -1270,6 +1364,9 @@ mod tests {
     #[test]
     fn test_percent_encode() {
         assert_eq!(percent_encode("ps4 on amazon.com"), "ps4%20on%20amazon.com");
-        assert_eq!(percent_encode("add to cart & buy 'now'"), "add%20to%20cart%20%26%20buy%20%27now%27");
+        assert_eq!(
+            percent_encode("add to cart & buy 'now'"),
+            "add%20to%20cart%20%26%20buy%20%27now%27"
+        );
     }
 }

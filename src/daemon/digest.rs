@@ -60,7 +60,9 @@ pub(crate) async fn build(config: &LunaConfig, by_name: &HashMap<String, NameSta
     if config.daemon.backup_days > 0 {
         let drive = std::path::Path::new("/dev/sda1").exists();
         match (drive, super::job_marker_age("backup")) {
-            (true, None) => lines.push("Backup: never run yet — drive is connected, overdue".into()),
+            (true, None) => {
+                lines.push("Backup: never run yet — drive is connected, overdue".into())
+            }
             (true, Some(age)) if age >= config.daemon.backup_days as u64 => {
                 lines.push(format!("Backup: {age} day(s) ago — due, drive connected"))
             }

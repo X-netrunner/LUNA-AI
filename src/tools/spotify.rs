@@ -157,7 +157,10 @@ where
 
     emit("Opening your browser — approve Luna's access to Spotify…");
     if !open_browser(&url) {
-        emit(&format!("Couldn't open a browser automatically. Open this URL manually:\n  {}", url));
+        emit(&format!(
+            "Couldn't open a browser automatically. Open this URL manually:\n  {}",
+            url
+        ));
     }
     emit("Waiting for you to approve in the browser…");
 
@@ -178,7 +181,7 @@ where
             Err(_) => anyhow::bail!("Timed out waiting for Spotify authorization (5 min)"),
         };
 
-    // Read the request head up to the blank line.
+        // Read the request head up to the blank line.
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut head = Vec::new();
         let mut buf = [0u8; 512];
@@ -369,7 +372,8 @@ fn urldecode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("00"), 16)
+            if let Ok(v) =
+                u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("00"), 16)
             {
                 out.push(v);
                 i += 3;
@@ -389,7 +393,13 @@ fn urldecode(s: &str) -> String {
 fn spotify_error_body(status: reqwest::StatusCode, body: &str) -> String {
     if let Ok(v) = serde_json::from_str::<Value>(body) {
         if let Some(msg) = v["error"]["message"].as_str() {
-            return format!("Spotify {}: {}", v["error"]["status"].as_i64().unwrap_or(status.as_u16() as i64), msg);
+            return format!(
+                "Spotify {}: {}",
+                v["error"]["status"]
+                    .as_i64()
+                    .unwrap_or(status.as_u16() as i64),
+                msg
+            );
         }
         if let Some(msg) = v["error"].as_str() {
             return format!("Spotify error: {}", msg);
@@ -435,8 +445,7 @@ async fn api_send(
             // 204 No Content (player actions) — represent as "ok"
             return Ok(Value::String("ok".into()));
         }
-        let v = serde_json::from_str(&text)
-            .context("Failed to parse Spotify response")?;
+        let v = serde_json::from_str(&text).context("Failed to parse Spotify response")?;
         return Ok(v);
     }
 
@@ -454,11 +463,7 @@ async fn api_send(
 // ── Actions ───────────────────────────────────────────────────────────────────
 
 /// Dispatch a spotify tool invocation. `args` mirrors the tool parameters.
-pub async fn run(
-    action: &str,
-    args: &Value,
-    config: &LunaConfig,
-) -> Result<String> {
+pub async fn run(action: &str, args: &Value, config: &LunaConfig) -> Result<String> {
     let client = Client::new();
     match action {
         "now" => now(&client, config).await,
@@ -515,8 +520,15 @@ async fn now(client: &Client, config: &LunaConfig) -> Result<String> {
     let name = item["name"].as_str().unwrap_or("unknown");
     if v["item"].is_null() {
         let device = v["device"]["name"].as_str().unwrap_or("?");
-        let playing = if v["is_playing"].as_bool() == Some(true) { "playing" } else { "paused" };
-        return Ok(format!("Spotify is open ({}, {}) but no track is loaded.", device, playing));
+        let playing = if v["is_playing"].as_bool() == Some(true) {
+            "playing"
+        } else {
+            "paused"
+        };
+        return Ok(format!(
+            "Spotify is open ({}, {}) but no track is loaded.",
+            device, playing
+        ));
     }
     let artists: Vec<&str> = item["artists"]
         .as_array()
@@ -525,11 +537,24 @@ async fn now(client: &Client, config: &LunaConfig) -> Result<String> {
     let album = item["album"]["name"].as_str().unwrap_or("?");
     let devices: Vec<&str> = v["device"]["name"].as_str().into_iter().collect();
     let device = devices.first().copied().unwrap_or("?");
-    let playing = if v["is_playing"].as_bool() == Some(true) { "Playing" } else { "Paused" };
-    let shuffle = if v["shuffle_state"].as_bool() == Some(true) { ", shuffle on" } else { "" };
+    let playing = if v["is_playing"].as_bool() == Some(true) {
+        "Playing"
+    } else {
+        "Paused"
+    };
+    let shuffle = if v["shuffle_state"].as_bool() == Some(true) {
+        ", shuffle on"
+    } else {
+        ""
+    };
     Ok(format!(
         "{}: \"{}\" by {} ({} album) on {}{}.",
-        playing, name, artists.join(", "), album, device, shuffle
+        playing,
+        name,
+        artists.join(", "),
+        album,
+        device,
+        shuffle
     ))
 }
 
@@ -549,21 +574,41 @@ async fn play(
         Value::Null
     };
     let body_opt = if body.is_null() { None } else { Some(body) };
-    match api_send(client, "PUT", "/me/player/play", None, body_opt.clone(), config).await {
+    match api_send(
+        client,
+        "PUT",
+        "/me/player/play",
+        None,
+        body_opt.clone(),
+        config,
+    )
+    .await
+    {
         Ok(_) => Ok(()),
         Err(e) => {
             // "No active device" — find one and retry with an explicit device_id.
             if e.to_string().contains("No active device")
                 || e.to_string().contains("active device found")
             {
-                let devs = api_send(client, "GET", "/me/player/devices", None, None, config).await?;
+                let devs =
+                    api_send(client, "GET", "/me/player/devices", None, None, config).await?;
                 let id = devs["devices"]
                     .as_array()
                     .and_then(|d| d.iter().find(|x| x["is_active"].as_bool() == Some(true)))
                     .or_else(|| devs["devices"].as_array().and_then(|d| d.first()))
                     .and_then(|d| d["id"].as_str())
-                    .ok_or_else(|| anyhow!("No Spotify device available — open the Spotify app on any device"))?;
-                api_send(client, "PUT", "/me/player/play", Some(&[("device_id", id)]), body_opt, config).await?;
+                    .ok_or_else(|| {
+                        anyhow!("No Spotify device available — open the Spotify app on any device")
+                    })?;
+                api_send(
+                    client,
+                    "PUT",
+                    "/me/player/play",
+                    Some(&[("device_id", id)]),
+                    body_opt,
+                    config,
+                )
+                .await?;
                 Ok(())
             } else {
                 Err(e)
@@ -581,7 +626,15 @@ async fn play_liked(client: &Client, args: &Value, config: &LunaConfig) -> Resul
     play(client, Some(&context), None, config).await?;
     let with_shuffle = args["shuffle"].as_bool().unwrap_or(false);
     if with_shuffle {
-        api_send(client, "PUT", "/me/player/shuffle", Some(&[("state", "true")]), None, config).await?;
+        api_send(
+            client,
+            "PUT",
+            "/me/player/shuffle",
+            Some(&[("state", "true")]),
+            None,
+            config,
+        )
+        .await?;
         Ok("Playing your Liked Songs, shuffled.".into())
     } else {
         Ok("Playing your Liked Songs.".into())
@@ -659,22 +712,41 @@ async fn play_playlist(client: &Client, args: &Value, config: &LunaConfig) -> Re
     if wanted.trim().is_empty() {
         return Ok("No playlist name provided.".to_string());
     }
-    let v = api_send(client, "GET", "/me/playlists", Some(&[("limit", "50")]), None, config).await?;
+    let v = api_send(
+        client,
+        "GET",
+        "/me/playlists",
+        Some(&[("limit", "50")]),
+        None,
+        config,
+    )
+    .await?;
     let items = v["items"].as_array().cloned().unwrap_or_default();
     let wanted = wanted.to_lowercase();
-    let matches: Vec<&Value> = items.iter().filter(|p| {
-        p["name"].as_str().map(|n| n.to_lowercase().contains(&wanted)).unwrap_or(false)
-    }).collect();
+    let matches: Vec<&Value> = items
+        .iter()
+        .filter(|p| {
+            p["name"]
+                .as_str()
+                .map(|n| n.to_lowercase().contains(&wanted))
+                .unwrap_or(false)
+        })
+        .collect();
     let pl = match matches.first() {
         Some(p) => *p,
         None => {
-            let names: Vec<String> = items.iter().filter_map(|p| p["name"].as_str().map(str::to_string)).take(10).collect();
+            let names: Vec<String> = items
+                .iter()
+                .filter_map(|p| p["name"].as_str().map(str::to_string))
+                .take(10)
+                .collect();
             if names.is_empty() {
                 return Ok("No playlists found on this account.".to_string());
             }
             return Ok(format!(
                 "No playlist matching '{}'. Your playlists include:\n{}",
-                wanted, names.join("\n")
+                wanted,
+                names.join("\n")
             ));
         }
     };
@@ -689,8 +761,19 @@ async fn play_artist(client: &Client, args: &Value, config: &LunaConfig) -> Resu
     if query.trim().is_empty() {
         return Ok("No artist query provided.".to_string());
     }
-    let v = api_send(client, "GET", "/search", Some(&[("q", query), ("type", "artist"), ("limit", "1")]), None, config).await?;
-    let mut artists = v["artists"]["items"].as_array().cloned().unwrap_or_default();
+    let v = api_send(
+        client,
+        "GET",
+        "/search",
+        Some(&[("q", query), ("type", "artist"), ("limit", "1")]),
+        None,
+        config,
+    )
+    .await?;
+    let mut artists = v["artists"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     if artists.is_empty() {
         return Ok(format!("No artist found for '{}'.", query));
     }
@@ -706,7 +789,15 @@ async fn play_album(client: &Client, args: &Value, config: &LunaConfig) -> Resul
     if query.trim().is_empty() {
         return Ok("No album query provided.".to_string());
     }
-    let v = api_send(client, "GET", "/search", Some(&[("q", query), ("type", "album"), ("limit", "1")]), None, config).await?;
+    let v = api_send(
+        client,
+        "GET",
+        "/search",
+        Some(&[("q", query), ("type", "album"), ("limit", "1")]),
+        None,
+        config,
+    )
+    .await?;
     let mut albums = v["albums"]["items"].as_array().cloned().unwrap_or_default();
     if albums.is_empty() {
         return Ok(format!("No album found for '{}'.", query));
@@ -779,7 +870,11 @@ async fn devices(client: &Client, config: &LunaConfig) -> Result<String> {
         .filter_map(|d| {
             let name = d["name"].as_str()?;
             let kind = d["type"].as_str().unwrap_or("device");
-            let active = if d["is_active"].as_bool() == Some(true) { " (active)" } else { "" };
+            let active = if d["is_active"].as_bool() == Some(true) {
+                " (active)"
+            } else {
+                ""
+            };
             let vol = d["volume_percent"].as_i64().unwrap_or(0);
             Some(format!("- {} [{}] volume {}%{}", name, kind, vol, active))
         })

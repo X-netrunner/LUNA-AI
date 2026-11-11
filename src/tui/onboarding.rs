@@ -173,10 +173,16 @@ pub fn render(onb: &Onboarding, f: &mut Frame, config: &LunaConfig, area: Rect) 
 
     lines.push(Line::from(Span::styled(
         "Welcome to Luna — first-time setup",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )));
-    lines.push(Line::from("Everything below is optional. Keys are stored in the OS keyring;"));
-    lines.push(Line::from("nothing ever needs to sit in plaintext in luna.toml."));
+    lines.push(Line::from(
+        "Everything below is optional. Keys are stored in the OS keyring;",
+    ));
+    lines.push(Line::from(
+        "nothing ever needs to sit in plaintext in luna.toml.",
+    ));
     lines.push(Line::from(""));
     lines.push(Line::from(
         "  Up/Down move · Enter activates · secrets are typed hidden · Esc finishes",
@@ -201,7 +207,10 @@ pub fn render(onb: &Onboarding, f: &mut Frame, config: &LunaConfig, area: Rect) 
             Style::default().fg(Color::Yellow)
         };
 
-        spans.push(Span::styled(format!("  [{}] ", mark), mark_style.patch(base)));
+        spans.push(Span::styled(
+            format!("  [{}] ", mark),
+            mark_style.patch(base),
+        ));
         if let Some(edit_idx) = onb.editing {
             if edit_idx == i {
                 let dots = "•".repeat(onb.secret_len().max(1));
@@ -217,9 +226,14 @@ pub fn render(onb: &Onboarding, f: &mut Frame, config: &LunaConfig, area: Rect) 
                 ));
                 spans.push(Span::styled(
                     row.label.clone(),
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
                 ));
-                spans.push(Span::styled("  — typing secret…  [Enter] save  [Esc] cancel", base));
+                spans.push(Span::styled(
+                    "  — typing secret…  [Enter] save  [Esc] cancel",
+                    base,
+                ));
                 lines.push(Line::from(spans));
                 continue;
             }
@@ -264,7 +278,8 @@ pub fn render(onb: &Onboarding, f: &mut Frame, config: &LunaConfig, area: Rect) 
         }
     }
 
-    let mut hint = "Everything is optional — you're set up and ready to chat on the spot.".to_string();
+    let mut hint =
+        "Everything is optional — you're set up and ready to chat on the spot.".to_string();
     if onb.editing.is_some() {
         hint = "Type the secret (hidden). Press Enter to save it to the keyring.".into();
     }
@@ -274,7 +289,9 @@ pub fn render(onb: &Onboarding, f: &mut Frame, config: &LunaConfig, area: Rect) 
         Style::default().fg(Color::DarkGray),
     )));
 
-    let block = Block::default().borders(Borders::ALL).title(" First-time setup ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" First-time setup ");
     Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false })
@@ -332,7 +349,10 @@ mod tests {
     #[test]
     fn keyring_names_map() {
         assert_eq!(action_keyring_name(Action::SetTavily), Some("tavily"));
-        assert_eq!(action_keyring_name(Action::SetSpotifyId), Some("spotify_id"));
+        assert_eq!(
+            action_keyring_name(Action::SetSpotifyId),
+            Some("spotify_id")
+        );
         assert_eq!(action_keyring_name(Action::SpotifyAuth), None);
         assert_eq!(action_keyring_name(Action::Finish), None);
     }

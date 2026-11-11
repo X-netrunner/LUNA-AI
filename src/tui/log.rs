@@ -57,7 +57,10 @@ fn rotate_if_needed(path: &std::path::Path, max_bytes: u64, keep: usize) {
     // fires on the most recent write leaves NO session.log at all until the
     // next line arrives, which breaks `tail -f session.log` and any tooling
     // that opens the path expecting it to exist.
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open(path);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path);
 }
 
 /// Path of the i-th rotated generation (`i == 1` is the most recent).
@@ -129,11 +132,8 @@ impl Write for FileLog {
         }
 
         use std::sync::atomic::Ordering::Relaxed;
-        let written = self
-            .since_check
-            .fetch_add(line.len() as u64 + 1, Relaxed)
-            + line.len() as u64
-            + 1;
+        let written =
+            self.since_check.fetch_add(line.len() as u64 + 1, Relaxed) + line.len() as u64 + 1;
         if written >= self.check_every {
             self.since_check.store(0, Relaxed);
             rotate_if_needed(self.path.as_ref(), self.max_bytes, self.keep);
@@ -193,9 +193,10 @@ impl BufferWriter {
 impl Write for BufferWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // tracing fmt writes whole lines ending in \n; accumulate partial tail
-        let mut pending = self.pending.lock().map_err(|_| {
-            std::io::Error::other("log buffer poisoned")
-        })?;
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| std::io::Error::other("log buffer poisoned"))?;
         pending.push_str(&String::from_utf8_lossy(buf));
         let log = self.log.clone();
         let capacity = self.capacity;
@@ -246,10 +247,16 @@ impl<W: Write + Send> Shared<W> {
 
 impl<W: Write + Send> Write for Shared<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().map_err(|_| std::io::Error::other("locked"))?.write(buf)
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("locked"))?
+            .write(buf)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        self.0.lock().map_err(|_| std::io::Error::other("locked"))?.flush()
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("locked"))?
+            .flush()
     }
 }
 
@@ -322,9 +329,11 @@ mod tests {
         let p = d.join("session.log");
         // ~200 bytes/line x 40 lines = 8 KB; rotate at 2 KB.
         write_lines(&p, 40, &"A".repeat(200));
-        assert!(std::fs::metadata(&p).unwrap().len() <= 2 * 1024 + 4096,
-                "current log stays near the cap, got {}",
-                std::fs::metadata(&p).unwrap().len());
+        assert!(
+            std::fs::metadata(&p).unwrap().len() <= 2 * 1024 + 4096,
+            "current log stays near the cap, got {}",
+            std::fs::metadata(&p).unwrap().len()
+        );
         let g1 = gen_path(&p, 1);
         assert!(g1.exists(), "a rotated generation must exist");
         let old = std::fs::read_to_string(&g1).unwrap();
@@ -368,7 +377,8 @@ mod tests {
         let mut f = FileLog::with_limits(&p, 10_000, 10);
         for tag in ["RUN1", "RUN2", "RUN3"] {
             for _ in 0..40 {
-                f.write_all(format!("{}\n", tag.repeat(100)).as_bytes()).unwrap();
+                f.write_all(format!("{}\n", tag.repeat(100)).as_bytes())
+                    .unwrap();
             }
             f.write_all(format!("{tag}-END\n").as_bytes()).unwrap();
         }
@@ -395,7 +405,8 @@ mod tests {
             // crossed many times over. With only 2 generations kept, the first
             // epoch cannot possibly survive.
             for _ in 0..40 {
-                f.write_all(format!("EPOCH{i}-{}\n", "x".repeat(380)).as_bytes()).unwrap();
+                f.write_all(format!("EPOCH{i}-{}\n", "x".repeat(380)).as_bytes())
+                    .unwrap();
             }
         }
         let all: String = (1..=2)
@@ -433,7 +444,9 @@ mod tests {
     fn the_configured_cap_is_sane() {
         // 336 MB is what the unbounded log actually reached, so the cap has to
         // be well under that to be worth having.
-        assert!(MAX_LOG_BYTES * LOG_KEEP as u64 <= 128 * 1024 * 1024,
-                "ceiling {MAX_LOG_BYTES}x{LOG_KEEP} is too large");
+        assert!(
+            MAX_LOG_BYTES * LOG_KEEP as u64 <= 128 * 1024 * 1024,
+            "ceiling {MAX_LOG_BYTES}x{LOG_KEEP} is too large"
+        );
     }
 }

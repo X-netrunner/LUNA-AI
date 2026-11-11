@@ -1,5 +1,5 @@
-use crate::tools::shell::run_command;
 use crate::config::LunaConfig;
+use crate::tools::shell::run_command;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -85,10 +85,7 @@ fn app_command(word: &str) -> Option<&'static str> {
         ("obsidian", "obsidian"),
         ("steam", "steam"),
     ];
-    known
-        .iter()
-        .find(|(k, _)| *k == w)
-        .map(|(_, cmd)| *cmd)
+    known.iter().find(|(k, _)| *k == w).map(|(_, cmd)| *cmd)
 }
 
 /// Start ydotoold if it isn't already running (needs the `input` group + uinput).
@@ -216,7 +213,12 @@ fn encode_b64(bytes: &[u8]) -> String {
 }
 
 /// Ask the SIH VLM for the next action given the current screenshot + goal.
-async fn ask_vlm(config: &LunaConfig, goal: &str, image_b64: &str, history: &[Value]) -> Result<Value> {
+async fn ask_vlm(
+    config: &LunaConfig,
+    goal: &str,
+    image_b64: &str,
+    history: &[Value],
+) -> Result<Value> {
     let base = config.desktop.srijan_url.trim_end_matches('/').to_string();
     let client = reqwest::Client::new();
     let res = client
@@ -275,11 +277,19 @@ async fn execute_action(config: &LunaConfig, action: Value) -> Result<String> {
         "click" | "double_click" | "right_click" => {
             let x = action["x"].as_i64().unwrap_or(0);
             let y = action["y"].as_i64().unwrap_or(0);
-            run_command(&format!("{yd} mousemove -a -x {x} -y {y}; {yd} click 0xC0"), None).await?;
+            run_command(
+                &format!("{yd} mousemove -a -x {x} -y {y}; {yd} click 0xC0"),
+                None,
+            )
+            .await?;
             if kind == "double_click" {
                 run_command(&format!("{yd} click -r 2 0xC0"), None).await?;
             } else if kind == "right_click" {
-                run_command(&format!("{yd} mousemove -a -x {x} -y {y}; {yd} click 0xC1"), None).await?;
+                run_command(
+                    &format!("{yd} mousemove -a -x {x} -y {y}; {yd} click 0xC1"),
+                    None,
+                )
+                .await?;
             }
             Ok(format!("{kind} at ({x},{y})"))
         }
@@ -301,7 +311,11 @@ async fn execute_action(config: &LunaConfig, action: Value) -> Result<String> {
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 run_stdout(&format!("{yd} key 28:1 28:0")).await?;
             }
-            Ok(format!("typed {len} chars{n}", len = text.chars().count(), n = if looks_navigable { " + Enter" } else { "" }))
+            Ok(format!(
+                "typed {len} chars{n}",
+                len = text.chars().count(),
+                n = if looks_navigable { " + Enter" } else { "" }
+            ))
         }
         "press" => {
             let key = action["key"].as_str().unwrap_or("enter");
@@ -533,19 +547,16 @@ mod tests {
         cfg.desktop = DesktopConfig {
             enabled: true,
             srijan_url: "http://127.0.0.1:8001".into(),
-            server_dir: "/home/netrunner/Projects/sih/Project-Vision/Server[unnati&srijan]"
-                .into(),
+            server_dir: "/home/netrunner/Projects/sih/Project-Vision/Server[unnati&srijan]".into(),
             screenshot_cmd: "grim".into(),
             ydotool_bin: "ydotool".into(),
             max_steps: 25,
             timeout_secs: 300,
         };
-        let out = crate::tools::desktop::run(
-            "Open firefox and go to the Luna project on GitHub",
-            &cfg,
-        )
-        .await
-        .expect("live desktop loop should complete");
+        let out =
+            crate::tools::desktop::run("Open firefox and go to the Luna project on GitHub", &cfg)
+                .await
+                .expect("live desktop loop should complete");
         println!("{out}");
     }
 }

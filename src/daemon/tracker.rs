@@ -103,7 +103,11 @@ impl Tracker {
         let cutoff = now_epoch() - 30 * 86400;
         data.processes.retain(|_, s| s.last_seen_epoch >= cutoff);
 
-        Self { path, data, dirty: false }
+        Self {
+            path,
+            data,
+            dirty: false,
+        }
     }
 
     /// Record one observation cycle for `name`. Returns true when the
@@ -131,7 +135,9 @@ impl Tracker {
             let cutoff_date = (chrono::Local::now() - chrono::Duration::days(31))
                 .format("%Y-%m-%d")
                 .to_string();
-            entry.days_seen.retain(|d| d.as_str() > cutoff_date.as_str());
+            entry
+                .days_seen
+                .retain(|d| d.as_str() > cutoff_date.as_str());
         }
 
         if advanced {
@@ -162,7 +168,12 @@ impl Tracker {
 
     /// Daily-use classification. Returns None while there isn't enough
     /// history yet, Some(true) for daily drivers, Some(false) otherwise.
-    pub fn classify_daily_use(&self, name: &str, days_per_week: u32, min_history_days: u32) -> Option<bool> {
+    pub fn classify_daily_use(
+        &self,
+        name: &str,
+        days_per_week: u32,
+        min_history_days: u32,
+    ) -> Option<bool> {
         let stats = self.data.processes.get(name)?;
         if (stats.days_seen.len() as u32) < min_history_days {
             return None;

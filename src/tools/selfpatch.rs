@@ -144,10 +144,7 @@ fn mark_read(rel: &str) {
 }
 
 fn was_read(rel: &str) -> bool {
-    receipts()
-        .lock()
-        .map(|g| g.contains(rel))
-        .unwrap_or(false)
+    receipts().lock().map(|g| g.contains(rel)).unwrap_or(false)
 }
 
 /// List the source files she is allowed to touch, so she stops inventing paths.
@@ -163,7 +160,9 @@ pub fn list_source_files(root: &Path, filter: &str) -> String {
         if depth > 2 || *count > 400 {
             return;
         }
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
         entries.sort_by_key(|e| e.path());
         for e in entries {
@@ -218,7 +217,10 @@ pub fn list_source_files(root: &Path, filter: &str) -> String {
 /// `read` — return a file's exact current content and issue a read receipt.
 pub fn read_file(root: &Path, input: &str) -> Result<String> {
     let rel = safe_rel(root, input)?;
-    if is_protected(&rel, &crate::config::SelfPatchConfig::default().protected_files) {
+    if is_protected(
+        &rel,
+        &crate::config::SelfPatchConfig::default().protected_files,
+    ) {
         anyhow::bail!("{rel} is protected — it cannot be read for editing either");
     }
     let p = root.join(&rel);
@@ -288,7 +290,8 @@ pub fn resolve_line_edit(orig: &str, line_no: usize, replacement: &str) -> Resul
     if line_no == 0 || line_no > n + 1 {
         anyhow::bail!(
             "line {line_no} is outside the file — it has {n} lines, so the only \
-             append position is line {}.", n + 1
+             append position is line {}.",
+            n + 1
         );
     }
 
@@ -332,7 +335,6 @@ pub fn resolve_line_edit(orig: &str, line_no: usize, replacement: &str) -> Resul
         ),
     }
 }
-
 
 /// Apply targeted edits to a file's contents.
 ///
@@ -509,7 +511,13 @@ fn hash_file(p: &Path) -> Result<u64> {
 fn diff_for(root: &Path, rel: &str, staged: &Path) -> String {
     let real = root.join(rel);
     let out = std::process::Command::new("git")
-        .args(["diff", "--no-index", "--", &real.display().to_string(), &staged.display().to_string()])
+        .args([
+            "diff",
+            "--no-index",
+            "--",
+            &real.display().to_string(),
+            &staged.display().to_string(),
+        ])
         .output();
     let Ok(out) = out else {
         return format!("(could not diff {rel}: git not available)\n");
@@ -614,8 +622,7 @@ pub async fn propose(
                 // Use `{:#}` so the *cause* survives: Luna reads this error text
                 // to learn what to fix, so "in foo.rs" alone would teach her
                 // nothing. Flatten the chain into one readable message.
-                apply_edits(&orig, &all)
-                    .map_err(|e| anyhow::anyhow!("in {rel}: {e:#}"))?
+                apply_edits(&orig, &all).map_err(|e| anyhow::anyhow!("in {rel}: {e:#}"))?
             }
             (None, true, true) => anyhow::bail!(
                 "{rel}: give edits:[{{find,replace}}], line_edits:[{{at_line,replace_with}}], \
@@ -624,9 +631,12 @@ pub async fn propose(
         };
         let staged = staging_dir().join(rel.replace('/', "__"));
         let orig_hash = hash_file(&target)?;
-        std::fs::write(&staged, new_content)
-            .with_context(|| format!("failed to stage {rel}"))?;
-        files.push(StoredFile { rel, staged: staged.display().to_string(), orig_hash });
+        std::fs::write(&staged, new_content).with_context(|| format!("failed to stage {rel}"))?;
+        files.push(StoredFile {
+            rel,
+            staged: staged.display().to_string(),
+            orig_hash,
+        });
     }
 
     let st = Stored {
@@ -1090,21 +1100,30 @@ mod tests {
         let (find, repl) = resolve_line_edit(SRC3, n + 1, "fn delta() {}").unwrap();
         assert_eq!(find, "fn gamma() {}", "must anchor on real last-line text");
         let out = apply_edits(SRC3, &[(find, repl)]).unwrap();
-        assert!(out.ends_with("fn gamma() {}\nfn delta() {}\n"), "got: {out:?}");
+        assert!(
+            out.ends_with("fn gamma() {}\nfn delta() {}\n"),
+            "got: {out:?}"
+        );
     }
 
     #[test]
     fn line_edit_appends_to_a_file_with_a_trailing_newline() {
         let (find, repl) = resolve_line_edit(SRC3, 4, "fn delta() {}").unwrap();
         let out = apply_edits(SRC3, &[(find, repl)]).unwrap();
-        assert!(out.ends_with("fn delta() {}\n"), "trailing newline kept: {out:?}");
+        assert!(
+            out.ends_with("fn delta() {}\n"),
+            "trailing newline kept: {out:?}"
+        );
     }
 
     #[test]
     fn line_edit_rejects_out_of_range_lines() {
         let n = SRC3.lines().count();
         assert!(resolve_line_edit(SRC3, 0, "x").is_err(), "0 is not a line");
-        assert!(resolve_line_edit(SRC3, n + 2, "x").is_err(), "past append position");
+        assert!(
+            resolve_line_edit(SRC3, n + 2, "x").is_err(),
+            "past append position"
+        );
         let e = resolve_line_edit(SRC3, 99, "x").unwrap_err().to_string();
         assert!(e.contains("outside the file"), "got: {e}");
     }
@@ -1112,7 +1131,9 @@ mod tests {
     #[test]
     fn line_edit_rejects_a_blank_target_line() {
         let src = "fn a() {}\n\nfn b() {}\n";
-        let e = resolve_line_edit(src, 2, "anything").unwrap_err().to_string();
+        let e = resolve_line_edit(src, 2, "anything")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("blank"), "got: {e}");
     }
 
@@ -1123,9 +1144,16 @@ mod tests {
         let src = "fn first() {}\nfn dup() {}\nfn mid() {}\nfn dup() {}\n";
         assert_eq!(src.matches("fn dup() {}").count(), 2, "precondition");
         let (find, repl) = resolve_line_edit(src, 4, "fn dup() { /* second */ }").unwrap();
-        assert_eq!(find, "fn mid() {}\nfn dup() {}", "must include the previous line");
+        assert_eq!(
+            find, "fn mid() {}\nfn dup() {}",
+            "must include the previous line"
+        );
         let out = apply_edits(src, &[(find, repl)]).unwrap();
-        assert_eq!(out.matches("fn dup() {}").count(), 1, "only the 2nd changed");
+        assert_eq!(
+            out.matches("fn dup() {}").count(),
+            1,
+            "only the 2nd changed"
+        );
         assert!(out.contains("fn dup() { /* second */ }"));
     }
 
@@ -1139,9 +1167,15 @@ mod tests {
         let src = "x\nx\nx\nx\n";
         // `matches` is non-overlapping, so this is 2, not 3 — either way the
         // point is only that it is NOT unique.
-        assert!(src.matches("x\nx").count() > 1, "precondition: pair is ambiguous");
+        assert!(
+            src.matches("x\nx").count() > 1,
+            "precondition: pair is ambiguous"
+        );
         let e = resolve_line_edit(src, 2, "y").unwrap_err().to_string();
-        assert!(e.contains("not unique") || e.contains("could not be located"), "got: {e}");
+        assert!(
+            e.contains("not unique") || e.contains("could not be located"),
+            "got: {e}"
+        );
     }
 
     /// The complement of the case above, pinned because it is easy to "fix" by
@@ -1210,7 +1244,11 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
     fn a_correct_edit_produces_no_warning() {
         let orig = "fn alpha() {}\nfn beta() {}\n";
         let new = "/// Doc for beta.\nfn beta() {}\n";
-        assert!(content_warnings(orig, new).is_empty(), "{:?}", content_warnings(orig, new));
+        assert!(
+            content_warnings(orig, new).is_empty(),
+            "{:?}",
+            content_warnings(orig, new)
+        );
     }
 
     /// Lines that legitimately repeat must not be flagged, or the check
@@ -1224,10 +1262,10 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
     fn repeated_boilerplate_is_not_flagged() {
         for src in [
             "fn a() {\n    let x = 1;\n}\nfn b() {\n    let x = 1;\n}\n", // same, not adjacent
-            "}\n}\n",                                 // closing braces
-            "\n\n",                                     // blank lines
-            "#[test]\n#[test]\n",                       // attribute
-            "    Ok(())\n    Ok(())\n",                 // short line
+            "}\n}\n",                                                     // closing braces
+            "\n\n",                                                       // blank lines
+            "#[test]\n#[test]\n",                                         // attribute
+            "    Ok(())\n    Ok(())\n",                                   // short line
             "    let total = compute_total(&items)?;\n    let total = compute_total(&items)?;\n",
         ] {
             assert!(
@@ -1246,12 +1284,17 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
         let new = "aaa bbb ccc\nxxx yyy zzz\nqqq rrr sss\naaa bbb ccc\n";
         let w = content_warnings(orig, new);
         assert_eq!(w.len(), 1, "{w:?}");
-        assert!(w[0].contains("now appears 2 times (was 1)"), "got: {}", w[0]);
+        assert!(
+            w[0].contains("now appears 2 times (was 1)"),
+            "got: {}",
+            w[0]
+        );
     }
 
     #[test]
     fn a_repeated_adjacent_meaningful_line_is_flagged() {
-        let src = "    let total = compute_total(&items)?;\n    let total = compute_total(&items)?;\n";
+        let src =
+            "    let total = compute_total(&items)?;\n    let total = compute_total(&items)?;\n";
         let w = content_warnings("", src);
         assert_eq!(w.len(), 1, "{w:?}");
         assert!(w[0].contains("line 1"), "got: {}", w[0]);
@@ -1311,7 +1354,10 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
         .await
         .unwrap();
         let review = review(&cfg).unwrap();
-        assert!(review.contains("fn three() {}"), "staged diff was: {review}");
+        assert!(
+            review.contains("fn three() {}"),
+            "staged diff was: {review}"
+        );
         // Discard on the way out. A staged proposal BLOCKS every later proposal
         // ("a proposal is already staged"), so leaving one behind makes the
         // next real self-patch fail for a reason unrelated to it — this test's
@@ -1400,8 +1446,6 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
         let _ = std::fs::remove_file(&scratch);
     }
 
-
-
     fn root() -> PathBuf {
         // this checkout, wherever it is (was the author's own path, so the tests only passed on that machine)
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1409,13 +1453,20 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
 
     #[test]
     fn accepts_a_normal_relative_path() {
-        assert_eq!(safe_rel(&root(), "src/daemon/mod.rs").unwrap(), "src/daemon/mod.rs");
+        assert_eq!(
+            safe_rel(&root(), "src/daemon/mod.rs").unwrap(),
+            "src/daemon/mod.rs"
+        );
     }
 
     #[test]
     fn rejects_absolute_paths() {
         assert!(safe_rel(&root(), "/etc/passwd").is_err());
-        assert!(safe_rel(&root(), &format!("{}/src/util.rs", env!("CARGO_MANIFEST_DIR"))).is_err());
+        assert!(safe_rel(
+            &root(),
+            &format!("{}/src/util.rs", env!("CARGO_MANIFEST_DIR"))
+        )
+        .is_err());
     }
 
     #[test]
@@ -1437,12 +1488,21 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
             .map(|s| s.to_string())
             .collect();
         assert!(is_protected("src/config.rs", &list));
-        assert!(is_protected("src/llm/react.rs", &list), "nested under a protected dir");
+        assert!(
+            is_protected("src/llm/react.rs", &list),
+            "nested under a protected dir"
+        );
         assert!(is_protected("Cargo.toml", &list));
         // Not protected:
         assert!(!is_protected("src/tools/pkgupdate.rs", &list));
-        assert!(!is_protected("src/llmfoo/x.rs", &list), "prefix must match a path segment");
-        assert!(!is_protected("src/config.rsx", &list), "exact match, not a string prefix");
+        assert!(
+            !is_protected("src/llmfoo/x.rs", &list),
+            "prefix must match a path segment"
+        );
+        assert!(
+            !is_protected("src/config.rsx", &list),
+            "exact match, not a string prefix"
+        );
     }
 
     #[test]
@@ -1531,7 +1591,10 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
         let cfg = crate::config::SelfPatchConfig::default();
         let out = list_source_files(&PathBuf::from(&cfg.source_dir), "");
         assert!(out.contains("src/config.rs"), "must list a known real file");
-        assert!(out.contains("src/tools/selfpatch.rs"), "must list her own module");
+        assert!(
+            out.contains("src/tools/selfpatch.rs"),
+            "must list her own module"
+        );
         assert!(!out.contains("target/"), "must not walk into target/");
     }
 
@@ -1544,7 +1607,10 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
         let only = list_source_files(&root, "selfpatch");
         assert!(all.contains("src/tools/selfpatch.rs"), "sanity: unfiltered");
         assert!(only.contains("src/tools/selfpatch.rs"), "filter must match");
-        assert!(!only.contains("src/config.rs"), "filter must EXCLUDE others");
+        assert!(
+            !only.contains("src/config.rs"),
+            "filter must EXCLUDE others"
+        );
         // A filter matching nothing must say so and point back at the real list,
         // rather than returning an empty result she might read as "no files".
         let miss = list_source_files(&root, "zzz_no_such_file_zzz");
@@ -1564,10 +1630,7 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
         let src = "alpha beta gamma\n";
         let out = apply_edits(
             src,
-            &[
-                ("beta".into(), "B".into()),
-                ("gamma".into(), "G".into()),
-            ],
+            &[("beta".into(), "B".into()), ("gamma".into(), "G".into())],
         )
         .unwrap();
         assert_eq!(out, "alpha B G\n");
@@ -1595,7 +1658,10 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
     fn empty_find_and_no_op_edits_are_refused() {
         let src = "hello\n";
         assert!(apply_edits(src, &[]).is_err(), "no edits at all");
-        assert!(apply_edits(src, &[("".into(), "x".into())]).is_err(), "empty find");
+        assert!(
+            apply_edits(src, &[("".into(), "x".into())]).is_err(),
+            "empty find"
+        );
         assert!(
             apply_edits(src, &[("hello".into(), "hello".into())]).is_err(),
             "an edit that changes nothing is not a proposal"
@@ -1629,7 +1695,8 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
         // The root itself:
         assert!(blocks_raw_write(&cfg, &root).is_some());
         // Via ~ expansion:
-        let rest = root.trim_start_matches(&format!("{}/", std::env::var("HOME").unwrap_or_default()));
+        let rest =
+            root.trim_start_matches(&format!("{}/", std::env::var("HOME").unwrap_or_default()));
         assert!(blocks_raw_write(&cfg, &format!("~/{rest}/src/util.rs")).is_some());
     }
 
@@ -1678,7 +1745,9 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
                 arguments: serde_json::json!({ "action": "status" }),
             },
         };
-        let out = crate::tools::execute(&call, &cfg).await.expect("status should dispatch");
+        let out = crate::tools::execute(&call, &cfg)
+            .await
+            .expect("status should dispatch");
         assert!(out.contains("Self-modification"), "got: {out}");
 
         // An unknown action must fall back to status, not blow up.
@@ -1688,7 +1757,9 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
                 arguments: serde_json::json!({ "action": "nonsense" }),
             },
         };
-        crate::tools::execute(&call, &cfg).await.expect("unknown action should not error");
+        crate::tools::execute(&call, &cfg)
+            .await
+            .expect("unknown action should not error");
 
         // propose with no changes must be rejected cleanly, not panic.
         let call = ToolCall {
@@ -1697,7 +1768,9 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
                 arguments: serde_json::json!({ "action": "propose" }),
             },
         };
-        let err = crate::tools::execute(&call, &cfg).await.expect_err("empty propose must fail");
+        let err = crate::tools::execute(&call, &cfg)
+            .await
+            .expect_err("empty propose must fail");
         assert!(
             err.to_string().contains("needs a 'changes' array"),
             "the empty-propose error must show her the right shape, got: {err}"
@@ -1720,13 +1793,24 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
         let broken = format!("{before}\nfn selfpatch_e2e_broken() -> i32 {{ \"nope\" }}\n");
         let out = propose(
             &cfg,
-            &[ChangeSpec { file: "src/util.rs".into(), content: Some(broken), edits: vec![], ..Default::default() }],
+            &[ChangeSpec {
+                file: "src/util.rs".into(),
+                content: Some(broken),
+                edits: vec![],
+                ..Default::default()
+            }],
             "e2e: deliberate compile break",
         )
         .await
         .expect("propose should stage the change");
-        assert!(out.contains("Nothing in the real tree has changed"), "got: {out}");
-        assert!(out.contains("```diff"), "propose must show a diff, got: {out}");
+        assert!(
+            out.contains("Nothing in the real tree has changed"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("```diff"),
+            "propose must show a diff, got: {out}"
+        );
 
         // 2. staging must not have modified the real file
         assert_eq!(
@@ -1737,7 +1821,10 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
 
         // 3. validation must FAIL
         let v = validate(&cfg).await.expect("validate should run");
-        assert!(v.contains("FAILED"), "a compile break must fail validation, got: {v}");
+        assert!(
+            v.contains("FAILED"),
+            "a compile break must fail validation, got: {v}"
+        );
 
         // 4. apply must REFUSE a failed proposal
         let err = apply(&cfg).expect_err("apply must refuse a failed proposal");
@@ -1781,9 +1868,16 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
         )
         .await
         .unwrap();
-        assert_eq!(std::fs::read_to_string(&scratch).unwrap(), before, "staging wrote early");
+        assert_eq!(
+            std::fs::read_to_string(&scratch).unwrap(),
+            before,
+            "staging wrote early"
+        );
 
-        assert!(validate(&cfg).await.unwrap().contains("PASSED"), "clean change must pass");
+        assert!(
+            validate(&cfg).await.unwrap().contains("PASSED"),
+            "clean change must pass"
+        );
 
         let applied = apply(&cfg).expect("apply should succeed after a green validation");
         assert!(applied.contains("Applied"), "got: {applied}");
@@ -1816,7 +1910,12 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
         read_file(&root, "src/selfpatch_e2e_stale.rs").unwrap();
         propose(
             &cfg,
-            &[ChangeSpec { file: "src/selfpatch_e2e_stale.rs".into(), content: Some("mine\n".into()), edits: vec![], ..Default::default() }],
+            &[ChangeSpec {
+                file: "src/selfpatch_e2e_stale.rs".into(),
+                content: Some("mine\n".into()),
+                edits: vec![],
+                ..Default::default()
+            }],
             "e2e: stale detection",
         )
         .await
@@ -1897,7 +1996,10 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
         );
 
         rollback(&cfg).unwrap();
-        assert_eq!(std::fs::read_to_string(&scratch).unwrap(), "fn alpha() { 1 }\nfn beta() { 2 }\n");
+        assert_eq!(
+            std::fs::read_to_string(&scratch).unwrap(),
+            "fn alpha() { 1 }\nfn beta() { 2 }\n"
+        );
         discard().unwrap();
         let _ = std::fs::remove_file(&scratch);
     }
@@ -1909,13 +2011,21 @@ pub fn truncate(s: &str, max: usize) -> &str {\n";
         let _ = discard();
         let err = propose(
             &cfg,
-            &[ChangeSpec { file: "src/llm/react.rs".into(), content: Some("// hijacked".into()), edits: vec![], ..Default::default() }],
+            &[ChangeSpec {
+                file: "src/llm/react.rs".into(),
+                content: Some("// hijacked".into()),
+                edits: vec![],
+                ..Default::default()
+            }],
             "e2e: try to rewrite her own guardrail",
         )
         .await
         .expect_err("her guardrails must be unproposable");
         assert!(err.to_string().contains("protected"), "got: {err}");
         // and nothing was staged
-        assert!(load().files.is_empty(), "a refused proposal must leave no state");
+        assert!(
+            load().files.is_empty(),
+            "a refused proposal must leave no state"
+        );
     }
 }

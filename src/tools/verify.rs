@@ -128,16 +128,29 @@ pub fn syntax_check(path: &str, content: &str) -> SyntaxCheck {
         if let Err(e) = std::fs::write(&scratch, content) {
             return SyntaxCheck::Unavailable(format!("cannot write scratch file: {e}"));
         }
-        let output = std::process::Command::new("timeout").args(["--kill-after=1", "10"])
-            .arg(program).args(args).arg(&scratch)
-            .env_remove("NODE_OPTIONS").env_remove("BASH_ENV").output();
+        let output = std::process::Command::new("timeout")
+            .args(["--kill-after=1", "10"])
+            .arg(program)
+            .args(args)
+            .arg(&scratch)
+            .env_remove("NODE_OPTIONS")
+            .env_remove("BASH_ENV")
+            .output();
         match output {
             Ok(o) if o.status.success() => SyntaxCheck::Passed,
-            Ok(o) if matches!(o.status.code(), Some(124 | 126 | 127 | 137)) =>
-                SyntaxCheck::Unavailable(format!("{program} unavailable or exceeded its time limit")),
+            Ok(o) if matches!(o.status.code(), Some(124 | 126 | 127 | 137)) => {
+                SyntaxCheck::Unavailable(format!(
+                    "{program} unavailable or exceeded its time limit"
+                ))
+            }
             Ok(o) => {
-                let raw = if o.stderr.is_empty() { o.stdout } else { o.stderr };
-                let error = String::from_utf8_lossy(&raw).replace(scratch.to_string_lossy().as_ref(), path);
+                let raw = if o.stderr.is_empty() {
+                    o.stdout
+                } else {
+                    o.stderr
+                };
+                let error =
+                    String::from_utf8_lossy(&raw).replace(scratch.to_string_lossy().as_ref(), path);
                 SyntaxCheck::Failed(crate::util::truncate(error.trim(), 600).to_string())
             }
             Err(e) => SyntaxCheck::Unavailable(format!("cannot run parser: {e}")),
@@ -204,7 +217,10 @@ mod tests {
     #[test]
     fn syntax_warning_flags_broken_python_and_passes_good_python() {
         // Valid Python: no warning.
-        assert_eq!(syntax_warning("/tmp/x.py", "def main():\n    print('ok')\n"), None);
+        assert_eq!(
+            syntax_warning("/tmp/x.py", "def main():\n    print('ok')\n"),
+            None
+        );
         // Broken Python: a warning that names the defect.
         let w = syntax_warning("/tmp/x.py", "def main(:\n    print('ok')\n");
         assert!(w.is_some(), "a syntax error must be reported");
@@ -225,7 +241,10 @@ mod tests {
         let target = dir.join("poc.py");
 
         // Confirm the premise: the escaped form does not compile.
-        assert_eq!(verify_content(&target, ESCAPED_PY, "python3 -m py_compile"), Verdict::Invalid);
+        assert_eq!(
+            verify_content(&target, ESCAPED_PY, "python3 -m py_compile"),
+            Verdict::Invalid
+        );
 
         match check_before_write(target.to_str().unwrap(), ESCAPED_PY) {
             PreWrite::Repaired(fixed) => {
@@ -329,17 +348,37 @@ mod configuration_syntax_tests {
     use super::*;
     #[test]
     fn structured_files_are_checked_and_unknown_types_are_explicit() {
-        assert_eq!(syntax_check("config.json", r#"{"ok":true}"#), SyntaxCheck::Passed);
-        assert!(matches!(syntax_check("config.json", "{oops"), SyntaxCheck::Failed(_)));
-        assert_eq!(syntax_check("config.toml", "enabled = true"), SyntaxCheck::Passed);
-        assert!(matches!(syntax_check("config.toml", "enabled = ["), SyntaxCheck::Failed(_)));
-        assert!(matches!(syntax_check("code.rs", "fn main() {}"), SyntaxCheck::Unavailable(_)));
+        assert_eq!(
+            syntax_check("config.json", r#"{"ok":true}"#),
+            SyntaxCheck::Passed
+        );
+        assert!(matches!(
+            syntax_check("config.json", "{oops"),
+            SyntaxCheck::Failed(_)
+        ));
+        assert_eq!(
+            syntax_check("config.toml", "enabled = true"),
+            SyntaxCheck::Passed
+        );
+        assert!(matches!(
+            syntax_check("config.toml", "enabled = ["),
+            SyntaxCheck::Failed(_)
+        ));
+        assert!(matches!(
+            syntax_check("code.rs", "fn main() {}"),
+            SyntaxCheck::Unavailable(_)
+        ));
         assert!(syntax_check("code.rs", "").receipt().contains("unverified"));
-        assert!(SyntaxCheck::Passed.receipt().contains("behavioral tests have not"));
+        assert!(SyntaxCheck::Passed
+            .receipt()
+            .contains("behavioral tests have not"));
     }
     #[test]
     fn shell_syntax_is_checked_without_executing_it() {
         assert_eq!(syntax_check("sample.sh", "exit 99\n"), SyntaxCheck::Passed);
-        assert!(matches!(syntax_check("sample.sh", "if then"), SyntaxCheck::Failed(_)));
+        assert!(matches!(
+            syntax_check("sample.sh", "if then"),
+            SyntaxCheck::Failed(_)
+        ));
     }
 }

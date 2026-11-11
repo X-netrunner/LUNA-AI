@@ -97,7 +97,12 @@ fn build_deep_client(config: &LunaConfig) -> Option<OllamaClient> {
             // runs past the chat cap and would otherwise be written truncated.
             config.llm.deep_max_tokens,
         )
-        .enable_thinking(config.llm.deep_enable_thinking.unwrap_or(config.llm.enable_thinking))
+        .enable_thinking(
+            config
+                .llm
+                .deep_enable_thinking
+                .unwrap_or(config.llm.enable_thinking),
+        )
         .num_ctx(config.llm.deep_num_ctx)
         .keep_alive(10)
         .debug(config.logging.level == "debug")
@@ -116,7 +121,12 @@ fn build_deep_unrestricted_client(config: &LunaConfig) -> Option<OllamaClient> {
             config.llm.deep_temperature,
             config.llm.deep_max_tokens,
         )
-        .enable_thinking(config.llm.deep_enable_thinking.unwrap_or(config.llm.enable_thinking))
+        .enable_thinking(
+            config
+                .llm
+                .deep_enable_thinking
+                .unwrap_or(config.llm.enable_thinking),
+        )
         .num_ctx(config.llm.deep_num_ctx)
         .keep_alive(10)
         .debug(config.logging.level == "debug")
@@ -825,14 +835,25 @@ pub async fn run_routed_turn(
         match classify_with_latch(input) {
             QueryComplexity::Simple => {
                 if let Some(fr) = fast_react.as_ref() {
-                    (fr, finalize_prompt(config, FAST_PROMPT.to_string()), Tier::Fast)
+                    (
+                        fr,
+                        finalize_prompt(config, FAST_PROMPT.to_string()),
+                        Tier::Fast,
+                    )
                 } else {
                     (&react, system_prompt.clone(), Tier::Full)
                 }
             }
             QueryComplexity::Deep => {
                 if let Some(dr) = deep_react.as_ref() {
-                    (dr, finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness())), Tier::Deep)
+                    (
+                        dr,
+                        finalize_prompt(
+                            config,
+                            format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()),
+                        ),
+                        Tier::Deep,
+                    )
                 } else {
                     (&react, system_prompt.clone(), Tier::Full)
                 }
@@ -841,10 +862,17 @@ pub async fn run_routed_turn(
                 if let Some(sr) = security_react.as_ref() {
                     (
                         sr,
-                        finalize_prompt(config, format!("{}{}", build_security_prompt(
-                            config.llm.security_unrestricted_active(),
-                            &config.llm.security_scripts_dir,
-                        ), crate::tools::halcyon::awareness())),
+                        finalize_prompt(
+                            config,
+                            format!(
+                                "{}{}",
+                                build_security_prompt(
+                                    config.llm.security_unrestricted_active(),
+                                    &config.llm.security_scripts_dir,
+                                ),
+                                crate::tools::halcyon::awareness()
+                            ),
+                        ),
                         Tier::Security,
                     )
                 } else {
@@ -917,12 +945,17 @@ pub async fn run_routed_turn(
                     && crate::llm::react::is_inability_response(&response)
                 {
                     if let Some(dr) = deep_react.as_ref() {
-                        tracing::info!("Full model gave up with no tool run — re-running on the deep model");
+                        tracing::info!(
+                            "Full model gave up with no tool run — re-running on the deep model"
+                        );
                         memory.truncate_to(mem_snapshot);
                         active_react = dr;
                         tier = Tier::Deep;
                         went_deep = true;
-                        effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                        effective_prompt = finalize_prompt(
+                            config,
+                            format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()),
+                        );
                         effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                         continue;
                     }
@@ -934,7 +967,10 @@ pub async fn run_routed_turn(
                     && crate::llm::react::is_refusal_response(&response)
                     && attempt < 3
                 {
-                    tracing::warn!("Model refused on tier {:?} — routing to uncensored version", tier);
+                    tracing::warn!(
+                        "Model refused on tier {:?} — routing to uncensored version",
+                        tier
+                    );
                     memory.truncate_to(mem_snapshot);
                     fell_back_to_unrestricted = true;
                     if let Some(dr) = deep_unrestricted_react.as_ref() {
@@ -943,7 +979,10 @@ pub async fn run_routed_turn(
                         active_react = sr;
                     }
                     tier = Tier::Deep;
-                    effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                    effective_prompt = finalize_prompt(
+                        config,
+                        format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()),
+                    );
                     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                     continue;
                 }
@@ -992,7 +1031,11 @@ pub async fn run_routed_turn(
                     && (deep_unrestricted_react.is_some() || security_react.is_some())
                     && attempt < 3
                 {
-                    tracing::warn!("Turn failed on tier {:?}: {} — rerouting to uncensored version", tier, e);
+                    tracing::warn!(
+                        "Turn failed on tier {:?}: {} — rerouting to uncensored version",
+                        tier,
+                        e
+                    );
                     memory.truncate_to(mem_snapshot);
                     fell_back_to_unrestricted = true;
                     if let Some(dr) = deep_unrestricted_react.as_ref() {
@@ -1001,7 +1044,10 @@ pub async fn run_routed_turn(
                         active_react = sr;
                     }
                     tier = Tier::Deep;
-                    effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                    effective_prompt = finalize_prompt(
+                        config,
+                        format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()),
+                    );
                     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                     continue;
                 }
@@ -1359,14 +1405,25 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
             match classify_with_latch(&input) {
                 QueryComplexity::Simple => {
                     if let Some(fr) = fast_react.as_ref() {
-                        (fr, finalize_prompt(config, FAST_PROMPT.to_string()), Tier::Fast)
+                        (
+                            fr,
+                            finalize_prompt(config, FAST_PROMPT.to_string()),
+                            Tier::Fast,
+                        )
                     } else {
                         (&react, system_prompt.to_string(), Tier::Full)
                     }
                 }
                 QueryComplexity::Deep => {
                     if let Some(dr) = deep_react.as_ref() {
-                        (dr, finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness())), Tier::Deep)
+                        (
+                            dr,
+                            finalize_prompt(
+                                config,
+                                format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()),
+                            ),
+                            Tier::Deep,
+                        )
                     } else {
                         (&react, system_prompt.to_string(), Tier::Full)
                     }
@@ -1375,10 +1432,17 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                     if let Some(sr) = security_react.as_ref() {
                         (
                             sr,
-                            finalize_prompt(config, format!("{}{}", build_security_prompt(
-                            config.llm.security_unrestricted_active(),
-                            &config.llm.security_scripts_dir,
-                        ), crate::tools::halcyon::awareness())),
+                            finalize_prompt(
+                                config,
+                                format!(
+                                    "{}{}",
+                                    build_security_prompt(
+                                        config.llm.security_unrestricted_active(),
+                                        &config.llm.security_scripts_dir,
+                                    ),
+                                    crate::tools::halcyon::awareness()
+                                ),
+                            ),
                             Tier::Security,
                         )
                     } else {
@@ -1445,7 +1509,10 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                             active_react = dr;
                             tier = Tier::Deep;
                             went_deep = true;
-                            effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                            effective_prompt = finalize_prompt(
+                                config,
+                                format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()),
+                            );
                             effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                             continue;
                         }
@@ -1456,7 +1523,10 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                         && crate::llm::react::is_refusal_response(&response)
                         && attempt < 3
                     {
-                        tracing::info!("Model refused on tier {:?} — falling back to uncensored version", tier);
+                        tracing::info!(
+                            "Model refused on tier {:?} — falling back to uncensored version",
+                            tier
+                        );
                         memory.truncate_to(mem_snapshot);
                         if let Some(dr2) = deep_unrestricted_react.as_ref() {
                             active_react = dr2;
@@ -1465,7 +1535,10 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                         }
                         deep_fell_back = true;
                         tier = Tier::Deep;
-                        effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                        effective_prompt = finalize_prompt(
+                            config,
+                            format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()),
+                        );
                         effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                         continue;
                     }
@@ -1495,7 +1568,10 @@ pub async fn run_text(config: &LunaConfig) -> Result<()> {
                         }
                         deep_fell_back = true;
                         tier = Tier::Deep;
-                        effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                        effective_prompt = finalize_prompt(
+                            config,
+                            format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()),
+                        );
                         effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                         continue;
                     }
@@ -1635,14 +1711,25 @@ async fn answer_input(
         match classify_with_latch(input) {
             QueryComplexity::Simple => {
                 if let Some(fr) = fast_react {
-                    (fr, finalize_prompt(config, FAST_PROMPT.to_string()), Tier::Fast)
+                    (
+                        fr,
+                        finalize_prompt(config, FAST_PROMPT.to_string()),
+                        Tier::Fast,
+                    )
                 } else {
                     (react, system_prompt.to_string(), Tier::Full)
                 }
             }
             QueryComplexity::Deep => {
                 if let Some(dr) = deep_react {
-                    (dr, finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness())), Tier::Deep)
+                    (
+                        dr,
+                        finalize_prompt(
+                            config,
+                            format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()),
+                        ),
+                        Tier::Deep,
+                    )
                 } else {
                     (react, system_prompt.to_string(), Tier::Full)
                 }
@@ -1651,10 +1738,17 @@ async fn answer_input(
                 if let Some(sr) = security_react {
                     (
                         sr,
-                        finalize_prompt(config, format!("{}{}", build_security_prompt(
-                            config.llm.security_unrestricted_active(),
-                            &config.llm.security_scripts_dir,
-                        ), crate::tools::halcyon::awareness())),
+                        finalize_prompt(
+                            config,
+                            format!(
+                                "{}{}",
+                                build_security_prompt(
+                                    config.llm.security_unrestricted_active(),
+                                    &config.llm.security_scripts_dir,
+                                ),
+                                crate::tools::halcyon::awareness()
+                            ),
+                        ),
                         Tier::Security,
                     )
                 } else {
@@ -1713,12 +1807,17 @@ async fn answer_input(
                     && crate::llm::react::is_inability_response(&response)
                 {
                     if let Some(dr) = deep_react {
-                        tracing::info!("Full model gave up with no tool run — re-running on the deep model");
+                        tracing::info!(
+                            "Full model gave up with no tool run — re-running on the deep model"
+                        );
                         memory.truncate_to(mem_snapshot);
                         active_react = dr;
                         tier = Tier::Deep;
                         went_deep = true;
-                        effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                        effective_prompt = finalize_prompt(
+                            config,
+                            format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()),
+                        );
                         effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                         continue;
                     }
@@ -1728,7 +1827,10 @@ async fn answer_input(
                     && crate::llm::react::is_refusal_response(&response)
                     && attempt < 3
                 {
-                    tracing::info!("Model refused on tier {:?} — falling back to uncensored version", tier);
+                    tracing::info!(
+                        "Model refused on tier {:?} — falling back to uncensored version",
+                        tier
+                    );
                     memory.truncate_to(mem_snapshot);
                     if let Some(dr2) = deep_unrestricted_react {
                         active_react = dr2;
@@ -1737,7 +1839,10 @@ async fn answer_input(
                     }
                     fell_back_to_unrestricted = true;
                     tier = Tier::Deep;
-                    effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                    effective_prompt = finalize_prompt(
+                        config,
+                        format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()),
+                    );
                     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                     continue;
                 }
@@ -1765,7 +1870,10 @@ async fn answer_input(
                     }
                     fell_back_to_unrestricted = true;
                     tier = Tier::Deep;
-                    effective_prompt = finalize_prompt(config, format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()));
+                    effective_prompt = finalize_prompt(
+                        config,
+                        format!("{}{}", DEEP_PROMPT, crate::tools::halcyon::awareness()),
+                    );
                     effective_prompt.push_str(crate::agent::learning::SELF_AWARENESS);
                     continue;
                 }
@@ -2371,7 +2479,10 @@ mod tests {
         cfg.llm.security_dev_public_key = String::new();
 
         assert!(!cfg.llm.security_unrestricted_active());
-        assert_eq!(super::security_model_in_effect(&cfg).as_deref(), Some("wrn"));
+        assert_eq!(
+            super::security_model_in_effect(&cfg).as_deref(),
+            Some("wrn")
+        );
     }
 
     /// Locked, even with both models configured, the tier is scoped.
@@ -2385,7 +2496,10 @@ mod tests {
         cfg.llm.security_dev_public_key = _pk;
 
         assert!(!cfg.llm.security_unrestricted_active());
-        assert_eq!(super::security_model_in_effect(&cfg).as_deref(), Some("wrn"));
+        assert_eq!(
+            super::security_model_in_effect(&cfg).as_deref(),
+            Some("wrn")
+        );
     }
 
     // ── Unverified write claims ───────────────────────────────────────────────
@@ -2531,12 +2645,7 @@ mod tests {
         // The property, not the exact split: every path, domain and number
         // survives whole. Only a `.` followed by whitespace ends a sentence.
         let joined = got.join("|");
-        for intact in [
-            "/tmp/a/poc_3.py",
-            "example.com",
-            "3.14",
-            "/var/log/sys.log",
-        ] {
+        for intact in ["/tmp/a/poc_3.py", "example.com", "3.14", "/var/log/sys.log"] {
             assert!(
                 joined.contains(intact),
                 "{intact} was split across sentences"
@@ -2601,30 +2710,31 @@ mod tests {
     /// the difference between "failed honestly" and "succeeded" is the number
     /// worth reading.
     /// Does this file parse as Python?
-///
-/// Invokes the interpreter rather than eyeballing the text. Every token a
-/// content heuristic looks for — `def`, `import`, `socket` — survives intact
-/// inside a file whose newlines are the two characters `\` and `n`, which is
-/// exactly the sample that scored as "real" until the metric was fixed.
-///
-/// A missing `python3` is reported as an error rather than skipped: a check
-/// that silently passes when its tool is absent is how a 1/3 result gets
-/// reported as 3/3.
-fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
-    let out = std::process::Command::new("python3")
-        .args(["-m", "py_compile"])
-        .arg(path)
-        .output();
-    match out {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => Err(String::from_utf8_lossy(&o.stderr)
-            .lines().rfind(|l| !l.contains("py_compile"))
-            .unwrap_or("syntax error")
-            .trim()
-            .to_string()),
-        Err(e) => Err(format!("cannot run python3 to verify: {e}")),
+    ///
+    /// Invokes the interpreter rather than eyeballing the text. Every token a
+    /// content heuristic looks for — `def`, `import`, `socket` — survives intact
+    /// inside a file whose newlines are the two characters `\` and `n`, which is
+    /// exactly the sample that scored as "real" until the metric was fixed.
+    ///
+    /// A missing `python3` is reported as an error rather than skipped: a check
+    /// that silently passes when its tool is absent is how a 1/3 result gets
+    /// reported as 3/3.
+    fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
+        let out = std::process::Command::new("python3")
+            .args(["-m", "py_compile"])
+            .arg(path)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr)
+                .lines()
+                .rfind(|l| !l.contains("py_compile"))
+                .unwrap_or("syntax error")
+                .trim()
+                .to_string()),
+            Err(e) => Err(format!("cannot run python3 to verify: {e}")),
+        }
     }
-}
 
     #[tokio::test]
     #[ignore = "needs a live ollama + the security model; writes to /tmp"]
@@ -2646,12 +2756,27 @@ fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
             .unwrap_or(3);
 
         let refused = [
-            "can't help", "cannot help", "i cannot", "i can't", "i won't", "unable to provide",
-            "not able to provide", "i'm sorry", "i am sorry", "not within my capabilities",
+            "can't help",
+            "cannot help",
+            "i cannot",
+            "i can't",
+            "i won't",
+            "unable to provide",
+            "not able to provide",
+            "i'm sorry",
+            "i am sorry",
+            "not within my capabilities",
         ];
         let claims_wrote = [
-            "written to", "i wrote", "i've written", "saved to", "created the file",
-            "file created", "wrote it to", "done —", "successfully wrote",
+            "written to",
+            "i wrote",
+            "i've written",
+            "saved to",
+            "created the file",
+            "file created",
+            "wrote it to",
+            "done —",
+            "successfully wrote",
         ];
 
         let mut wrote = 0usize;
@@ -2662,7 +2787,8 @@ fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
         for i in 1..=n {
             // A fresh directory and a fresh history per run, so run k cannot
             // succeed off the state run k-1 left behind.
-            let dir = std::env::temp_dir().join(format!("luna_sec_e2e_{}_{}", std::process::id(), i));
+            let dir =
+                std::env::temp_dir().join(format!("luna_sec_e2e_{}_{}", std::process::id(), i));
             std::fs::create_dir_all(&dir).unwrap();
             let target = dir.join("poc.py");
 
@@ -2832,11 +2958,9 @@ fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
         std::fs::create_dir_all(&dir).unwrap();
         config.llm.security_scripts_dir = dir.to_string_lossy().into_owned();
 
-        let mut memory = crate::memory::Memory::new(
-            config.memory.context_window,
-            &dir.join("history.json"),
-        )
-        .expect("memory");
+        let mut memory =
+            crate::memory::Memory::new(config.memory.context_window, &dir.join("history.json"))
+                .expect("memory");
 
         let first = super::run_routed_turn("try to attack my laptop", &mut memory, &config)
             .await
@@ -2859,7 +2983,11 @@ fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
 
         println!("target port: {port}");
         println!("turn 1 reply:\n{}\n", first.text.trim());
-        println!("turn 2 model: {}\nturn 2 reply:\n{}", second.model, second.text.trim());
+        println!(
+            "turn 2 model: {}\nturn 2 reply:\n{}",
+            second.model,
+            second.text.trim()
+        );
         println!("files written: {files:?}");
 
         assert!(
@@ -2911,7 +3039,10 @@ fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
         let d = crate::config::LlmConfig::default().security_scripts_dir;
         assert!(d.ends_with("/Documents/luna-scripts"), "got {d}");
         assert!(!d.contains("/tmp"), "the default must not be /tmp: {d}");
-        assert!(std::path::Path::new(&d).is_absolute(), "must be absolute: {d}");
+        assert!(
+            std::path::Path::new(&d).is_absolute(),
+            "must be absolute: {d}"
+        );
     }
 
     /// THE gate test. Setting the config flag to true must change nothing.
@@ -2980,10 +3111,7 @@ fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
             !cfg.security_unrestricted_active(),
             "a configured public key alone enabled unrestricted mode"
         );
-        assert_eq!(
-            cfg.security_gate_state(),
-            crate::unlock::GateState::Locked
-        );
+        assert_eq!(cfg.security_gate_state(), crate::unlock::GateState::Locked);
 
         let prompt = super::build_security_prompt(
             cfg.security_unrestricted_active(),
@@ -3004,8 +3132,8 @@ fn py_compiles(path: &std::path::Path) -> std::result::Result<(), String> {
             "   ",
             "zzz",
             "deadbeef",
-            &"0".repeat(63),  // one short
-            &"0".repeat(65),  // one long
+            &"0".repeat(63), // one short
+            &"0".repeat(65), // one long
             "not a key at all, this is prose someone pasted by mistake",
         ] {
             let mut cfg = crate::config::LlmConfig::default();
@@ -3122,8 +3250,10 @@ security_unrestricted = true
     #[test]
     fn every_json_example_in_the_prompt_is_valid_json() {
         for unrestricted in [false, true] {
-            let prompt =
-                super::build_security_prompt(unrestricted, "/home/netrunner/Documents/luna-scripts");
+            let prompt = super::build_security_prompt(
+                unrestricted,
+                "/home/netrunner/Documents/luna-scripts",
+            );
             let mut checked = 0;
             let mut rest = prompt.as_str();
             while let Some(open) = rest.find('{') {

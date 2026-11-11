@@ -15,8 +15,12 @@ fn check_command_result(result: &shell::ShellOutput) -> Result<()> {
             127 => "required command is missing",
             _ => "failed",
         };
-        anyhow::bail!("Security command {state} (exit {}). stdout: {} stderr: {}",
-            result.exit_code, result.stdout.trim(), result.stderr.trim());
+        anyhow::bail!(
+            "Security command {state} (exit {}). stdout: {} stderr: {}",
+            result.exit_code,
+            result.stdout.trim(),
+            result.stderr.trim()
+        );
     }
     Ok(())
 }
@@ -41,7 +45,9 @@ pub async fn nmap_scan(
         "full-ports" => "-T4 -p- -sV -sC",
         "os" => "-T4 -O",
         "udp" => "-T4 -sU --top-ports 20",
-        _ => anyhow::bail!("Unknown scan type: {scan_type}; use quick, full, ports, full-ports, os or udp"),
+        _ => anyhow::bail!(
+            "Unknown scan type: {scan_type}; use quick, full, ports, full-ports, os or udp"
+        ),
     };
 
     // Hard cap of 3 minutes regardless of scan type — protects the agent
@@ -193,7 +199,10 @@ pub async fn dns_lookup(target: &str, mode: &str, sudo_pass: Option<&str>) -> Re
     let cmd = match mode {
         "dns" => format!("timeout 15 dig +short '{}' ANY 2>&1", safe_target),
         "reverse" => format!("timeout 15 dig +short -x '{}' 2>&1", safe_target),
-        "whois" => format!("set -o pipefail; timeout 20 whois '{}' 2>&1 | sed -n '1,60p'", safe_target),
+        "whois" => format!(
+            "set -o pipefail; timeout 20 whois '{}' 2>&1 | sed -n '1,60p'",
+            safe_target
+        ),
         "mx" => format!("timeout 15 dig +short '{}' MX 2>&1", safe_target),
         _ => format!("timeout 15 dig +short '{}' 2>&1", safe_target),
     };
@@ -239,8 +248,16 @@ pub async fn inspect_headers(
     sudo_pass: Option<&str>,
     allowlist: &[String],
 ) -> Result<String> {
-    let clean = target.trim_start_matches("http://").trim_start_matches("https://");
-    let host = clean.split('/').next().unwrap_or(clean).split(':').next().unwrap_or(clean);
+    let clean = target
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let host = clean
+        .split('/')
+        .next()
+        .unwrap_or(clean)
+        .split(':')
+        .next()
+        .unwrap_or(clean);
     ensure_scan_target_allowed(host, allowlist)?;
     let safe_target = if target.starts_with("http://") || target.starts_with("https://") {
         target.replace('\'', "'\\''")
@@ -254,7 +271,10 @@ pub async fn inspect_headers(
     check_command_result(&result)?;
     let out = result.stdout.trim();
     if out.is_empty() {
-        Ok("No security headers returned (endpoint unreachable or sent no matching headers)".to_string())
+        Ok(
+            "No security headers returned (endpoint unreachable or sent no matching headers)"
+                .to_string(),
+        )
     } else {
         Ok(out.to_string())
     }
@@ -420,7 +440,11 @@ mod scan_scope_tests {
     /// and `127.0.0.1.evil.test` is a real attack.
     #[test]
     fn a_loopback_looking_prefix_is_not_loopback() {
-        for t in ["127.0.0.1.evil.test", "127.example.com", "localhost.evil.test"] {
+        for t in [
+            "127.0.0.1.evil.test",
+            "127.example.com",
+            "localhost.evil.test",
+        ] {
             assert!(!is_loopback_target(t), "{t} should not count as loopback");
         }
     }
@@ -584,8 +608,8 @@ const CAPABILITY_HINTS: &[(&str, &[&str])] = &[
 ///
 /// Common services first, then everything else alphabetically.
 const PREFERRED_SERVICES: &[&str] = &[
-    "ssh", "ftp", "telnet", "smtp", "pop3", "http", "mysql", "redis", "smb", "dns", "mssql",
-    "vnc", "rdp", "imap", "ldap", "rpc", "ssh2",
+    "ssh", "ftp", "telnet", "smtp", "pop3", "http", "mysql", "redis", "smb", "dns", "mssql", "vnc",
+    "rdp", "imap", "ldap", "rpc", "ssh2",
 ];
 
 fn script_priority(fname: &str) -> usize {
@@ -629,10 +653,8 @@ fn installed_scripts(hints: &[&str]) -> Vec<String> {
 /// thousands of files and the point is "yes, you have some", not "here are
 /// forty thousand".
 fn wordlist_dirs() -> Vec<(String, usize)> {
-    let mut candidates: Vec<std::path::PathBuf> = vec![
-        "/usr/share/wordlists".into(),
-        "/usr/share/seclists".into(),
-    ];
+    let mut candidates: Vec<std::path::PathBuf> =
+        vec!["/usr/share/wordlists".into(), "/usr/share/seclists".into()];
     if let Ok(home) = std::env::var("HOME") {
         candidates.push(std::path::PathBuf::from(&home).join("CyberSecurity/wordlist"));
         candidates.push(std::path::PathBuf::from(&home).join("CyberSecurity/wordlist/seclists"));
@@ -657,7 +679,9 @@ fn wordlist_dirs() -> Vec<(String, usize)> {
 /// called `hydra` in `/usr/local/bin` that is not hydra is precisely the kind
 /// of thing that should not be reported as "available".
 async fn probe_installed(name: &str) -> Option<String> {
-    let which = shell::run_command(&format!("command -v {name}"), None).await.ok()?;
+    let which = shell::run_command(&format!("command -v {name}"), None)
+        .await
+        .ok()?;
     let path = which.stdout.trim().to_string();
     if path.is_empty() {
         return None;
@@ -665,7 +689,8 @@ async fn probe_installed(name: &str) -> Option<String> {
     let mut report = path.clone();
     // Bounded: some `--version` paths are interactive, and this runs inside the
     // agent loop where a hang costs a whole turn.
-    if let Ok(v) = shell::run_command(&format!("timeout 10 {name} --version 2>&1 | head -2"), None).await
+    if let Ok(v) =
+        shell::run_command(&format!("timeout 10 {name} --version 2>&1 | head -2"), None).await
     {
         let first = v.stdout.lines().next().unwrap_or("").trim().to_string();
         if !first.is_empty() {
@@ -717,7 +742,8 @@ pub async fn tool_check(name: &str) -> Result<String> {
                     name.to_ascii_lowercase()
                 );
                 if let Ok(r) = shell::run_command(&out_cmd, None).await {
-                    let hits: Vec<&str> = r.stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+                    let hits: Vec<&str> =
+                        r.stdout.lines().filter(|l| !l.trim().is_empty()).collect();
                     if hits.is_empty() {
                         out.push_str(&format!(
                             "  no package named '{name}' in the repos ({})\n",
@@ -732,10 +758,14 @@ pub async fn tool_check(name: &str) -> Result<String> {
                 }
                 // `-Qo` answers "which package owns this file", which is how a
                 // tool ends up installed but off PATH.
-                if let Ok(r) = shell::run_command(&format!("timeout 15 {} {name} 2>&1", pm.owns), None).await
+                if let Ok(r) =
+                    shell::run_command(&format!("timeout 15 {} {name} 2>&1", pm.owns), None).await
                 {
                     let owned = r.stdout.trim();
-                    if !owned.is_empty() && !owned.contains("not owned") && !owned.contains("error:") {
+                    if !owned.is_empty()
+                        && !owned.contains("not owned")
+                        && !owned.contains("error:")
+                    {
                         out.push_str(&format!("  owned by: {owned}\n"));
                     }
                 }
@@ -793,7 +823,11 @@ pub async fn tool_check(name: &str) -> Result<String> {
 /// written down below rather than left as folklore.
 pub const PKG_INSTALL_ALLOWLIST: &[&str] = &[
     // Credential testing and password recovery.
-    "hydra", "ncrack", "medusa", "john", "hashcat",
+    "hydra",
+    "ncrack",
+    "medusa",
+    "john",
+    "hashcat",
     // Recon. `masscan` complements the 71 nmap scripts rather than replacing
     // them. Two of these are named after their *purpose*, not their binary:
     // `wireshark-cli` provides `tshark` (`pacman -S tshark` fails) and
@@ -801,23 +835,33 @@ pub const PKG_INSTALL_ALLOWLIST: &[&str] = &[
     // Both are worth having: exploitdb in particular lets her look up a known
     // CVE by the exact service version nmap returned, offline, instead of
     // inventing one.
-    "nmap", "masscan", "wireshark-cli", "exploitdb", "tcpdump",
+    "nmap",
+    "masscan",
+    "wireshark-cli",
+    "exploitdb",
+    "tcpdump",
     // Service probing and web. `nikto`, `sqlmap`, `gobuster` are the general
     // ones; `wpscan` is WordPress-specific but is in `extra`, not the AUR as
     // commonly claimed, and it is the single most useful thing to have when a
     // honeypot serves a CMS.
-    "nikto", "sqlmap", "gobuster", "wpscan",
+    "nikto",
+    "sqlmap",
+    "gobuster",
+    "wpscan",
     // Transport and shell.
-    "socat", "openbsd-netcat",
+    "socat",
+    "openbsd-netcat",
     // Credential spraying and enumeration. `smbclient` and `openldap` are the
     // official-repo clients; `enum4linux` and `dirb` are not, see below.
-    "smbclient", "openldap",
+    "smbclient",
+    "openldap",
     // Firmware/embedded analysis, for the IoT-shaped targets.
     "binwalk",
     // Wireless, for the WiFi-adjacent questions that keep coming up.
     // `hcxtools` provides `hcxdumptool` for modern WPA2 handshake capture,
     // which then feeds `hashcat` above.
-    "aircrack-ng", "hcxtools",
+    "aircrack-ng",
+    "hcxtools",
 ];
 
 /// Names that `pacman -S` cannot resolve, kept so the mistake is recorded
@@ -860,9 +904,21 @@ pub const PKG_INSTALL_ALLOWLIST: &[&str] = &[
 /// survives for years.
 #[cfg(test)]
 const NOT_IN_OFFICIAL_REPOS: &[&str] = &[
-    "ffuf", "whatweb", "enum4linux", "dirb", "wfuzz", "responder", "netdiscover",
-    "metasploit-framework", "crackmapexec", "netexec", "cewl", "burpsuite",
-    "crunch", "tshark", "searchsploit",
+    "ffuf",
+    "whatweb",
+    "enum4linux",
+    "dirb",
+    "wfuzz",
+    "responder",
+    "netdiscover",
+    "metasploit-framework",
+    "crackmapexec",
+    "netexec",
+    "cewl",
+    "burpsuite",
+    "crunch",
+    "tshark",
+    "searchsploit",
 ];
 
 /// Install one allowlisted package, as root, non-interactively.
@@ -896,7 +952,9 @@ pub async fn pkg_install(
     }
 
     let allowed = PKG_INSTALL_ALLOWLIST.contains(&package.as_str())
-        || extra_allowed.iter().any(|p| p.eq_ignore_ascii_case(&package));
+        || extra_allowed
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(&package));
     if !allowed {
         anyhow::bail!(
             "'{package}' is not on the install allowlist, so it was not installed. Allowed: {}.\n\
@@ -914,7 +972,8 @@ pub async fn pkg_install(
     // Already installed: say so and change nothing. Reinstalling is a no-op on
     // Arch but not on every manager, and "it is already there" is the useful
     // answer when the real problem is that she assumed it was missing.
-    if let Ok(r) = shell::run_command(&format!("timeout 15 {} {package} 2>&1", pm.installed), None).await
+    if let Ok(r) =
+        shell::run_command(&format!("timeout 15 {} {package} 2>&1", pm.installed), None).await
     {
         if r.exit_code == 0 && !r.stdout.trim().is_empty() {
             return Ok(format!(
@@ -940,7 +999,11 @@ pub async fn pkg_install(
     tracing::warn!("pkg_install: installing '{package}' via {}", pm.name);
 
     let out = shell::run_command(&cmd, sudo_pass).await?;
-    let status = if out.exit_code == 0 { "SUCCESS" } else { "FAILED" };
+    let status = if out.exit_code == 0 {
+        "SUCCESS"
+    } else {
+        "FAILED"
+    };
     Ok(format!(
         "pkg_install {status} (exit {}) for '{package}'\ncommand: {}\n\n{}\n{}",
         out.exit_code,
@@ -1297,11 +1360,22 @@ mod result_tests {
     #[test]
     fn failed_scans_are_not_successful_findings() {
         for code in [1, 124, 127] {
-            let result = shell::ShellOutput { stdout: "partial evidence".into(), stderr: "failure detail".into(), exit_code: code };
+            let result = shell::ShellOutput {
+                stdout: "partial evidence".into(),
+                stderr: "failure detail".into(),
+                exit_code: code,
+            };
             let error = check_command_result(&result).unwrap_err().to_string();
             assert!(error.contains("partial evidence") && error.contains("failure detail"));
-            if code == 124 { assert!(error.contains("incomplete")); }
+            if code == 124 {
+                assert!(error.contains("incomplete"));
+            }
         }
-        assert!(check_command_result(&shell::ShellOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }).is_ok());
+        assert!(check_command_result(&shell::ShellOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0
+        })
+        .is_ok());
     }
 }

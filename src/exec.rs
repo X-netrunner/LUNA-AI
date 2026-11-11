@@ -121,10 +121,7 @@ pub enum Outcome {
         path: PathBuf,
     },
     /// Never started. The source is still on disk under `path`.
-    Refused {
-        reason: String,
-        path: PathBuf,
-    },
+    Refused { reason: String, path: PathBuf },
 }
 
 /// What one turn's execution attempt produced, for the answer text.
@@ -156,7 +153,8 @@ pub fn should_execute(answer: &str, input: &str, config: &LunaConfig) -> bool {
     if extract_blocks(answer).is_empty() {
         return false;
     }
-    crate::llm::react::narrates_shell_execution(answer) && crate::llm::react::requests_execution(input)
+    crate::llm::react::narrates_shell_execution(answer)
+        && crate::llm::react::requests_execution(input)
 }
 
 /// Run every runnable block in `answer`, in order.
@@ -322,7 +320,10 @@ pub fn render(answer: &str, report: &Report) -> String {
                 out.push_str(&format!("\nSaved: {}\n", path.display()));
             }
             Outcome::Refused { reason, path } => {
-                out.push_str(&format!(" — NOT RUN: {reason}\n\nSaved for review: {}\n", path.display()));
+                out.push_str(&format!(
+                    " — NOT RUN: {reason}\n\nSaved for review: {}\n",
+                    path.display()
+                ));
             }
         }
     }
@@ -348,9 +349,7 @@ pub fn render(answer: &str, report: &Report) -> String {
 /// without the other is the switch anyone can flip.
 fn authorise(config: &LunaConfig) -> std::result::Result<(), String> {
     if !config.llm.security_auto_execute {
-        return Err(
-            "auto-execution is switched off (`security_auto_execute = false`)".to_string()
-        );
+        return Err("auto-execution is switched off (`security_auto_execute = false`)".to_string());
     }
     if crate::unlock::capabilities_active(
         config.external.allow_capability_actions,
@@ -358,11 +357,9 @@ fn authorise(config: &LunaConfig) -> std::result::Result<(), String> {
     ) {
         Ok(())
     } else {
-        Err(
-            "executing model-authored code needs the developer receipt \
+        Err("executing model-authored code needs the developer receipt \
              (`luna --unlock-security`)"
-                .to_string(),
-        )
+            .to_string())
     }
 }
 
@@ -469,12 +466,58 @@ fn first_non_loopback_ipv4(source: &str) -> (String, bool) {
 fn first_non_loopback_host(source: &str) -> (String, bool) {
     /// Real TLDs, plus the private-use names that appear in local networks.
     const TLDS: &[&str] = &[
-        "com", "net", "org", "edu", "gov", "mil", "int", "info", "biz", "io",
-        "co", "dev", "app", "xyz", "me", "ai", "us", "uk", "ca", "au", "nz",
-        "de", "fr", "es", "it", "nl", "be", "se", "no", "dk", "fi", "pl",
-        "ru", "jp", "cn", "in", "br", "kr", "ch", "at", "cz", "eu", "ie",
-        "local", "localhost", "internal", "intranet", "lan", "home", "test",
-        "example", "invalid",
+        "com",
+        "net",
+        "org",
+        "edu",
+        "gov",
+        "mil",
+        "int",
+        "info",
+        "biz",
+        "io",
+        "co",
+        "dev",
+        "app",
+        "xyz",
+        "me",
+        "ai",
+        "us",
+        "uk",
+        "ca",
+        "au",
+        "nz",
+        "de",
+        "fr",
+        "es",
+        "it",
+        "nl",
+        "be",
+        "se",
+        "no",
+        "dk",
+        "fi",
+        "pl",
+        "ru",
+        "jp",
+        "cn",
+        "in",
+        "br",
+        "kr",
+        "ch",
+        "at",
+        "cz",
+        "eu",
+        "ie",
+        "local",
+        "localhost",
+        "internal",
+        "intranet",
+        "lan",
+        "home",
+        "test",
+        "example",
+        "invalid",
     ];
 
     for word in source.split(|c: char| !(c.is_alphanumeric() || c == '.' || c == '-')) {
@@ -526,10 +569,7 @@ fn word_present(source: &str, word: &str) -> bool {
 pub fn extract_blocks(answer: &str) -> Vec<Block> {
     extract_all_blocks(answer)
         .into_iter()
-        .filter(|b| {
-            INTERPRETERS.iter().any(|(l, _)| *l == b.lang)
-                && !b.body.trim().is_empty()
-        })
+        .filter(|b| INTERPRETERS.iter().any(|(l, _)| *l == b.lang) && !b.body.trim().is_empty())
         .map(|b| Block {
             lang: b.lang,
             source: b.body.trim_end().to_string(),
@@ -586,23 +626,22 @@ pub fn extract_all_blocks(answer: &str) -> Vec<RawBlock> {
         // three hand-off turns were the same. Those are exactly the turns worth
         // executing, so this is the case that decides whether the feature works.
         let tail = &answer[after..];
-        let info_end = tail
-            .find(|c: char| c.is_whitespace())
-            .unwrap_or(tail.len());
+        let info_end = tail.find(|c: char| c.is_whitespace()).unwrap_or(tail.len());
         let lang = tail[..info_end].trim().to_ascii_lowercase();
 
         let mut body_start = after + info_end;
-        while body_start < answer.len() && answer[body_start..].starts_with(|c: char| c.is_whitespace())
+        while body_start < answer.len()
+            && answer[body_start..].starts_with(|c: char| c.is_whitespace())
         {
             body_start += 1;
         }
 
         let push = |out: &mut Vec<RawBlock>,
-                     lang: &str,
-                     source: &str,
-                     before: &str,
-                     start: usize,
-                     end: usize| {
+                    lang: &str,
+                    source: &str,
+                    before: &str,
+                    start: usize,
+                    end: usize| {
             out.push(RawBlock {
                 lang: lang.to_string(),
                 body: source.trim_end().to_string(),
@@ -658,17 +697,23 @@ fn log_dir() -> Result<PathBuf> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let dir = base.join(format!("{stamp}"));
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir)
 }
 
 fn write_block(dir: &Path, index: usize, block: &Block) -> Result<PathBuf> {
-    let ext = if block.lang.starts_with("py") { "py" } else { "sh" };
+    let ext = if block.lang.starts_with("py") {
+        "py"
+    } else {
+        "sh"
+    };
     let path = dir.join(format!("block{index}.{ext}"));
     // A header naming the language, because a block logged as `.sh` that is
     // Python is a genuinely confusing thing to find on disk later.
-    let header = format!("# luna auto-execute: block {index}, language {}\n", block.lang);
+    let header = format!(
+        "# luna auto-execute: block {index}, language {}\n",
+        block.lang
+    );
     std::fs::write(&path, format!("{header}{}", block.source))
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
@@ -736,7 +781,11 @@ mod tests {
     #[test]
     fn ordinary_python_is_not_mistaken_for_a_hostname() {
         let s = "import socket\ns = socket.socket()\ns.connect(('127.0.0.1', 22))\n";
-        assert!(refusal_reason(s).is_none(), "{}", refusal_reason(s).unwrap_or_default());
+        assert!(
+            refusal_reason(s).is_none(),
+            "{}",
+            refusal_reason(s).unwrap_or_default()
+        );
         assert!(refusal_reason("import paramiko\n").is_none());
         assert!(refusal_reason("from ftplib import FTP\n").is_none());
         // The two that broke the first version of the host check.
@@ -824,7 +873,11 @@ mod tests {
         let b = extract_blocks(real);
         assert_eq!(b.len(), 2, "got {b:?}");
         assert_eq!(b[0].lang, "python");
-        assert!(b[0].source.contains("import paramiko"), "got: {}", b[0].source);
+        assert!(
+            b[0].source.contains("import paramiko"),
+            "got: {}",
+            b[0].source
+        );
         // The info string must not swallow the code.
         assert!(!b[0].source.contains("python"), "lang leaked into body");
         assert_eq!(b[1].lang, "sh");
@@ -860,7 +913,8 @@ mod tests {
     /// sequence that silenced the guard, was a realistic path and not a corner.
     #[test]
     fn a_hand_off_needs_correction_even_after_other_tools_succeeded() {
-        let hand_off = "Save this script to ~/x.py and run it with:\n\n```bash\npython3 ~/x.py\n```";
+        let hand_off =
+            "Save this script to ~/x.py and run it with:\n\n```bash\npython3 ~/x.py\n```";
         // run_shell did NOT run this turn.
         assert!(
             crate::llm::react::narration_needs_correction(false, hand_off, 0),
@@ -868,14 +922,10 @@ mod tests {
         );
         // It must not fire once the shell really did run, or after the cap.
         assert!(!crate::llm::react::narration_needs_correction(
-            true,
-            hand_off,
-            0
+            true, hand_off, 0
         ));
         assert!(!crate::llm::react::narration_needs_correction(
-            false,
-            hand_off,
-            2
+            false, hand_off, 2
         ));
         // And still not fire on an honest explanation.
         assert!(!crate::llm::react::narration_needs_correction(
@@ -914,7 +964,10 @@ mod tests {
             !marker().exists(),
             "the script ran with the capability gate closed"
         );
-        assert!(report.outcomes.is_empty(), "nothing should have been attempted");
+        assert!(
+            report.outcomes.is_empty(),
+            "nothing should have been attempted"
+        );
         let out = render(&answer, &report);
         assert!(
             out.contains("I did not run any of the above"),
@@ -946,7 +999,10 @@ mod tests {
         );
         let out = render(&answer, &report);
         assert!(out.contains("I ran this myself"), "got: {out}");
-        assert!(out.contains("stdout-was-captured"), "stdout not shown: {out}");
+        assert!(
+            out.contains("stdout-was-captured"),
+            "stdout not shown: {out}"
+        );
         let _ = std::fs::remove_file(marker());
     }
 
@@ -1010,8 +1066,8 @@ mod tests {
         let report = run(&answer, &cfg).await;
         match &report.outcomes[0] {
             Outcome::Refused { path, .. } => {
-                let logged = std::fs::read_to_string(path)
-                    .expect("the refused block must be on disk");
+                let logged =
+                    std::fs::read_to_string(path).expect("the refused block must be on disk");
                 assert!(
                     logged.contains("sudo rm -rf"),
                     "the log must hold the source verbatim, got: {logged}"

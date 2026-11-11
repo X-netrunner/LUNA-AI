@@ -4,13 +4,16 @@ use crate::config::{LunaConfig, VoiceMode};
 use crate::memory::Memory;
 use crate::tui::log::LogBuffer;
 use crate::tui::onboarding::Onboarding;
-use crate::tui::widgets::{ChatHistory, ConfigEditorModal, DebugPanel, InputLine, SettingsMenuModal, ShortcutsBar, ShortcutsModal, SlashCommandMenu, StatusBar};
+use crate::tui::widgets::{
+    ChatHistory, ConfigEditorModal, DebugPanel, InputLine, SettingsMenuModal, ShortcutsBar,
+    ShortcutsModal, SlashCommandMenu, StatusBar,
+};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -248,7 +251,11 @@ impl ConfigState {
     }
 
     pub fn move_right(&mut self) {
-        let line_len = self.lines.get(self.cursor_row).map(|l| l.len()).unwrap_or(0);
+        let line_len = self
+            .lines
+            .get(self.cursor_row)
+            .map(|l| l.len())
+            .unwrap_or(0);
         if self.cursor_col < line_len {
             self.cursor_col += 1;
         } else if self.cursor_row + 1 < self.lines.len() {
@@ -284,13 +291,23 @@ impl ConfigState {
 
     pub fn page_up(&mut self, amount: usize) {
         self.cursor_row = self.cursor_row.saturating_sub(amount);
-        self.cursor_col = self.cursor_col.min(self.lines.get(self.cursor_row).map(|l| l.len()).unwrap_or(0));
+        self.cursor_col = self.cursor_col.min(
+            self.lines
+                .get(self.cursor_row)
+                .map(|l| l.len())
+                .unwrap_or(0),
+        );
     }
 
     pub fn page_down(&mut self, amount: usize) {
         if !self.lines.is_empty() {
             self.cursor_row = (self.cursor_row + amount).min(self.lines.len() - 1);
-            self.cursor_col = self.cursor_col.min(self.lines.get(self.cursor_row).map(|l| l.len()).unwrap_or(0));
+            self.cursor_col = self.cursor_col.min(
+                self.lines
+                    .get(self.cursor_row)
+                    .map(|l| l.len())
+                    .unwrap_or(0),
+            );
         }
     }
 
@@ -307,7 +324,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "Clear conversation history & reset memory"),
     ("/voice", "Toggle hands-free voice mode (on/off)"),
     ("/shortcuts", "Toggle bottom shortcuts keybindings bar"),
-    ("/debug", "Run full system diagnostic & write to Debug Panel"),
+    (
+        "/debug",
+        "Run full system diagnostic & write to Debug Panel",
+    ),
     ("/test-voice", "Test Piper TTS & RVC voice subsystem"),
     ("/test-model", "Test LLM Ollama model connectivity"),
     ("/test-stt", "Test Whisper STT audio device & model"),
@@ -569,7 +589,9 @@ impl SettingsMenuState {
                         match item.key {
                             "llm.enable_thinking" => self.config.llm.enable_thinking = val,
                             "llm.auto_route" => self.config.llm.auto_route = val,
-                            "llm.security_retry_on_refusal" => self.config.llm.security_retry_on_refusal = val,
+                            "llm.security_retry_on_refusal" => {
+                                self.config.llm.security_retry_on_refusal = val
+                            }
                             "agent.native_tools" => self.config.agent.native_tools = val,
                             "wake.enabled" => self.config.wake.enabled = val,
                             "wake.overlay_enabled" => self.config.wake.overlay_enabled = val,
@@ -578,8 +600,12 @@ impl SettingsMenuState {
                             "daemon.enabled" => self.config.daemon.enabled = val,
                             "daemon.learning_enabled" => self.config.daemon.learning_enabled = val,
                             "daemon.disk_cleanup" => self.config.daemon.disk_cleanup = val,
-                            "external.allow_external_actions" => self.config.external.allow_external_actions = val,
-                            "external.allow_halcyon_actions" => self.config.external.allow_halcyon_actions = val,
+                            "external.allow_external_actions" => {
+                                self.config.external.allow_external_actions = val
+                            }
+                            "external.allow_halcyon_actions" => {
+                                self.config.external.allow_halcyon_actions = val
+                            }
                             "updates.allow_apply" => self.config.updates.allow_apply = val,
                             "selfpatch.enabled" => self.config.selfpatch.enabled = val,
                             "vision.enabled" => self.config.vision.enabled = val,
@@ -590,7 +616,11 @@ impl SettingsMenuState {
                             _ => {}
                         }
                         self.modified = true;
-                        self.status = format!("✓ Toggled {} to {} [Press S to save]", item.label, if val { "ON" } else { "OFF" });
+                        self.status = format!(
+                            "✓ Toggled {} to {} [Press S to save]",
+                            item.label,
+                            if val { "ON" } else { "OFF" }
+                        );
                     }
                     SettingType::Value(ref mut v) => {
                         if item.key == "voice.mode" {
@@ -602,7 +632,8 @@ impl SettingsMenuState {
                             self.config.voice.mode = next_mode;
                             *v = next_str.to_string();
                             self.modified = true;
-                            self.status = format!("✓ Switched Voice Mode to {} [Press S to save]", next_str);
+                            self.status =
+                                format!("✓ Switched Voice Mode to {} [Press S to save]", next_str);
                         }
                     }
                 }
@@ -649,7 +680,11 @@ impl SettingsMenuState {
         use crate::unlock::GateState;
         let st = self.gate_state_of(key);
         let cap = key == "external.allow_capability_actions";
-        let label = if cap { "Capability Actions" } else { "No-Refusal Mode" };
+        let label = if cap {
+            "Capability Actions"
+        } else {
+            "No-Refusal Mode"
+        };
         let other = if cap {
             "It shares the developer key with No-Refusal Mode, but has its own switch: Luna may \
              still scan hosts, harden the system, or edit her own source."
@@ -700,7 +735,11 @@ impl SettingsMenuState {
     pub fn set_signed_switch(&mut self, key: &'static str, want: bool) -> bool {
         use crate::unlock::GateState;
         let cap = key == "external.allow_capability_actions";
-        let label = if cap { "Capability Actions" } else { "No-Refusal Mode" };
+        let label = if cap {
+            "Capability Actions"
+        } else {
+            "No-Refusal Mode"
+        };
 
         if cap {
             self.config.external.allow_capability_actions = want;
@@ -724,7 +763,11 @@ impl SettingsMenuState {
                     "🔒 {label}: OFF. The developer receipt was NOT deleted — \
                      {} is still on and shares it. Use `luna --lock-security` to revoke the key \
                      for real. [Press S to save]",
-                    if cap { "No-Refusal Mode" } else { "Capability Actions" }
+                    if cap {
+                        "No-Refusal Mode"
+                    } else {
+                        "Capability Actions"
+                    }
                 )
             } else {
                 format!(
@@ -739,8 +782,7 @@ impl SettingsMenuState {
             GateState::Unlocked => {
                 self.refresh_signed_items();
                 self.modified = true;
-                self.status =
-                    format!("🔓 {label}: ON (developer key verified). [Press S to save]");
+                self.status = format!("🔓 {label}: ON (developer key verified). [Press S to save]");
                 false
             }
             GateState::Unavailable => {
@@ -995,9 +1037,18 @@ impl TuiApp {
         let tts_env_py = home.join(".local/share/luna/tts_env/bin/python3");
         let sys_py = std::path::Path::new("/usr/bin/python3");
 
-        tracing::info!("Python env check -> rvc_env exists: {}", rvc_env_py.exists());
-        tracing::info!("Python env check -> tts_env exists: {}", tts_env_py.exists());
-        tracing::info!("Python env check -> /usr/bin/python3 exists: {}", sys_py.exists());
+        tracing::info!(
+            "Python env check -> rvc_env exists: {}",
+            rvc_env_py.exists()
+        );
+        tracing::info!(
+            "Python env check -> tts_env exists: {}",
+            tts_env_py.exists()
+        );
+        tracing::info!(
+            "Python env check -> /usr/bin/python3 exists: {}",
+            sys_py.exists()
+        );
 
         let active_py = if rvc_env_py.exists() {
             rvc_env_py.display().to_string()
@@ -1012,13 +1063,37 @@ impl TuiApp {
 
         let piper_ok = self.config.voice.piper_bin.exists();
         let piper_model_ok = self.config.voice.piper_model.exists();
-        let rvc_script_ok = self.config.voice.rvc_script.as_ref().map(|p| p.exists()).unwrap_or(false);
-        let rvc_model_ok = self.config.voice.rvc_model.as_ref().map(|p| p.exists()).unwrap_or(false);
+        let rvc_script_ok = self
+            .config
+            .voice
+            .rvc_script
+            .as_ref()
+            .map(|p| p.exists())
+            .unwrap_or(false);
+        let rvc_model_ok = self
+            .config
+            .voice
+            .rvc_model
+            .as_ref()
+            .map(|p| p.exists())
+            .unwrap_or(false);
 
-        tracing::info!("Component files check -> Piper Bin: {}", if piper_ok { "OK" } else { "MISSING" });
-        tracing::info!("Component files check -> Piper Model: {}", if piper_model_ok { "OK" } else { "MISSING" });
-        tracing::info!("Component files check -> RVC Script: {}", if rvc_script_ok { "OK" } else { "NOT FOUND" });
-        tracing::info!("Component files check -> RVC Model: {}", if rvc_model_ok { "OK" } else { "NOT FOUND" });
+        tracing::info!(
+            "Component files check -> Piper Bin: {}",
+            if piper_ok { "OK" } else { "MISSING" }
+        );
+        tracing::info!(
+            "Component files check -> Piper Model: {}",
+            if piper_model_ok { "OK" } else { "MISSING" }
+        );
+        tracing::info!(
+            "Component files check -> RVC Script: {}",
+            if rvc_script_ok { "OK" } else { "NOT FOUND" }
+        );
+        tracing::info!(
+            "Component files check -> RVC Model: {}",
+            if rvc_model_ok { "OK" } else { "NOT FOUND" }
+        );
 
         let summary = format!(
             "Voice Subsystem Diagnostic:\n\
@@ -1102,7 +1177,9 @@ impl TuiApp {
         tracing::info!("History Path: {:?}", self.config.memory.history_path);
         tracing::info!("Active Chat UI Messages: {}", self.messages.len());
 
-        let perm_path = dirs::home_dir().unwrap_or_default().join(".local/share/luna/permanent_memory.json");
+        let perm_path = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".local/share/luna/permanent_memory.json");
         let perm_exists = perm_path.exists();
         tracing::info!("Permanent Memory File Exists: {}", perm_exists);
 
@@ -1116,7 +1193,11 @@ impl TuiApp {
             self.config.memory.context_window,
             self.config.memory.history_path,
             self.messages.len(),
-            if perm_exists { "Found" } else { "Not created yet" }
+            if perm_exists {
+                "Found"
+            } else {
+                "Not created yet"
+            }
         );
 
         self.messages.push(Msg {
@@ -1346,12 +1427,10 @@ impl TuiApp {
                 // Strip leading wake word so "Luna, what's the time" shows as
                 // just "what's the time" and the command-matching functions
                 // get clean input.
-                let stripped = crate::audio::capture::strip_wake_word(
-                    raw,
-                    &self.config.audio.wake_aliases,
-                )
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| raw.to_string());
+                let stripped =
+                    crate::audio::capture::strip_wake_word(raw, &self.config.audio.wake_aliases)
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| raw.to_string());
                 let lower = stripped.trim().to_lowercase();
 
                 // ── Hands-free voice mode active ─────────────────────────
@@ -1368,7 +1447,8 @@ impl TuiApp {
                         return;
                     }
                     // Normal hands-free question: answer it and reset idle timer
-                    self.last_voice_activity.store(millis_now(), Ordering::Relaxed);
+                    self.last_voice_activity
+                        .store(millis_now(), Ordering::Relaxed);
                     self.add_user_message(&stripped);
                     crate::overlay::signal("thinking");
                     self.submit(stripped);
@@ -1378,7 +1458,8 @@ impl TuiApp {
                 // ── Hands-free OFF: did this wake utterance toggle voice mode on?
                 if crate::agent::wake_toggles_voice_mode(&lower) {
                     self.handsfree_active.store(true, Ordering::Relaxed);
-                    self.last_voice_activity.store(millis_now(), Ordering::Relaxed);
+                    self.last_voice_activity
+                        .store(millis_now(), Ordering::Relaxed);
                     let wake = self.config.audio.wake_word.clone();
                     let msg = format!(
                         "[Voice mode ON — hands-free. Say \"{wake} voice mode off\" to turn it off]"
@@ -1401,10 +1482,11 @@ impl TuiApp {
             AppEvent::OnboardingLog(line) => self.app_emit(&line),
             AppEvent::SpotifyAuthed => {
                 // The refresh token lives in the keyring; point config at it.
-                self.config.spotify.refresh_token =
-                    Some("keyring:spotify_refresh".to_string());
+                self.config.spotify.refresh_token = Some("keyring:spotify_refresh".to_string());
                 match self.config.save() {
-                    Ok(()) => self.app_emit("✓ Spotify authorized. Say \"play my liked songs\" anytime."),
+                    Ok(()) => {
+                        self.app_emit("✓ Spotify authorized. Say \"play my liked songs\" anytime.")
+                    }
                     Err(e) => self.app_emit(&format!("✗ {e}")),
                 }
             }
@@ -1414,7 +1496,12 @@ impl TuiApp {
     /// Show a setup/progress line: in the onboarding panel when it's open,
     /// otherwise as a chat message.
     fn app_emit(&mut self, line: &str) {
-        if self.onboarding.as_ref().map(Onboarding::is_active).unwrap_or(false) {
+        if self
+            .onboarding
+            .as_ref()
+            .map(Onboarding::is_active)
+            .unwrap_or(false)
+        {
             if let Some(onb) = &mut self.onboarding {
                 onb.log(line);
             }
@@ -1440,7 +1527,9 @@ impl TuiApp {
         // the prompt rather than dropping it.
         let (key, want) = match self.settings_menu.as_mut() {
             Some(sm) => {
-                let Some(key) = sm.signed_item_key() else { return };
+                let Some(key) = sm.signed_item_key() else {
+                    return;
+                };
                 let want = sm.gate_state_of(key) != crate::unlock::GateState::Unlocked;
                 (key, want)
             }
@@ -1452,19 +1541,18 @@ impl TuiApp {
         if sm.set_signed_switch(key, want) {
             // A key is needed. When none is configured, say so in the modal
             // instead of collecting a key that could never work.
-            let unavailable_reason = if !crate::unlock::has_public_key(
-                &self.config.llm.security_dev_public_key,
-            ) {
-                Some(
-                    "No developer public key is configured.\n\n\
+            let unavailable_reason =
+                if !crate::unlock::has_public_key(&self.config.llm.security_dev_public_key) {
+                    Some(
+                        "No developer public key is configured.\n\n\
                      Run:  luna --gen-dev-key\n\
                      Put the public key in luna.toml as [llm] security_dev_public_key\n\
                      Then come back and press Space again."
-                        .to_string(),
-                )
-            } else {
-                None
-            };
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
             self.dev_key_prompt = Some(DevKeyPrompt {
                 input: String::new(),
                 error: None,
@@ -1485,7 +1573,8 @@ impl TuiApp {
     fn refresh_conversation_window(&mut self) {
         let secs = self.config.audio.conversation_window_secs;
         if secs > 0 {
-            self.window_deadline.store(millis_now() + secs * 1000, Ordering::Relaxed);
+            self.window_deadline
+                .store(millis_now() + secs * 1000, Ordering::Relaxed);
         }
     }
 
@@ -1547,7 +1636,12 @@ impl TuiApp {
 
     fn handle_key(&mut self, key: KeyEvent) {
         // First-run setup screen steals the keyboard until dismissed.
-        if self.onboarding.as_ref().map(Onboarding::is_active).unwrap_or(false) {
+        if self
+            .onboarding
+            .as_ref()
+            .map(Onboarding::is_active)
+            .unwrap_or(false)
+        {
             self.handle_onboarding_key(key);
             return;
         }
@@ -1577,7 +1671,9 @@ impl TuiApp {
                     self.settings_menu = None;
                     self.config_editor = Some(ConfigState::load());
                 }
-                (_, KeyCode::Tab) | (_, KeyCode::Right) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                (_, KeyCode::Tab) | (_, KeyCode::Right)
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
                     sm.next_category();
                 }
                 (_, KeyCode::Left) if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1598,10 +1694,9 @@ impl TuiApp {
                 // An explicit, discoverable route to the same place. The security
                 // item is a Value, not a Toggle, so Space is ambiguous — and a
                 // user who wants this should not have to guess which key opens it.
-                (_, KeyCode::Char('u')) | (_, KeyCode::Char('U'))
-                    if sm.is_on_security_item() => {
-                        self.press_security_item();
-                    }
+                (_, KeyCode::Char('u')) | (_, KeyCode::Char('U')) if sm.is_on_security_item() => {
+                    self.press_security_item();
+                }
                 _ => {}
             }
             return;
@@ -1731,11 +1826,16 @@ impl TuiApp {
                     self.cursor_pos = 0;
                     let trimmed = user_input.trim();
                     let lower = trimmed.to_lowercase();
-                    if lower == "/config" || lower == "/settings" || lower == ":config" || lower == ":settings" {
+                    if lower == "/config"
+                        || lower == "/settings"
+                        || lower == ":config"
+                        || lower == ":settings"
+                    {
                         self.settings_menu = Some(SettingsMenuState::load(self.config.clone()));
                         return;
                     }
-                    if lower == "/toml" || lower == ":toml" || lower == "/edit" || lower == ":edit" {
+                    if lower == "/toml" || lower == ":toml" || lower == "/edit" || lower == ":edit"
+                    {
                         self.config_editor = Some(ConfigState::load());
                         return;
                     }
@@ -1789,7 +1889,10 @@ impl TuiApp {
                         tracing::info!("[DEBUG USER] {}", msg_text);
                         self.messages.push(Msg {
                             role: "assistant".into(),
-                            content: format!("[Debug log written to Debug Panel: \"{}\"]", msg_text),
+                            content: format!(
+                                "[Debug log written to Debug Panel: \"{}\"]",
+                                msg_text
+                            ),
                             thinking: None,
                         });
                         return;
@@ -1810,7 +1913,11 @@ impl TuiApp {
                         self.run_memory_debug();
                         return;
                     }
-                    if lower == "/debug" || lower == "/debug help" || lower == "/debug status" || lower == "/debug all" {
+                    if lower == "/debug"
+                        || lower == "/debug help"
+                        || lower == "/debug status"
+                        || lower == "/debug all"
+                    {
                         self.run_all_debug();
                         return;
                     }
@@ -1960,7 +2067,9 @@ impl TuiApp {
 
     fn activate_onboarding_row(&mut self) {
         let (idx, id) = {
-            let Some(onb) = &mut self.onboarding else { return };
+            let Some(onb) = &mut self.onboarding else {
+                return;
+            };
             let rows = onb.actions(&self.config);
             let idx = onb.cursor.min(rows.len().saturating_sub(1));
             (idx, rows.get(idx).map(|r| r.id))
@@ -1984,7 +2093,9 @@ impl TuiApp {
     /// Save an entered secret (onboarding flow) to the keyring and config.
     fn commit_secret(&mut self) {
         let (keyring_name, label) = {
-            let Some(onb) = &mut self.onboarding else { return };
+            let Some(onb) = &mut self.onboarding else {
+                return;
+            };
             let rows = onb.actions(&self.config);
             let Some(row) = rows.get(onb.cursor) else {
                 onb.cancel_secret();
@@ -2179,20 +2290,17 @@ impl TuiApp {
         let id = match &self.config.spotify.client_id {
             Some(a) if !a.trim().is_empty() => a.clone(),
             _ => {
-                self.app_emit(
-                    "Store your Spotify client id first with `--set-key spotify_id`.",
-                );
+                self.app_emit("Store your Spotify client id first with `--set-key spotify_id`.");
                 return;
             }
         };
         self.app_emit("Starting Spotify authorization — a browser tab will open.");
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let result =
-                crate::tools::spotify::authorize_with(&id, |line| {
-                    let _ = tx.send(AppEvent::OnboardingLog(format!("  {line}")));
-                })
-                .await;
+            let result = crate::tools::spotify::authorize_with(&id, |line| {
+                let _ = tx.send(AppEvent::OnboardingLog(format!("  {line}")));
+            })
+            .await;
             match result {
                 Ok(_) => {
                     let _ = tx.send(AppEvent::SpotifyAuthed);
@@ -2216,12 +2324,10 @@ impl TuiApp {
         let trimmed = user_input.trim().to_string();
         // Strip a leading wake word ("luna voice mode") for clean display and
         // so the same command matchers used by the hybrid loop apply here.
-        let stripped = crate::audio::capture::strip_wake_word(
-            &trimmed,
-            &self.config.audio.wake_aliases,
-        )
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| trimmed.clone());
+        let stripped =
+            crate::audio::capture::strip_wake_word(&trimmed, &self.config.audio.wake_aliases)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| trimmed.clone());
         let lower = stripped.trim().to_lowercase();
 
         // ── CLI-style flags typed into chat are handled here, exactly like
@@ -2255,8 +2361,8 @@ impl TuiApp {
                         _ => {
                             self.messages.push(Msg {
                                 role: "assistant".into(),
-                                content:
-                                    "[Usage: --set-key <name> — e.g. `--set-key tavily`]".into(),
+                                content: "[Usage: --set-key <name> — e.g. `--set-key tavily`]"
+                                    .into(),
                                 thinking: None,
                             });
                             self.chat_scroll = 0;
@@ -2302,7 +2408,8 @@ impl TuiApp {
                 return;
             }
             self.handsfree_active.store(true, Ordering::Relaxed);
-            self.last_voice_activity.store(millis_now(), Ordering::Relaxed);
+            self.last_voice_activity
+                .store(millis_now(), Ordering::Relaxed);
             let wake = self.config.audio.wake_word.clone();
             let msg = format!(
                 "[Voice mode ON — hands-free. Say \"{wake} voice mode off\" to turn it off]"
@@ -2422,7 +2529,8 @@ impl TuiApp {
             match result {
                 Ok(outcome) => {
                     if config.voice.mode != crate::config::VoiceMode::Off {
-                        if let Err(e) = crate::tts::speak(&outcome.text, &config.voice.mode, &config).await
+                        if let Err(e) =
+                            crate::tts::speak(&outcome.text, &config.voice.mode, &config).await
                         {
                             tracing::warn!("TTS error: {}", e);
                         }
@@ -2438,12 +2546,8 @@ impl TuiApp {
                         // which model was configured.
                         thinking: outcome.thinking,
                     };
-                    let _ = response_tx.send(AppEvent::Response(
-                        msg,
-                        latency,
-                        memory,
-                        outcome.model,
-                    ));
+                    let _ =
+                        response_tx.send(AppEvent::Response(msg, latency, memory, outcome.model));
                 }
                 Err(e) => {
                     let msg = Msg {
@@ -2482,19 +2586,19 @@ impl TuiApp {
             Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),  // Status bar
-                    Constraint::Min(8),     // Chat + debug
-                    Constraint::Length(3),  // Input line
-                    Constraint::Length(1),  // Shortcuts bar
+                    Constraint::Length(3), // Status bar
+                    Constraint::Min(8),    // Chat + debug
+                    Constraint::Length(3), // Input line
+                    Constraint::Length(1), // Shortcuts bar
                 ])
                 .split(size)
         } else {
             Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),  // Status bar
-                    Constraint::Min(9),     // Chat + debug
-                    Constraint::Length(3),  // Input line
+                    Constraint::Length(3), // Status bar
+                    Constraint::Min(9),    // Chat + debug
+                    Constraint::Length(3), // Input line
                 ])
                 .split(size)
         };
@@ -2507,8 +2611,16 @@ impl TuiApp {
 
         let gpu = self.metrics.gpu.load(Ordering::Relaxed);
         let cpu = self.metrics.cpu.load(Ordering::Relaxed);
-        let gpu_str = if gpu == 0 { "N/A".to_string() } else { format!("{}%", gpu) };
-        let cpu_str = if cpu == 0 { "N/A".to_string() } else { format!("{}%", cpu) };
+        let gpu_str = if gpu == 0 {
+            "N/A".to_string()
+        } else {
+            format!("{}%", gpu)
+        };
+        let cpu_str = if cpu == 0 {
+            "N/A".to_string()
+        } else {
+            format!("{}%", cpu)
+        };
 
         // Status bar
         let status = StatusBar::new(
@@ -2527,7 +2639,12 @@ impl TuiApp {
         } else {
             None
         };
-        let chat = ChatHistory::new(&self.messages, self.chat_scroll, self.focus == Focus::Chat, live);
+        let chat = ChatHistory::new(
+            &self.messages,
+            self.chat_scroll,
+            self.focus == Focus::Chat,
+            live,
+        );
         f.render_widget(chat, mid[0]);
 
         // Debug panel (right side)
@@ -2714,9 +2831,13 @@ impl TuiApp {
         }
 
         // Cursor
-        if self.dev_key_prompt.is_none() && self.config_editor.is_none() && self.settings_menu.is_none()
+        if self.dev_key_prompt.is_none()
+            && self.config_editor.is_none()
+            && self.settings_menu.is_none()
         {
-            if let Some(cursor_area) = InputLine::cursor_area(outer[2], self.cursor_pos, &self.input) {
+            if let Some(cursor_area) =
+                InputLine::cursor_area(outer[2], self.cursor_pos, &self.input)
+            {
                 f.set_cursor_position(cursor_area);
             }
         }
@@ -2726,7 +2847,10 @@ impl TuiApp {
 /// Query NVIDIA GPU utilization (%) via nvidia-smi. Returns None if unavailable.
 async fn gpu_utilization() -> Option<u64> {
     let out = tokio::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .await
         .ok()?;
@@ -2893,7 +3017,10 @@ mod security_gate_tests {
             }
         }
         sm.modified = false;
-        assert_eq!(sm.signed_item_key(), Some("external.allow_capability_actions"));
+        assert_eq!(
+            sm.signed_item_key(),
+            Some("external.allow_capability_actions")
+        );
         sm.toggle_selected();
         assert!(
             !sm.config.external.allow_capability_actions,
@@ -2941,7 +3068,10 @@ mod security_gate_tests {
 
         let needs_prompt = sm.set_security_unrestricted(true);
         assert!(needs_prompt, "a key prompt is needed when locked");
-        assert!(sm.config.llm.security_unrestricted, "the request should persist");
+        assert!(
+            sm.config.llm.security_unrestricted,
+            "the request should persist"
+        );
         assert!(
             !sm.config.llm.security_unrestricted_active(),
             "locked, so the effective state must be off"

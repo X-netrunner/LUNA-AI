@@ -32,9 +32,9 @@ pub async fn learn(
 
     if let Some(url) = url {
         output.push_str(&format!("=== Fetched page: {} ===\n", url));
-        let page = fetch_page_firecrawl(&url).await.unwrap_or_else(|e| {
-            format!("(Firecrawl failed: {} — try fetch_page directly)", e)
-        });
+        let page = fetch_page_firecrawl(&url)
+            .await
+            .unwrap_or_else(|e| format!("(Firecrawl failed: {} — try fetch_page directly)", e));
         output.push_str(&page);
     } else {
         output.push_str(
@@ -93,9 +93,12 @@ async fn fetch_page_firecrawl(url: &str) -> Result<String> {
         std::process::Command::new("curl")
             .args([
                 "-s",
-                "--max-time", "30",
-                "-H", "Content-Type: application/json",
-                "-d", &body_str,
+                "--max-time",
+                "30",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &body_str,
                 "https://api.firecrawl.dev/v1/scrape",
             ])
             .output()
@@ -104,9 +107,8 @@ async fn fetch_page_firecrawl(url: &str) -> Result<String> {
     .await
     .context("spawn_blocking panicked")??;
 
-    let resp: serde_json::Value =
-        serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
-            .context("Failed to parse Firecrawl response")?;
+    let resp: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
+        .context("Failed to parse Firecrawl response")?;
 
     if let Some(err) = resp.get("error") {
         anyhow::bail!("Firecrawl: {}", err);

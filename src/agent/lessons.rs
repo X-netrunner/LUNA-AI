@@ -98,7 +98,8 @@ pub fn load() -> Vec<Lesson> {
 
 fn rank(items: &mut [Lesson]) {
     items.sort_by(|a, b| {
-        a.failed_turns.cmp(&b.failed_turns)
+        a.failed_turns
+            .cmp(&b.failed_turns)
             .then(b.clean_tool_turns.cmp(&a.clean_tool_turns))
             .then(b.hits.cmp(&a.hits))
             .then(b.ts.cmp(&a.ts))
@@ -111,13 +112,14 @@ fn save(mut items: Vec<Lesson>) -> Result<(), String> {
     items.truncate(MAX_LESSONS);
     std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;
     let tmp = store_path().with_extension("json.tmp");
-    let text = serde_json::to_vec_pretty(&Store { lessons: items })
-        .map_err(|e| e.to_string())?;
+    let text = serde_json::to_vec_pretty(&Store { lessons: items }).map_err(|e| e.to_string())?;
     let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
     file.write_all(&text).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, store_path()).map_err(|e| e.to_string())?;
-    std::fs::File::open(dir()).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+    std::fs::File::open(dir())
+        .and_then(|f| f.sync_all())
+        .map_err(|e| e.to_string())?;
     drop_old_memory_copies();
     Ok(())
 }
@@ -208,10 +210,32 @@ pub fn acceptable(text: &str) -> bool {
         "secret:",
         "secret=",
         // a lesson never tells her to destroy, send away or weaken anything
-        " delete", " wipe", " erase", " format ", " shred", "disable the firewall", "disable firewall",
-        "disable the antivirus", "disable antivirus", "turn off the firewall", "turn off the antivirus", "upload",
-        "exfiltrat", "send the file", "send files", "send your", "private key", "ssh key", "credentials",
-        "without asking", "never ask", "skip confirmation", "do not tell", "don't tell", "hide ", "/etc/",
+        " delete",
+        " wipe",
+        " erase",
+        " format ",
+        " shred",
+        "disable the firewall",
+        "disable firewall",
+        "disable the antivirus",
+        "disable antivirus",
+        "turn off the firewall",
+        "turn off the antivirus",
+        "upload",
+        "exfiltrat",
+        "send the file",
+        "send files",
+        "send your",
+        "private key",
+        "ssh key",
+        "credentials",
+        "without asking",
+        "never ask",
+        "skip confirmation",
+        "do not tell",
+        "don't tell",
+        "hide ",
+        "/etc/",
         "authorized_keys",
     ];
     if BAD.iter().any(|b| low.contains(b)) {
@@ -219,8 +243,26 @@ pub fn acceptable(text: &str) -> bool {
     }
     // whole words, any form ("Deleting", "uploads,"): advice never destroys, sends away or hides anything
     const STEMS: &[&str] = &[
-        "delet", "remov", "wipe", "wiping", "eras", "shred", "trash", "unlink", "purg", "upload", "exfiltrat",
-        "transfer", "email", "credential", "disabl", "bypass", "hide", "hiding", "secret", "passw",
+        "delet",
+        "remov",
+        "wipe",
+        "wiping",
+        "eras",
+        "shred",
+        "trash",
+        "unlink",
+        "purg",
+        "upload",
+        "exfiltrat",
+        "transfer",
+        "email",
+        "credential",
+        "disabl",
+        "bypass",
+        "hide",
+        "hiding",
+        "secret",
+        "passw",
     ];
     if low
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -244,7 +286,10 @@ pub fn add(text: &str, kind: &str, tool: &str) -> Option<Lesson> {
     let mut t = text.split_whitespace().collect::<Vec<_>>().join(" ");
     t = t.trim_matches(|c| c == '"' || c == '\'').trim().to_string();
     for p in ["Lesson learned:", "LESSON:", "Lesson:"] {
-        if t.len() > p.len() && t.get(..p.len()).is_some_and(|head| head.eq_ignore_ascii_case(p)) {
+        if t.len() > p.len()
+            && t.get(..p.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(p))
+        {
             t = t[p.len()..].trim().to_string();
         }
     }
@@ -261,7 +306,9 @@ pub fn add(text: &str, kind: &str, tool: &str) -> Option<Lesson> {
             it.text = t.clone();
         }
         let kept = it.clone();
-        save(items).map_err(|e| tracing::warn!("Could not save lesson: {e}")).ok()?;
+        save(items)
+            .map_err(|e| tracing::warn!("Could not save lesson: {e}"))
+            .ok()?;
         return Some(kept);
     }
     let l = Lesson {
@@ -276,7 +323,9 @@ pub fn add(text: &str, kind: &str, tool: &str) -> Option<Lesson> {
         clean_tool_turns: 0,
     };
     items.push(l.clone());
-    save(items).map_err(|e| tracing::warn!("Could not save lesson: {e}")).ok()?;
+    save(items)
+        .map_err(|e| tracing::warn!("Could not save lesson: {e}"))
+        .ok()?;
     Some(l)
 }
 
@@ -308,11 +357,24 @@ pub fn list() -> String {
         .enumerate()
         .map(|(i, l)| {
             let x = if l.hits > 1 || l.exposures > 0 {
-                format!("  (observations {}; shown {}; failed turns {}; clean tool turns {})", l.hits, l.exposures, l.failed_turns, l.clean_tool_turns)
+                format!(
+                    "  (observations {}; shown {}; failed turns {}; clean tool turns {})",
+                    l.hits, l.exposures, l.failed_turns, l.clean_tool_turns
+                )
             } else {
                 String::new()
             };
-            format!("{:2}. {}{}{}", i + 1, l.text, x, if l.failed_turns >= 3 { " [suspended: repeated tool failures]" } else { "" })
+            format!(
+                "{:2}. {}{}{}",
+                i + 1,
+                l.text,
+                x,
+                if l.failed_turns >= 3 {
+                    " [suspended: repeated tool failures]"
+                } else {
+                    ""
+                }
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -355,28 +417,45 @@ pub fn extract_tool_name(call: &str) -> String {
     let s = call.trim_start();
     let s = s.strip_prefix("<|tool_call|>").unwrap_or(s).trim_start();
     let s = s.strip_prefix("call:").unwrap_or(s).trim_start();
-    s.split(['(', ' ', '{', ':']).next().unwrap_or("").trim().to_string()
+    s.split(['(', ' ', '{', ':'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 /// Track observed outcomes, not success claims. Repeated failures suspend advice.
 pub fn observe(config: &LunaConfig, prompt: &str, trace: &[Message]) {
-    if EXTERNAL.load(Ordering::Relaxed) || !config.agent.learn_from_mistakes { return; }
+    if EXTERNAL.load(Ordering::Relaxed) || !config.agent.learn_from_mistakes {
+        return;
+    }
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut items = load();
     let mut changed = false;
     for lesson in &mut items {
-        if prompt.lines().any(|line| line == format!("- {}", lesson.text)) {
+        if prompt
+            .lines()
+            .any(|line| line == format!("- {}", lesson.text))
+        {
             lesson.exposures = lesson.exposures.saturating_add(1);
-            let relevant: Vec<_> = trace.windows(2).filter(|pair| {
-                if pair[0].role != "assistant" || pair[1].role != "tool" || lesson.tool.is_empty() {
-                    return false;
-                }
-                let name = extract_tool_name(&pair[0].content);
-                name == lesson.tool
-            }).collect();
+            let relevant: Vec<_> = trace
+                .windows(2)
+                .filter(|pair| {
+                    if pair[0].role != "assistant"
+                        || pair[1].role != "tool"
+                        || lesson.tool.is_empty()
+                    {
+                        return false;
+                    }
+                    let name = extract_tool_name(&pair[0].content);
+                    name == lesson.tool
+                })
+                .collect();
             if relevant.iter().any(|pair| {
                 let c = pair[1].content.trim_start().to_ascii_lowercase();
-                c.starts_with("error:") || c.starts_with("project verification failed") || c.starts_with("failed (exit")
+                c.starts_with("error:")
+                    || c.starts_with("project verification failed")
+                    || c.starts_with("failed (exit")
             }) {
                 lesson.failed_turns = lesson.failed_turns.saturating_add(1);
             } else if !relevant.is_empty() {
@@ -388,7 +467,9 @@ pub fn observe(config: &LunaConfig, prompt: &str, trace: &[Message]) {
         }
     }
     if changed {
-        if let Err(e) = save(items) { tracing::warn!("Cannot persist lesson outcomes: {e}"); }
+        if let Err(e) = save(items) {
+            tracing::warn!("Cannot persist lesson outcomes: {e}");
+        }
     }
 }
 
@@ -502,7 +583,8 @@ pub fn failures(trace: &[Message]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (i, m) in trace.iter().enumerate() {
         let c = m.content.trim_start();
-        let is_err = c.starts_with("Error:") || c.starts_with("ERROR:")
+        let is_err = c.starts_with("Error:")
+            || c.starts_with("ERROR:")
             || c.starts_with("Project verification failed")
             || c.starts_with("Refused:")
             || c.starts_with("Security command failed")
@@ -567,14 +649,27 @@ pub fn exchange_for(
     }
     let tool = extract_tool_name(&f[0].0);
     // Reflection must see observed recovery, not just a claimed final answer.
-    let recovery = trace.windows(2)
+    let recovery = trace
+        .windows(2)
         .filter(|pair| pair[0].role == "assistant" && pair[1].role == "tool")
-        .filter(|pair| !pair[1].content.trim_start().to_ascii_lowercase().starts_with("error:"))
-        .rev().take(3)
-        .map(|pair| format!("{} -> {}",
-            crate::util::truncate(&pair[0].content, 160),
-            crate::util::truncate(&pair[1].content, 240)))
-        .collect::<Vec<_>>().join("\n");
+        .filter(|pair| {
+            !pair[1]
+                .content
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("error:")
+        })
+        .rev()
+        .take(3)
+        .map(|pair| {
+            format!(
+                "{} -> {}",
+                crate::util::truncate(&pair[0].content, 160),
+                crate::util::truncate(&pair[1].content, 240)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let fails = f
         .iter()
         .map(|(c, e)| format!("{c} -> {e}"))
@@ -619,8 +714,13 @@ async fn reflect(config: LunaConfig, ex: Exchange) {
         OllamaClient::new(&config.llm.base_url, &config.llm.model, 0.2, 160).term_output(false);
     // the record goes in as quoted data, its own markers stripped so it cannot close the quote early
     let data = ex.text.replace('<', "&lt;").replace('>', "&gt;");
-    let ctx = vec![Message::system(REFLECT.to_string()), Message::user(format!("<data>\n{data}\n</data>"))];
-    let Ok(Ok(resp)) = tokio::time::timeout(std::time::Duration::from_secs(45), client.chat(&ctx, None)).await else {
+    let ctx = vec![
+        Message::system(REFLECT.to_string()),
+        Message::user(format!("<data>\n{data}\n</data>")),
+    ];
+    let Ok(Ok(resp)) =
+        tokio::time::timeout(std::time::Duration::from_secs(45), client.chat(&ctx, None)).await
+    else {
         return;
     };
     let OllamaResponse::Text { text, .. } = resp else {
@@ -753,12 +853,22 @@ mod tests {
         forget(None).unwrap();
         assert!(load().is_empty());
         assert!(forget(Some(3)).is_err());
-        let learned = add("Before changing a setting read its current value first.", "tool", "read_file").unwrap();
+        let learned = add(
+            "Before changing a setting read its current value first.",
+            "tool",
+            "read_file",
+        )
+        .unwrap();
         let prompt = format!("- {}", learned.text);
         let mut config = LunaConfig::default();
         config.agent.learn_from_mistakes = true;
-        let trace = vec![Message::assistant("read_file({})"), Message::tool("Error: missing file")];
-        for _ in 0..3 { observe(&config, &prompt, &trace); }
+        let trace = vec![
+            Message::assistant("read_file({})"),
+            Message::tool("Error: missing file"),
+        ];
+        for _ in 0..3 {
+            observe(&config, &prompt, &trace);
+        }
         let stored = load();
         assert_eq!(stored[0].failed_turns, 3);
         assert_eq!(stored[0].exposures, 3);
@@ -768,7 +878,12 @@ mod tests {
         // A failed write must not be reported as learned or erase existing memory.
         let tmp = store_path().with_extension("json.tmp");
         std::fs::create_dir(&tmp).unwrap();
-        assert!(add("Before changing a setting read its current value first.", "tool", "test").is_none());
+        assert!(add(
+            "Before changing a setting read its current value first.",
+            "tool",
+            "test"
+        )
+        .is_none());
         assert!(forget(None).is_err());
         std::fs::remove_dir(tmp).unwrap();
         assert!(load().is_empty());
@@ -815,10 +930,24 @@ mod tests {
 
     #[test]
     fn tool_name_extraction_from_template_markers() {
-        assert_eq!(extract_tool_name("<|tool_call|>project_context {\"path\": \"/x\"}<|/tool_call|>"), "project_context");
-        assert_eq!(extract_tool_name("<|tool_call|>verify_project {\"project_path\": \"/x\"}<|/tool_call|>"), "verify_project");
-        assert_eq!(extract_tool_name("call:write_file({\"path\": \"/x\"})"), "write_file");
-        assert_eq!(extract_tool_name("nmap_scan {\"target\": \"127.0.0.1\"}"), "nmap_scan");
+        assert_eq!(
+            extract_tool_name("<|tool_call|>project_context {\"path\": \"/x\"}<|/tool_call|>"),
+            "project_context"
+        );
+        assert_eq!(
+            extract_tool_name(
+                "<|tool_call|>verify_project {\"project_path\": \"/x\"}<|/tool_call|>"
+            ),
+            "verify_project"
+        );
+        assert_eq!(
+            extract_tool_name("call:write_file({\"path\": \"/x\"})"),
+            "write_file"
+        );
+        assert_eq!(
+            extract_tool_name("nmap_scan {\"target\": \"127.0.0.1\"}"),
+            "nmap_scan"
+        );
     }
 
     #[test]
