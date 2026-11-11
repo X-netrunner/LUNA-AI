@@ -41,6 +41,10 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 #[command(name = "luna", about = "Local AI assistant — fast, personal, yours")]
 struct Args {
+    /// Print one status record for Halcyon (halcyon.status/1) and exit
+    #[arg(long)]
+    health: bool,
+
     /// Override voice mode: basic | jinx | off
     #[arg(long, value_name = "MODE")]
     voice: Option<String>,
@@ -157,6 +161,20 @@ fn session_log_path() -> std::path::PathBuf {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if args.health {
+        let (state, detail) = match config::LunaConfig::load() {
+            Ok(_) => ("ok", "configuration loads".to_string()),
+            Err(e) => (
+                "degraded",
+                format!("configuration problem: {e}").replace('"', "'"),
+            ),
+        };
+        println!(
+            r#"{{"schema":"halcyon.status/1","component":"luna","version":"{}","contract":1,"state":"{state}","detail":"{detail}"}}"#,
+            env!("CARGO_PKG_VERSION")
+        );
+        return Ok(());
+    }
     if args.lessons {
         println!("{}", crate::agent::lessons::list());
         return Ok(());
