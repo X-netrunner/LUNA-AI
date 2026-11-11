@@ -11,10 +11,8 @@ pub struct ShellOutput {
 }
 
 pub async fn run_command(command: &str, sudo_pass: Option<&str>) -> Result<ShellOutput> {
-    let final_cmd = inject_sudo_password(command, sudo_pass);
-    let pass = sudo_pass
-        .filter(|_| final_cmd.contains(SUDO_PASS_ENV))
-        .map(str::to_string);
+    let (final_cmd, wrapped) = inject_sudo_password(command, sudo_pass);
+    let pass = sudo_pass.filter(|_| wrapped).map(str::to_string);
     tracing::debug!("Running: {}", command); // log original, never log password
 
     let output = tokio::task::spawn_blocking(move || {
@@ -176,31 +174,34 @@ fn kill_group(child: &mut std::process::Child) {
 /// A bash function shadows `sudo` so EVERY occurrence in the command (e.g.
 /// after `&&` or `;`) gets the piped password — otherwise the 2nd sudo would
 /// hang waiting for a TTY. `command sudo` bypasses the function for the real call.
-pub fn inject_sudo_password(cmd: &str, sudo_pass: Option<&str>) -> String {
+pub fn inject_sudo_password(cmd: &str, sudo_pass: Option<&str>) -> (String, bool) {
     let cmd = cmd.trim();
 
     // paru/yay escalate privilege themselves — strip the sudo prefix
     if let Some(rest) = cmd.strip_prefix("sudo paru") {
-        return format!("paru{}", rest);
+        return (format!("paru{}", rest), false);
     }
     if let Some(rest) = cmd.strip_prefix("sudo yay") {
-        return format!("yay{}", rest);
+        return (format!("yay{}", rest), false);
     }
 
     if !cmd.contains("sudo ") {
-        return cmd.to_string();
+        return (cmd.to_string(), false);
     }
 
     match sudo_pass {
-        Some(_) => format!(
+        Some(_) => (
+            format!(
             "__luna_pw=\"${SUDO_PASS_ENV}\"; unset {SUDO_PASS_ENV}; sudo() {{ printf '%s\\n' \"$__luna_pw\" | command sudo -S -p '' \"$@\"; }}; {}",
             cmd
+        ),
+            true,
         ),
         None => {
             // No password stored — strip sudo entirely.
             // Command will fail with a permission error, which is far better
             // than hanging forever waiting for terminal input.
-            cmd.replacen("sudo ", "", 1)
+            (cmd.replacen("sudo ", "", 1), false)
         }
     }
 }
@@ -224,7 +225,8 @@ mod sudo_tests {
 
     #[test]
     fn the_password_never_appears_in_the_command_line() {
-        let script = inject_sudo_password("sudo pacman -Syu", Some("hunter2's"));
+        let (script, wrapped) = inject_sudo_password("sudo pacman -Syu", Some("hunter2's"));
+        assert!(wrapped);
         assert!(!script.contains("hunter2"), "{script}");
         assert!(script.contains(&format!("unset {SUDO_PASS_ENV}")));
     }
@@ -241,7 +243,9 @@ mod sudo_tests {
         let out = run_command(&cmd, Some("hunter2")).await.expect("run");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!out.stdout.contains("hunter2"), "{}", out.stdout);
-        let plain = run_command("env", Some("hunter2")).await.expect("run");
+        let plain = run_command("echo $LUNA_SUDO_PASS; env", Some("hunter2"))
+            .await
+            .expect("run");
         assert!(
             !plain.stdout.contains("hunter2"),
             "no sudo in the command, no password in its environment"
